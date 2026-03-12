@@ -106,7 +106,7 @@ def save_trade(d, ticker, t, p, s):
 # 4. Sidebar 控制中心
 # ===============================
 st.sidebar.title("🎮 Command Center")
-initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
+initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=31500, step=1000)
 
 sp500_list = get_sp500_tickers()
 is_manual = st.sidebar.checkbox("Manual Input (for AXTI, ONDS...)")
