@@ -1,7 +1,3 @@
-# ===============================
-# 0. 基礎設定
-# ===============================
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -14,18 +10,30 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 # ===============================
-# 0. 基礎設定 (UI 優化)
+# 0. 基礎設定 (新增字體優化 CSS)
 # ===============================
 PORTFOLIO_SHEET_TITLE = 'US Stock' # 建議更名以符合多股需求
-st.set_page_config(page_title="Pro 量化投資戰情室 V8.3", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V8.4", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 st.markdown("""
     <style>
-    .stMetric, div[data-testid="metric-container"] {
+    /* 強制卡片容器不溢出並縮小數字字體 */
+    [data-testid="stMetricValue"] {
+        font-size: 1.8rem !important;
+        white-space: nowrap !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.9rem !important;
+    }
+    .stMetric {
         border: 1px solid rgba(128, 128, 128, 0.3);
-        padding: 15px;
+        padding: 10px !important;
         border-radius: 10px;
+    }
+    div[data-testid="column"] {
+        width: min-content !important;
+        flex: 1 1 0% !important;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -126,7 +134,7 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 5. 資產運算 (核心更新：實現/未實現損益)
+# 5. 資產運算 (實現/未實現損益)
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -167,14 +175,14 @@ total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 
-# UI: 頂部總覽 (五格顯示)
+# UI: 頂部總覽 (優化字體顯示)
 st.title("🏛️ 專業級資產配置管理")
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("NAV 總資產淨值", f"${total_assets:,.2f}")
-c2.metric("Cash 剩餘購買力", f"${cash:,.2f}")
-c3.metric("Realized 已實現損益", f"${total_realized_pl:,.2f}")
-c4.metric("Unrealized 未實現損益", f"${total_unrealized_pl:,.2f}")
-c5.metric("Total P/L 總損益", f"${total_pl_v:,.2f}", f"{(total_pl_v/initial_capital*100):.2f}%")
+c1.metric("NAV 總值", f"${total_assets:,.1f}") # 減少小數位數以增加顯示空間
+c2.metric("Cash 購買力", f"${cash:,.1f}")
+c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
+c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
+c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
 # ===============================
 # 6. 量化策略引擎
@@ -199,12 +207,11 @@ if hist is not None:
         st.plotly_chart(fig, use_container_width=True)
 
     with r_col:
-        st.subheader("🛠️ 量化策略建議 (V8.3)")
+        st.subheader("🛠️ 量化策略建議 (V8.4)")
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
         held_shares = target_info['Shares'] if target_info else 0
         current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
         
-        # 今日冷卻偵測
         today_str = date.today().strftime('%Y-%m-%d')
         today_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] == today_str)]
         has_sold_today = not today_trades[today_trades['Type'].str.contains("賣出")].empty
@@ -220,19 +227,22 @@ if hist is not None:
         elif score >= 3:
             buy_price = (last['BB_lower'] + last['SMA20']) / 2
             suggest_qty = math.floor((cash * 0.2) / buy_price)
-            st.success(f"🔥 建議狀態：分批買入 (Buy)")
-            st.markdown(f"📍 **建議買入價格**: :green[**${buy_price:.2f}**] 以下")
-            if current_weight >= 0.3: st.warning("⚠️ 警示：單一持股佔比超過 30%。")
-            elif suggest_qty >= 1: st.markdown(f"📋 **建議操作股數**: :orange[**{suggest_qty}**] 股")
+            st.success(f"🔥 建議：分批買入")
+            st.markdown(f"📍 **建議價**: :green[**${buy_price:.2f}**] 以下")
+            if current_weight >= 0.3: st.warning("⚠️ 警示：單一持股佔比 > 30%。")
+            elif suggest_qty >= 1: st.markdown(f"📋 **建議股數**: :orange[**{suggest_qty}**] 股")
         elif score <= 1 and held_shares > 1:
             sell_price = last['BB_upper']
             sell_qty = math.ceil(held_shares * 0.25)
-            st.error(f"⚠️ 建議狀態：分批減碼 (Sell)")
-            st.markdown(f"📍 **建議賣出價格**: :red[**${sell_price:.2f}**] 以上")
-            st.markdown(f"📋 **建議操作股數**: :orange[**{sell_qty}**] 股")
-        else: st.warning("⚖️ 建議狀態：觀望 (Hold)")
+            st.error(f"⚠️ 建議：分批減碼")
+            st.markdown(f"📍 **建議價**: :red[**${sell_price:.2f}**] 以上")
+            st.markdown(f"📋 **建議股數**: :orange[**{sell_qty}**] 股")
+        else: st.warning("⚖️ 狀態：觀望 (Hold)")
             
         st.divider()
+        st.write(f"**持倉數據摘要**:")
+        st.write(f"- 持有股數: `{held_shares:.1f}`")
+        st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控: 30%)")
         st.write(f"**持倉數據摘要**:")
         st.write(f"- 持有股數: `{held_shares:.2f}`")
         st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控: 30%)")
