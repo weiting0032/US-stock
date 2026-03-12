@@ -243,6 +243,4 @@ if hist is not None:
         st.write(f"**持倉數據摘要**:")
         st.write(f"- 持有股數: `{held_shares:.1f}`")
         st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控: 30%)")
-        st.write(f"**持倉數據摘要**:")
-        st.write(f"- 持有股數: `{held_shares:.2f}`")
-        st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控: 30%)")
+
