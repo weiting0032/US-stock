@@ -92,7 +92,7 @@ def get_realtime_prices(tickers):
 # 3. Sidebar 控制台
 # ===============================
 st.sidebar.header("🕹️ 帳戶管理")
-initial_capital = st.sidebar.number_input("初始總資金", value=50000, step=1000)
+initial_capital = st.sidebar.number_input("初始總資金", value=32000, step=1000)
 
 st.sidebar.markdown("---")
 st.sidebar.header("➕ 新增交易")
