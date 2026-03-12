@@ -105,17 +105,26 @@ def get_realtime_batch(tickers):
     return data
 
 # ===============================
-# 4. Sidebar: 操作面板
+# 4. Sidebar: 操作面板 (支援手動輸入)
 # ===============================
 st.sidebar.header("🕹️ 控制中心")
-initial_capital = st.sidebar.number_input("帳戶初始資金 (USD)", value=32000, step=1000)
+initial_capital = st.sidebar.number_input("帳戶初始資金 (USD)", value=30000, step=1000)
 
 sp500_list = get_sp500_tickers()
 
+# 在 Form 之外先決定輸入模式，因為 st.checkbox 不能放在 Form 裡面改變 Layout
+is_manual = st.sidebar.checkbox("找不到標的？開啟手動輸入")
+
 with st.sidebar.form("trade_entry"):
     st.subheader("新增交易紀錄")
-    selected_stock = st.selectbox("搜尋標的 (輸入名稱或代碼)", options=sp500_list)
-    ticker_clean = selected_stock.split(" - ")[0]
+    
+    if is_manual:
+        # 手動輸入模式：輸入任何代碼 (如 AXTI, ONDS, 甚至 2330.TW)
+        ticker_clean = st.text_input("請輸入完整代碼 (例如: ONDS)").upper().strip()
+    else:
+        # 下拉搜尋模式
+        selected_stock = st.selectbox("搜尋標的 (S&P 500)", options=sp500_list)
+        ticker_clean = selected_stock.split(" - ")[0]
     
     t_type = st.selectbox("類型", ["買入 (Buy)", "賣出 (Sell)"])
     t_date = st.date_input("日期", date.today())
@@ -123,7 +132,9 @@ with st.sidebar.form("trade_entry"):
     t_shares = st.number_input("股數", min_value=0.01, format="%.2f")
     
     if st.form_submit_button("存入紀錄"):
-        if save_trade(t_date, ticker_clean, t_type, t_price, t_shares):
+        if not ticker_clean:
+            st.error("請輸入或選擇有效的股票代碼")
+        elif save_trade(t_date, ticker_clean, t_type, t_price, t_shares):
             st.success(f"{ticker_clean} 成功同步至雲端")
             st.cache_data.clear()
             st.rerun()
