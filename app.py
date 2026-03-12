@@ -14,7 +14,7 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 # ===============================
-# 0. 基礎設定
+# 0. 基礎設定 (UI 優化)
 # ===============================
 PORTFOLIO_SHEET_TITLE = 'US Stock' # 建議更名以符合多股需求
 st.set_page_config(page_title="Pro 量化投資戰情室 V8.3", layout="wide")
@@ -102,7 +102,7 @@ def save_trade(d, ticker, t, p, s):
 # 4. Sidebar 控制中心
 # ===============================
 st.sidebar.title("🎮 Command Center")
-initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=31500, step=1000)
+initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
 
 sp500_list = get_sp500_tickers()
 is_manual = st.sidebar.checkbox("Manual Input (for AXTI, ONDS...)")
@@ -132,7 +132,7 @@ trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
 portfolio_cal = []
 cash = initial_capital
-total_realized_pl = 0  # 總已實現損益
+total_realized_pl = 0
 
 for ticker in unique_tickers:
     t_df = trades_df[trades_df['Ticker'] == ticker]
@@ -148,9 +148,7 @@ for ticker in unique_tickers:
         else:
             if shares_h > 0:
                 avg_cost = cost_b / shares_h
-                # 已實現損益 = (賣出價 - 平均成本) * 賣出股數
                 ticker_realized_pl += (r['Price'] - avg_cost) * r['Shares']
-                # 更新剩餘成本庫存
                 cost_b -= avg_cost * r['Shares']
             shares_h -= r['Shares']
             cash += val
@@ -165,23 +163,21 @@ for ticker in unique_tickers:
             "MktVal": shares_h*real_p, "RealPrice": real_p, "Unrealized": unrealized_pl
         })
 
-# 統計計算
 total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
-total_pl_v = total_assets - initial_capital # 保留總損益邏輯
+total_pl_v = total_assets - initial_capital
 
-# UI: 頂部總覽 (新增實現/未實現顯示)
+# UI: 頂部總覽 (五格顯示)
 st.title("🏛️ 專業級資產配置管理")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總資產淨值", f"${total_assets:,.2f}")
 c2.metric("Cash 剩餘購買力", f"${cash:,.2f}")
 c3.metric("Realized 已實現損益", f"${total_realized_pl:,.2f}")
 c4.metric("Unrealized 未實現損益", f"${total_unrealized_pl:,.2f}")
-# 保留原本的總損益 (Total Profit/Loss)
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.2f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
 # ===============================
-# 6. 量化策略引擎 (維持 V8.2 功能)
+# 6. 量化策略引擎
 # ===============================
 st.divider()
 analyze_target = st.selectbox("🎯 Target Analysis", options=unique_tickers if unique_tickers else ["NVDA"])
@@ -208,7 +204,7 @@ if hist is not None:
         held_shares = target_info['Shares'] if target_info else 0
         current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
         
-        # 今日冷卻偵測邏輯
+        # 今日冷卻偵測
         today_str = date.today().strftime('%Y-%m-%d')
         today_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] == today_str)]
         has_sold_today = not today_trades[today_trades['Type'].str.contains("賣出")].empty
@@ -240,5 +236,3 @@ if hist is not None:
         st.write(f"**持倉數據摘要**:")
         st.write(f"- 持有股數: `{held_shares:.2f}`")
         st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控: 30%)")
-        st.info(f"🎯 **目標獲利 (TP)**: `${(curr_p + 1.5*last['ATR']):.2f}`")
-        st.error(f"🛑 **硬性停損 (SL)**: `${(curr_p - 2*last['ATR']):.2f}`")
