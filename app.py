@@ -17,7 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 # ===============================
 # 0. 基礎設定
 # ===============================
-PORTFOLIO_SHEET_TITLE = 'Streamlit US Stock' # 建議更名以符合多股需求
+PORTFOLIO_SHEET_TITLE = 'US Stock' # 建議更名以符合多股需求
 st.set_page_config(page_title="Pro 量化投資戰情室 V8.1", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
