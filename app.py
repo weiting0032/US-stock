@@ -108,7 +108,7 @@ def get_realtime_batch(tickers):
 # 4. Sidebar: 操作面板 (支援手動輸入)
 # ===============================
 st.sidebar.header("🕹️ 控制中心")
-initial_capital = st.sidebar.number_input("帳戶初始資金 (USD)", value=30000, step=1000)
+initial_capital = st.sidebar.number_input("帳戶初始資金 (USD)", value=32000, step=1000)
 
 sp500_list = get_sp500_tickers()
 
