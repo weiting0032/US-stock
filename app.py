@@ -238,45 +238,43 @@ if hist is not None:
         st.plotly_chart(fig, use_container_width=True)
 
     with r_col:
-        st.subheader("🛠️ 量化策略建議 (Pro V7.9)")
+        st.subheader("🛠️ 量化策略建議 (V8.0)")
         
-        # [修正] 恢復計算該股票的現有持股與總資產權重，用於計算股數
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
         held_shares = target_info['Shares'] if target_info else 0
         current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
         
-        # 支撐壓力位 & 量化核心
         atr = last['ATR']
-        buy_entry = (last['BB_lower'] + last['SMA20']) / 2 # 建議支撐買點
-        sell_exit = last['BB_upper'] # 建議壓力賣點
+        buy_entry = (last['BB_lower'] + last['SMA20']) / 2 
+        sell_exit = last['BB_upper'] 
         
-        # 策略評分 (RSI + MACD + SMA)
         score = 0
-        if curr_p > last['SMA200']: score += 2 # 多頭趨勢
-        if last['RSI'] < 45: score += 1 # 股價偏低
-        if last['Hist'] > 0: score += 1 # MACD 翻多
+        if curr_p > last['SMA200']: score += 2 
+        if last['RSI'] < 45: score += 1 
+        if last['Hist'] > 0: score += 1 
         
-        # UI 建議卡片顯示
         if score >= 3:
-            # [修正] 買入建議中顯示建議股數 (基於 20% 剩餘現金)
             suggest_qty = math.floor((cash * 0.2) / buy_entry)
-            st.success(f"🔥 建議狀態：分批買入 (Buy)\n(預計配置：20% 現金)")
+            st.success(f"🔥 建議狀態：分批買入 (Buy)")
             st.write(f"📍 **建議買入區間**: `${buy_entry:.2f}` ~ `${last['BB_lower']:.2f}`")
             if current_weight > 0.3:
-                st.warning("⚠️ 警示：單一持股佔比過高（>30%），不建議再加碼。")
-            elif suggest_qty > 0:
-                st.write(f"📋 **建議操作股數**: `{suggest_qty}` 股") # 恢復顯示
+                st.warning("⚠️ 警示：單一持股佔比過高，不建議再加碼。")
+            elif suggest_qty >= 1: # 只有大於1股才顯示
+                st.write(f"📋 **建議操作股數**: `{suggest_qty}` 股")
 
-        elif score <= 1 and held_shares > 0:
-            # [修正] 賣出建議中顯示建議股數 (基於 25% 現有持股)
+        elif score <= 1 and held_shares > 1: # 剩餘股數太少則不建議
             sell_qty = math.ceil(held_shares * 0.25)
-            st.error(f"⚠️ 建議狀態：分批減碼 (Sell)\n(預計減持：25% 倉位)")
-            st.write(f"📍 **建議賣出區間**: `${sell_exit:.2f}` 以上")
-            if sell_qty > 0:
-                st.write(f"📋 **建議操作股數**: `{sell_qty}` 股") # 恢復顯示
+            
+            # [優化] 增加顯示邏輯：如果權重已經降到很低 (例如 < 5%)，則不再建議減碼
+            if current_weight < 0.05:
+                st.info("⚖️ 狀態：底倉持有中\n(權重已低，不需進一步減碼)")
+            else:
+                st.error(f"⚠️ 建議狀態：分批減碼 (Sell)")
+                st.write(f"📍 **建議賣出區間**: `${sell_exit:.2f}` 以上")
+                st.write(f"📋 **建議操作股數**: `{sell_qty}` 股")
+                st.caption(f"目前權重: {current_weight*100:.1f}%, 建議減持至指標修復")
         else:
             st.warning("⚖️ 建議狀態：觀望 (Hold)")
-            st.write("📊 **目前處於中性區間**，等待突破或回測。")
             
         st.markdown("---")
         st.write("📊 **風控與停損停利參考 (ATR 策略)**")
