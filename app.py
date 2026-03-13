@@ -1,13 +1,12 @@
 # ===============================
-# 0. 基礎設定 (UI 與 核心庫)
+# 0. 基礎設定 (V9.95 整合精確指令版)
 # ===============================
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import math
 import gspread
 import requests
@@ -19,101 +18,11 @@ TG_TOKEN = st.secrets.get("TG_TOKEN", "8252298047:AAHJ_HSd_vrZlAC6RHtNQYaW6nJ1ey
 TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731")).strip()
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.9", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.95", layout="wide")
+# 每 15 秒自動刷新，確保自動掃描引擎持續運行
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
-def send_telegram_msg(message):
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        res = requests.post(url, json=payload, timeout=5)
-        return res.json().get("ok")
-    except: return False
-
-@st.cache_data(ttl=600)
-def get_strategy_data(symbol):
-    try:
-        df = yf.Ticker(symbol).history(period="2y")
-        if df.empty: return None
-        # 指標計算
-        df['SMA20'] = df['Close'].rolling(20).mean()
-        df['SMA200'] = df['Close'].rolling(200).mean()
-        std = df['Close'].rolling(20).std()
-        df['BB_upper'] = df['SMA20'] + 2 * std
-        df['BB_lower'] = df['SMA20'] - 2 * std
-        # ATR 風控計算 (對應圖中 2*ATR 與 3*ATR)
-        high_low = df['High'] - df['Low']
-        high_close = (df['High'] - df['Close'].shift()).abs()
-        low_close = (df['Low'] - df['Close'].shift()).abs()
-        df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
-        # 動能評分用
-        delta = df['Close'].diff()
-        df['RSI'] = 100 - (100 / (1 + (delta.clip(lower=0).rolling(14).mean() / (-delta.clip(upper=0).rolling(14).mean() + 1e-9))))
-        return df
-    except: return None
-        
-# ===============================
-# 3. 自動化策略引擎 (本版核心)
-# ===============================
-def run_auto_scanner(portfolio_list):
-    """遍歷所有持股，檢查是否符合發送條件"""
-    for item in portfolio_list:
-        ticker = item['Ticker']
-        current_shares = item['Shares']
-        
-        hist = get_strategy_data(ticker)
-        if hist is None: continue
-        
-        last = hist.iloc[-1]
-        curr_p = last['Close']
-        curr_atr = last['ATR']
-        
-        # 評分邏輯
-        score = 0
-        if curr_p > last['SMA200']: score += 2
-        if last['RSI'] < 45: score += 1
-        
-        # 定義進出場目標價
-        buy_target = (last['BB_lower'] + last['SMA20']) / 2
-        sell_target = last['BB_upper']
-        
-        msg = ""
-        # 條件 A: 買入指令 (評分高 + 價格接近進場價 1% 內)
-        if score >= 3 and curr_p <= buy_target * 1.01:
-            # 參考圖中邏輯：建議加碼或建倉
-            suggested_shares = 10 # 這裡可依您的權重邏輯修改，例如總資產 5%
-            msg = (
-                f"🔥 **【買入指令建議】**\n"
-                f"📌 標的: `{ticker}`\n"
-                f"💰 現價: `${curr_p:.2f}`\n"
-                f"✅ 建議買入價: `${buy_target:.2f}`\n"
-                f"📊 建議操作: **買入 {suggested_shares} 股**\n"
-                f"🛡️ 建議停損 (2*ATR): `${(curr_p - 2*curr_atr):.2f}`\n"
-                f"🚀 建議獲利 (3*ATR): `${(curr_p + 3*curr_atr):.2f}`"
-            )
-
-        # 條件 B: 賣出指令 (評分低 + 價格接近出場價 1% 內)
-        elif score <= 1 and curr_p >= sell_target * 0.99 and current_shares > 0:
-            # 參考圖中「建議減碼」邏輯：分批減碼 (例如減掉 50%)
-            reduce_shares = math.ceil(current_shares * 0.5)
-            msg = (
-                f"⚠️ **【賣出指令建議】**\n"
-                f"📌 標的: `{ticker}`\n"
-                f"💰 現價: `${curr_p:.2f}`\n"
-                f"❌ 建議出場價: `${sell_target:.2f}`\n"
-                f"📊 建議操作: **分批減碼 {reduce_shares} 股**\n"
-                f"📉 目前持股: {current_shares} 股"
-            )
-
-        # 發送並記錄 (每日僅限一次)
-        if msg:
-            sent_key = f"notify_{ticker}_{date.today()}"
-            if sent_key not in st.session_state:
-                if send_telegram_msg(msg):
-                    st.session_state[sent_key] = True
-                    st.toast(f"已發送 {ticker} 交易指令！")
-
-# 自定義 CSS (保持 V9.5 樣式)
+# 自定義 CSS
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.8rem !important; white-space: nowrap !important; }
@@ -127,34 +36,35 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ===============================
-# 2. 數據獲取與處理 (原邏輯)
+# 1. 通訊與數據核心函數
 # ===============================
-@st.cache_data(ttl=86400)
-def get_sp500_tickers():
-    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
-    headers = {"User-Agent": "Mozilla/5.0"}
+def send_telegram_msg(message):
+    """發送訊息至 Telegram"""
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        df = pd.read_html(response.text)[0]
-        df['Display'] = df['Symbol'].str.replace('.', '-', regex=False) + " - " + df['Security']
-        return sorted(df['Display'].tolist())
-    except:
-        return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
+        res = requests.post(url, json=payload, timeout=5)
+        return res.json().get("ok")
+    except: return False
 
 @st.cache_data(ttl=600)
-def get_analysis(symbol):
+def get_unified_analysis(symbol):
+    """統一技術指標計算邏輯"""
     try:
         df = yf.Ticker(symbol).history(period="2y")
         if df.empty: return None
+        # 均線與布林帶
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA200'] = df['Close'].rolling(200).mean()
         std = df['Close'].rolling(20).std()
         df['BB_upper'] = df['SMA20'] + 2 * std
         df['BB_lower'] = df['SMA20'] - 2 * std
-        high_low = df['High'] - df['Low']
-        high_close = (df['High'] - df['Close'].shift()).abs()
-        low_close = (df['Low'] - df['Close'].shift()).abs()
-        df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
+        # ATR 風控計算
+        hl = df['High'] - df['Low']
+        hc = (df['High'] - df['Close'].shift()).abs()
+        lc = (df['Low'] - df['Close'].shift()).abs()
+        df['ATR'] = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
+        # RSI 與 MACD
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
@@ -168,7 +78,7 @@ def get_analysis(symbol):
     except: return None
 
 # ===============================
-# 3. Google Sheets (保持原邏輯)
+# 2. Google Sheets 雲端連線
 # ===============================
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
@@ -179,11 +89,10 @@ def load_trades():
         sh = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE).sheet1
         df = pd.DataFrame(sh.get_all_records())
         if df.empty: return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
-        for c in ['Price','Shares','Total']:
+        for c in ['Price', 'Shares', 'Total']:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         return df
-    except:
-        return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
+    except: return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
 
 def save_trade(d, ticker, t, p, s):
     try:
@@ -195,29 +104,85 @@ def save_trade(d, ticker, t, p, s):
 def sync_nav_history(total_assets):
     try:
         ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
-        try:
-            ws_history = ss.worksheet("History")
+        try: ws_history = ss.worksheet("History")
         except:
             ws_history = ss.add_worksheet(title="History", rows="1000", cols="2")
             ws_history.append_row(["Date", "Total Assets"])
         today_str = date.today().strftime('%Y-%m-%d')
         existing = ws_history.get_all_records()
-        if not existing or existing[-1].get("Date") != today_str:
+        if not (existing and existing[-1].get("Date") == today_str):
             ws_history.append_row([today_str, float(total_assets)])
         return pd.DataFrame(ws_history.get_all_records())
     except: return None
+
+# ===============================
+# 3. 自動化掃描與指令生成引擎
+# ===============================
+def run_auto_scanner(portfolio_list):
+    """背景掃描所有持股，偵測是否達到買賣指令觸發價"""
+    for item in portfolio_list:
+        ticker = item['Ticker']
+        current_shares = item['Shares']
+        hist = get_unified_analysis(ticker)
+        if hist is None: continue
+        
+        last = hist.iloc[-1]
+        curr_p, curr_atr = last['Close'], last['ATR']
+        
+        # 評分邏輯 (加權計算)
+        score = 0
+        if curr_p > last['SMA200']: score += 2
+        if last['RSI'] < 45: score += 1
+        if last['Hist'] > 0: score += 1
+        vol_ratio = last['Volume'] / last['Vol_MA20']
+        if vol_ratio > 1.5 and last['Close'] > last['Open']: score += 1
+        
+        buy_target = (last['BB_lower'] + last['SMA20']) / 2
+        sell_target = last['BB_upper']
+        
+        msg = ""
+        # 買入指令 (分數高且接近建議價 1%)
+        if score >= 3 and curr_p <= buy_target * 1.01:
+            msg = (
+                f"🔥 **【買入指令建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
+                f"✅ 建議買入價: `${buy_target:.2f}` 以下\n📊 建議操作: **分批買入 10 股**\n"
+                f"🛡️ 建議停損: `${(curr_p - 2*curr_atr):.2f}`\n🚀 建議獲利: `${(curr_p + 3*curr_atr):.2f}`\n評分: {score}/5"
+            )
+        # 賣出指令 (分數低且接近上軌 1%)
+        elif score <= 1 and curr_p >= sell_target * 0.99 and current_shares > 0:
+            reduce_shares = math.ceil(current_shares * 0.5)
+            msg = (
+                f"⚠️ **【賣出指令建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
+                f"❌ 建議出場價: `${sell_target:.2f}` 以上\n📊 建議操作: **分批減碼 {reduce_shares} 股**\n"
+                f"📉 目前持股: {current_shares} 股\n評分: {score}/5"
+            )
+
+        if msg:
+            sent_key = f"auto_{ticker}_{date.today()}"
+            if sent_key not in st.session_state:
+                if send_telegram_msg(msg):
+                    st.session_state[sent_key] = True
+                    st.toast(f"已發送 {ticker} 交易通知！")
 
 # ===============================
 # 4. Sidebar 控制中心
 # ===============================
 st.sidebar.title("🎮 Command Center")
 
-# --- 通訊測試按鈕 ---
-st.sidebar.subheader("📡 通訊監測")
+@st.cache_data(ttl=86400)
+def get_sp500_tickers():
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        df = pd.read_html(response.text)[0]
+        df['Display'] = df['Symbol'].str.replace('.', '-', regex=False) + " - " + df['Security']
+        return sorted(df['Display'].tolist())
+    except: return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla"]
+
 if st.sidebar.button("發送 TG 測試訊息"):
-    test_res = send_telegram_msg("🚀 測試成功！量化投資戰情室已連線。\n測試時間: " + datetime.now().strftime("%H:%M:%S"))
-    if test_res:
-        st.sidebar.success("✅ 已成功送達您的手機！")
+    res = send_telegram_msg(f"🚀 通訊測試成功！\n時間：{datetime.now().strftime('%H:%M:%S')}")
+    if res: st.sidebar.success("✅ 手機已收到！")
 
 st.sidebar.divider()
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
@@ -225,23 +190,21 @@ sp500_list = get_sp500_tickers()
 is_manual = st.sidebar.checkbox("Manual Input (Ticker)")
 
 with st.sidebar.form("trade_entry"):
-    if is_manual:
-        ticker_clean = st.text_input("Enter Ticker").upper().strip()
+    if is_manual: ticker_input = st.text_input("Enter Ticker").upper().strip()
     else:
-        selected_stock = st.selectbox("Search Stock", options=sp500_list)
-        ticker_clean = selected_stock.split(" - ")[0] if selected_stock else ""
+        sel_stock = st.selectbox("Search Stock", options=sp500_list)
+        ticker_input = sel_stock.split(" - ")[0] if sel_stock else ""
     t_type = st.selectbox("Type", ["買入 (Buy)", "賣出 (Sell)"])
     t_date = st.date_input("Date", date.today())
     t_price = st.number_input("Price", min_value=0.01, format="%.2f")
     t_shares = st.number_input("Shares", min_value=0.01, format="%.2f")
     if st.form_submit_button("Sync to Cloud"):
-        if ticker_clean and save_trade(t_date, ticker_clean, t_type, t_price, t_shares):
-            st.success("Synced!")
+        if ticker_input and save_trade(t_date, ticker_input, t_type, t_price, t_shares):
             st.cache_data.clear()
             st.rerun()
 
 # ===============================
-# 5. 資產運算 (核心邏輯)
+# 5. 資產運算與持股清單
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -278,18 +241,15 @@ total_pl_v = total_assets - initial_capital
 history_df = sync_nav_history(total_assets)
 
 # ===============================
-# 6. UI 顯示 (保持原有的美化格式)
+# 6. UI 顯示介面
 # ===============================
-st.title("🏛️ 專業級資產配置管理 V9.6")
+st.title("🏛️ 專業級資產配置管理 V9.95")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
 c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
 c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}", delta=f"{total_unrealized_pl:,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
-
-def color_profit_loss(val):
-    return f"color: {'#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'}"
 
 if history_df is not None and not history_df.empty:
     with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
@@ -298,11 +258,13 @@ if history_df is not None and not history_df.empty:
         fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig_nav, use_container_width=True)
         if portfolio_cal:
-            df_styled = pd.DataFrame(portfolio_cal).style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct']).format({'AvgCost':'${:,.2f}','RealPrice':'${:,.2f}','Unrealized':'${:,.2f}','PL_Pct':'{:.2f}%','MktVal':'${:,.2f}'})
-            st.dataframe(df_styled, use_container_width=True)
+            df_portfolio = pd.DataFrame(portfolio_cal)
+            st.dataframe(df_portfolio.style.format({
+                'AvgCost':'${:,.2f}','RealPrice':'${:,.2f}','Unrealized':'${:,.2f}','PL_Pct':'{:.2f}%','MktVal':'${:,.2f}'
+            }), use_container_width=True)
 
 # ===============================
-# 7. 量化策略引擎 (含 TG 通知邏輯)
+# 7. 量化策略決策中心
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
@@ -314,7 +276,7 @@ else:
     selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
     analyze_ticker = selected_s.split(" - ")[0] if selected_s else "NVDA"
 
-hist = get_analysis(analyze_ticker)
+hist = get_unified_analysis(analyze_ticker)
 if hist is not None:
     l_col, r_col = st.columns([3, 7])
     last = hist.iloc[-1]
@@ -324,55 +286,39 @@ if hist is not None:
         st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
         st.markdown(f'<div class="price-box"><span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br><span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
         
-        target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_ticker), None)
-        held_shares = target_info['Shares'] if target_info else 0
-        
+        # 評分與指令 logic 與 run_auto_scanner 保持一致
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
         if last['Hist'] > 0: score += 1 
-        vol_ratio = last['Volume'] / last['Vol_MA20']
-        if vol_ratio > 1.5 and last['Close'] > last['Open']: score += 1
         
-        notify_msg = ""
+        buy_p = (last['BB_lower'] + last['SMA20']) / 2
+        sell_p = last['BB_upper']
+
         if score >= 3:
-            buy_p = (last['BB_lower'] + last['SMA20']) / 2
             st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
-            if curr_p <= buy_p * 1.01:
-                notify_msg = f"🔔 【買入提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n進場參考價: ${buy_p:.2f}\n評分: {score}/5"
-        elif score <= 1 and held_shares > 0:
-            sell_p = last['BB_upper']
+        elif score <= 1:
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
-            if curr_p >= sell_p * 0.99:
-                notify_msg = f"🔔 【減碼提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n出場參考價: ${sell_p:.2f}\n評分: {score}/5"
-        else: 
+        else:
             st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
-
-        # 發送邏輯 (同標的一天僅發一次)
-        if notify_msg:
-            msg_key = f"sent_{analyze_ticker}_{date.today()}"
-            if msg_key not in st.session_state:
-                send_telegram_msg(notify_msg)
-                st.session_state[msg_key] = True
-                st.toast(f"{analyze_ticker} 通知已送出！", icon="📩")
 
         st.divider()
         st.write(f"🛡️ **ATR 風控 (ATR: {curr_atr:.2f})**")
-        st.write(f"- 建議停損: :red[${(curr_p - 2*curr_atr):.2f}]")
-        st.write(f"- 建議獲利: :green[${(curr_p + 3*curr_atr):.2f}]")
+        st.write(f"- 建議停損 (2*ATR): :red[${(curr_p - 2*curr_atr):.2f}]")
+        st.write(f"- 建議獲利 (3*ATR): :green[${(curr_p + 3*curr_atr):.2f}]")
 
     with r_col:
         df_plot = hist.tail(100)
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
         fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
-        for ma, color in zip(['SMA20','SMA200', 'BB_upper', 'BB_lower'], ['#17BECF','#D62728', 'rgba(173,216,230,0.2)', 'rgba(173,216,230,0.2)']):
+        for ma, color in zip(['SMA20','SMA200', 'BB_upper', 'BB_lower'], ['#17BECF','#D62728', 'rgba(173,216,230,0.1)', 'rgba(173,216,230,0.1)']):
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
-        fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
+# --- 核心：執行自動化持股掃描 ---
 if portfolio_cal:
     run_auto_scanner(portfolio_cal)
-    
-st.success("🤖 自動掃描引擎運行中：已監控您所有持股的價格波動。")
+    st.sidebar.success("🤖 自動掃描引擎：運行中")
