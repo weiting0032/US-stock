@@ -231,10 +231,10 @@ else:
     col_s1, col_s2 = st.columns([1, 2])
     with col_s1: search_manual = st.checkbox("手動輸入代碼")
     with col_s2:
-        if search_manual: analyze_target = st.text_input("請輸入代碼", value="NVDA").upper().strip()
+        if search_manual: analyze_ticker = st.text_input("請輸入代碼", value="NVDA").upper().strip()
         else:
             selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
-            analyze_target = selected_s.split(" - ")[0] if selected_s else "NVDA"
+            analyze_ticker = selected_s.split(" - ")[0] if selected_s else "NVDA"
             
 hist = get_unified_analysis(analyze_ticker)
 if hist is not None:
