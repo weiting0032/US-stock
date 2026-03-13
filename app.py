@@ -15,7 +15,7 @@ from streamlit_autorefresh import st_autorefresh
 
 # --- 憑證設定 ---
 # 優先讀取 Secrets，若無則使用您提供的數值
-TG_TOKEN = st.secrets.get("TG_TOKEN", "8226282394:AAFtOx24a_wcGrqbU_h5M8VFzpKWD0KWRDw").strip()
+TG_TOKEN = st.secrets.get("TG_TOKEN", "8252298047:AAHJ_HSd_vrZlAC6RHtNQYaW6nJ1eywdKx4").strip()
 TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731")).strip()
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
