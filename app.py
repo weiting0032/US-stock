@@ -19,37 +19,99 @@ TG_TOKEN = st.secrets.get("TG_TOKEN", "8252298047:AAHJ_HSd_vrZlAC6RHtNQYaW6nJ1ey
 TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731")).strip()
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.6", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.9", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 def send_telegram_msg(message):
-    """發送訊息並針對 chat not found 提供引導"""
-    if not TG_TOKEN or not TG_CHAT_ID:
-        st.error("❌ 找不到憑證！請檢查 Secrets 設定。")
-        return None
-    
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    
     try:
-        response = requests.post(url, json=payload, timeout=5)
-        result = response.json()
-        if result.get("ok"):
-            return result
-        else:
-            err_desc = result.get("description", "未知錯誤")
-            st.error(f"⚠️ Telegram 錯誤：{err_desc}")
-            
-            # 針對 "chat not found" 的專屬解決方案
-            if "chat not found" in err_desc.lower():
-                st.warning("💡 **解決方案：**")
-                st.markdown(f"1. 請在手機點開此連結: [啟動我的機器人](https://t.me/{(TG_TOKEN.split(':')[0])})")
-                st.markdown("2. 點擊畫面最下方的 **『開始 (Start)』**。")
-                st.markdown("3. 回到這裡再次點擊測試按鈕。")
-            return None
-    except Exception as e:
-        st.error(f"❌ 網路連線失敗：{e}")
-        return None
+        res = requests.post(url, json=payload, timeout=5)
+        return res.json().get("ok")
+    except: return False
+
+@st.cache_data(ttl=600)
+def get_strategy_data(symbol):
+    try:
+        df = yf.Ticker(symbol).history(period="2y")
+        if df.empty: return None
+        # 指標計算
+        df['SMA20'] = df['Close'].rolling(20).mean()
+        df['SMA200'] = df['Close'].rolling(200).mean()
+        std = df['Close'].rolling(20).std()
+        df['BB_upper'] = df['SMA20'] + 2 * std
+        df['BB_lower'] = df['SMA20'] - 2 * std
+        # ATR 風控計算 (對應圖中 2*ATR 與 3*ATR)
+        high_low = df['High'] - df['Low']
+        high_close = (df['High'] - df['Close'].shift()).abs()
+        low_close = (df['Low'] - df['Close'].shift()).abs()
+        df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
+        # 動能評分用
+        delta = df['Close'].diff()
+        df['RSI'] = 100 - (100 / (1 + (delta.clip(lower=0).rolling(14).mean() / (-delta.clip(upper=0).rolling(14).mean() + 1e-9))))
+        return df
+    except: return None
+        
+# ===============================
+# 3. 自動化策略引擎 (本版核心)
+# ===============================
+def run_auto_scanner(portfolio_list):
+    """遍歷所有持股，檢查是否符合發送條件"""
+    for item in portfolio_list:
+        ticker = item['Ticker']
+        current_shares = item['Shares']
+        
+        hist = get_strategy_data(ticker)
+        if hist is None: continue
+        
+        last = hist.iloc[-1]
+        curr_p = last['Close']
+        curr_atr = last['ATR']
+        
+        # 評分邏輯
+        score = 0
+        if curr_p > last['SMA200']: score += 2
+        if last['RSI'] < 45: score += 1
+        
+        # 定義進出場目標價
+        buy_target = (last['BB_lower'] + last['SMA20']) / 2
+        sell_target = last['BB_upper']
+        
+        msg = ""
+        # 條件 A: 買入指令 (評分高 + 價格接近進場價 1% 內)
+        if score >= 3 and curr_p <= buy_target * 1.01:
+            # 參考圖中邏輯：建議加碼或建倉
+            suggested_shares = 10 # 這裡可依您的權重邏輯修改，例如總資產 5%
+            msg = (
+                f"🔥 **【買入指令建議】**\n"
+                f"📌 標的: `{ticker}`\n"
+                f"💰 現價: `${curr_p:.2f}`\n"
+                f"✅ 建議買入價: `${buy_target:.2f}`\n"
+                f"📊 建議操作: **買入 {suggested_shares} 股**\n"
+                f"🛡️ 建議停損 (2*ATR): `${(curr_p - 2*curr_atr):.2f}`\n"
+                f"🚀 建議獲利 (3*ATR): `${(curr_p + 3*curr_atr):.2f}`"
+            )
+
+        # 條件 B: 賣出指令 (評分低 + 價格接近出場價 1% 內)
+        elif score <= 1 and curr_p >= sell_target * 0.99 and current_shares > 0:
+            # 參考圖中「建議減碼」邏輯：分批減碼 (例如減掉 50%)
+            reduce_shares = math.ceil(current_shares * 0.5)
+            msg = (
+                f"⚠️ **【賣出指令建議】**\n"
+                f"📌 標的: `{ticker}`\n"
+                f"💰 現價: `${curr_p:.2f}`\n"
+                f"❌ 建議出場價: `${sell_target:.2f}`\n"
+                f"📊 建議操作: **分批減碼 {reduce_shares} 股**\n"
+                f"📉 目前持股: {current_shares} 股"
+            )
+
+        # 發送並記錄 (每日僅限一次)
+        if msg:
+            sent_key = f"notify_{ticker}_{date.today()}"
+            if sent_key not in st.session_state:
+                if send_telegram_msg(msg):
+                    st.session_state[sent_key] = True
+                    st.toast(f"已發送 {ticker} 交易指令！")
 
 # 自定義 CSS (保持 V9.5 樣式)
 st.markdown("""
@@ -309,3 +371,8 @@ if hist is not None:
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
         fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
+
+if portfolio_cal:
+    run_auto_scanner(portfolio_cal)
+    
+st.success("🤖 自動掃描引擎運行中：已監控您所有持股的價格波動。")
