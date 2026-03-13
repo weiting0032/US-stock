@@ -14,9 +14,10 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.4", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.5", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
+# 自定義 CSS 強化視覺
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.8rem !important; white-space: nowrap !important; }
@@ -24,16 +25,13 @@ st.markdown("""
     .stMetric { border: 1px solid rgba(128, 128, 128, 0.3); padding: 10px !important; border-radius: 10px; }
     .price-box {
         background-color: rgba(128, 128, 128, 0.1);
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 5px solid #17BECF;
-        margin-bottom: 20px;
+        padding: 15px; border-radius: 10px; border-left: 5px solid #17BECF; margin-bottom: 20px;
     }
     </style>
     """, unsafe_allow_html=True)
 
 # ===============================
-# 1. 數據獲取 (S&P 500 完整爬蟲)
+# 1. 數據獲取
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -47,9 +45,6 @@ def get_sp500_tickers():
     except:
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
-# ===============================
-# 2. 技術指標核心
-# ===============================
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
     try:
@@ -60,28 +55,24 @@ def get_analysis(symbol):
         std = df['Close'].rolling(20).std()
         df['BB_upper'] = df['SMA20'] + 2 * std
         df['BB_lower'] = df['SMA20'] - 2 * std
-        
         high_low = df['High'] - df['Low']
         high_close = (df['High'] - df['Close'].shift()).abs()
         low_close = (df['Low'] - df['Close'].shift()).abs()
         df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
-        
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-        
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = ema12 - ema26
         df['Hist'] = df['MACD'] - df['MACD'].ewm(span=9, adjust=False).mean()
-        
         df['Vol_MA20'] = df['Volume'].rolling(20).mean()
         return df
     except: return None
 
 # ===============================
-# 3. Google Sheets 整合
+# 2. Google Sheets 核心
 # ===============================
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
@@ -121,7 +112,7 @@ def sync_nav_history(total_assets):
     except: return None
 
 # ===============================
-# 4. Sidebar 控制中心
+# 3. Sidebar
 # ===============================
 st.sidebar.title("🎮 Command Center")
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
@@ -145,7 +136,7 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 5. 資產運算
+# 4. 資產運算 (核心邏輯)
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -169,42 +160,64 @@ for ticker in unique_tickers:
         try:
             real_p = yf.Ticker(ticker).fast_info.last_price
             avg_cost_val = cost_b / shares_h
+            unrealized = (real_p - avg_cost_val) * shares_h
             portfolio_cal.append({
                 "Ticker": ticker, "Shares": shares_h, "AvgCost": avg_cost_val, 
-                "MktVal": shares_h*real_p, "RealPrice": real_p, 
-                "Unrealized": (real_p - avg_cost_val) * shares_h, "PL_Pct": ((real_p / avg_cost_val) - 1) * 100
+                "RealPrice": real_p, "Unrealized": unrealized, 
+                "PL_Pct": ((real_p / avg_cost_val) - 1) * 100, "MktVal": shares_h*real_p
             })
         except: pass
 
+total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 history_df = sync_nav_history(total_assets)
 
-# UI 佈局
-st.title("🏛️ 專業級資產配置管理 V9.4")
+# ===============================
+# 5. UI 顯示: 資產配置管理 (新增顏色)
+# ===============================
+st.title("🏛️ 專業級資產配置管理 V9.5")
+
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
 c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
-c4.metric("Unrealized 未實現", f"${sum(p['Unrealized'] for p in portfolio_cal):,.1f}")
-c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
+
+# 針對未實現與總損益進行顏色標記
+c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}", 
+          delta=f"{total_unrealized_pl:,.1f}", delta_color="normal")
+c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", 
+          f"{(total_pl_v/initial_capital*100):.2f}%")
+
+# --- 持倉明細顏色邏輯 ---
+def color_profit_loss(val):
+    color = '#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'
+    return f'color: {color}'
 
 if history_df is not None and not history_df.empty:
     with st.expander("📈 投資組合績效回測追蹤 (NAV Curve) & 持倉明細", expanded=True):
         fig_nav = go.Figure()
         fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', fill='tozeroy', name='NAV', line=dict(color='#00FFCC')))
-        fig_nav.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10))
+        fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig_nav, use_container_width=True)
         
         if portfolio_cal:
-            detail_df = pd.DataFrame(portfolio_cal)
-            for col in ['AvgCost', 'RealPrice', 'Unrealized', 'MktVal']:
-                detail_df[col] = detail_df[col].map('${:,.2f}'.format)
-            detail_df['PL_Pct'] = detail_df['PL_Pct'].map('{:,.2f}%'.format)
-            st.dataframe(detail_df[['Ticker', 'Shares', 'AvgCost', 'RealPrice', 'Unrealized', 'PL_Pct', 'MktVal']], use_container_width=True)
+            st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
+            df_styled = pd.DataFrame(portfolio_cal)
+            
+            # 使用 Styler 進行顏色美化
+            styled_table = df_styled.style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
+                .format({
+                    'AvgCost': '${:,.2f}', 
+                    'RealPrice': '${:,.2f}', 
+                    'Unrealized': '${:,.2f}', 
+                    'PL_Pct': '{:.2f}%', 
+                    'MktVal': '${:,.2f}'
+                })
+            st.dataframe(styled_table, use_container_width=True)
 
 # ===============================
-# 6. 量化策略引擎 (顯示現價)
+# 6. 量化策略引擎
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
@@ -219,7 +232,7 @@ else:
     with col_s1: search_manual = st.checkbox("手動輸入代碼")
     with col_s2:
         if search_manual:
-            analyze_ticker = st.text_input("請輸入代碼 (如: SOXL)", value="NVDA").upper().strip()
+            analyze_ticker = st.text_input("請輸入代碼", value="NVDA").upper().strip()
         else:
             selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
             analyze_ticker = selected_s.split(" - ")[0] if selected_s else "NVDA"
@@ -232,8 +245,6 @@ if hist is not None:
     
     with l_col:
         st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
-        
-        # --- 醒目顯示當前現價 ---
         st.markdown(f"""
             <div class="price-box">
                 <span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br>
@@ -244,7 +255,6 @@ if hist is not None:
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_ticker), None)
         held_shares = target_info['Shares'] if target_info else 0
         
-        # 評分與策略
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
