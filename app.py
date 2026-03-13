@@ -13,8 +13,13 @@ import gspread
 import requests
 from streamlit_autorefresh import st_autorefresh
 
+# --- 憑證獲取 ---
+# 請確保在 Streamlit Secrets 中設定了 TG_TOKEN 與 TG_CHAT_ID
+TG_TOKEN = st.secrets.get("TG_TOKEN", "")
+TG_CHAT_ID = st.secrets.get("TG_CHAT_ID", "")
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.5", layout="wide")
+
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.6", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 # ===============================
@@ -22,14 +27,19 @@ st_autorefresh(interval=15000, limit=None, key="heartbeat")
 # ===============================
 def send_telegram_msg(message):
     """發送訊息至 Telegram"""
+    if not TG_TOKEN or not TG_CHAT_ID:
+        st.error("❌ 找不到 Telegram 憑證，請檢查 Secrets 設定。")
+        return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=5)
+        r = requests.post(url, json=payload, timeout=5)
+        return r.json()
     except Exception as e:
-        print(f"Telegram 發送失敗: {e}")
+        st.error(f"Telegram 發送失敗: {e}")
+        return None
 
-# 自定義 CSS 強化視覺
+# 自定義 CSS
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.8rem !important; white-space: nowrap !important; }
@@ -43,7 +53,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ===============================
-# 1. 數據獲取
+# 2. 數據獲取與處理 (保持原邏輯)
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -84,7 +94,7 @@ def get_analysis(symbol):
     except: return None
 
 # ===============================
-# 2. Google Sheets 核心
+# 3. Google Sheets 整合
 # ===============================
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
@@ -113,20 +123,28 @@ def sync_nav_history(total_assets):
         ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
         try:
             ws_history = ss.worksheet("History")
-        except gspread.exceptions.WorksheetNotFound:
+        except:
             ws_history = ss.add_worksheet(title="History", rows="1000", cols="2")
             ws_history.append_row(["Date", "Total Assets"])
-        existing_data = ws_history.get_all_records()
         today_str = date.today().strftime('%Y-%m-%d')
-        if not existing_data or existing_data[-1].get("Date") != today_str:
+        existing = ws_history.get_all_records()
+        if not existing or existing[-1].get("Date") != today_str:
             ws_history.append_row([today_str, float(total_assets)])
         return pd.DataFrame(ws_history.get_all_records())
     except: return None
 
 # ===============================
-# 3. Sidebar
+# 4. Sidebar 控制中心
 # ===============================
 st.sidebar.title("🎮 Command Center")
+
+# --- 新增測試按鈕 ---
+st.sidebar.subheader("📡 通訊測試")
+if st.sidebar.button("發送 TG 測試訊息"):
+    test_res = send_telegram_msg("🚀 測試成功！量化投資戰情室已連線。")
+    if test_res: st.sidebar.success("已送出，請檢查手機！")
+
+st.sidebar.divider()
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
 sp500_list = get_sp500_tickers()
 is_manual = st.sidebar.checkbox("Manual Input (Ticker)")
@@ -148,7 +166,7 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 4. 資產運算 (核心邏輯)
+# 5. 資產運算與 UI
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -172,10 +190,9 @@ for ticker in unique_tickers:
         try:
             real_p = yf.Ticker(ticker).fast_info.last_price
             avg_cost_val = cost_b / shares_h
-            unrealized = (real_p - avg_cost_val) * shares_h
             portfolio_cal.append({
                 "Ticker": ticker, "Shares": shares_h, "AvgCost": avg_cost_val, 
-                "RealPrice": real_p, "Unrealized": unrealized, 
+                "RealPrice": real_p, "Unrealized": (real_p - avg_cost_val) * shares_h, 
                 "PL_Pct": ((real_p / avg_cost_val) - 1) * 100, "MktVal": shares_h*real_p
             })
         except: pass
@@ -185,26 +202,16 @@ total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 history_df = sync_nav_history(total_assets)
 
-# ===============================
-# 5. UI 顯示: 資產配置管理 (新增顏色)
-# ===============================
-st.title("🏛️ 專業級資產配置管理 V9.5")
-
+st.title("🏛️ 專業級資產配置管理 V9.6")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
 c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
+c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}", delta=f"{total_unrealized_pl:,.1f}")
+c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
-# 針對未實現與總損益進行顏色標記
-c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}", 
-          delta=f"{total_unrealized_pl:,.1f}", delta_color="normal")
-c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", 
-          f"{(total_pl_v/initial_capital*100):.2f}%")
-
-# --- 持倉明細顏色邏輯 ---
 def color_profit_loss(val):
-    color = '#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'
-    return f'color: {color}'
+    return f"color: {'#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'}"
 
 if history_df is not None and not history_df.empty:
     with st.expander("📈 投資組合績效回測追蹤 (NAV Curve) & 持倉明細", expanded=True):
@@ -212,42 +219,22 @@ if history_df is not None and not history_df.empty:
         fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', fill='tozeroy', name='NAV', line=dict(color='#00FFCC')))
         fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig_nav, use_container_width=True)
-        
         if portfolio_cal:
-            st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
-            df_styled = pd.DataFrame(portfolio_cal)
-            
-            # 使用 Styler 進行顏色美化
-            styled_table = df_styled.style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
-                .format({
-                    'AvgCost': '${:,.2f}', 
-                    'RealPrice': '${:,.2f}', 
-                    'Unrealized': '${:,.2f}', 
-                    'PL_Pct': '{:.2f}%', 
-                    'MktVal': '${:,.2f}'
-                })
-            st.dataframe(styled_table, use_container_width=True)
+            df_styled = pd.DataFrame(portfolio_cal).style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct']).format({'AvgCost':'${:,.2f}','RealPrice':'${:,.2f}','Unrealized':'${:,.2f}','PL_Pct':'{:.2f}%','MktVal':'${:,.2f}'})
+            st.dataframe(df_styled, use_container_width=True)
 
 # ===============================
-# 6. 量化策略引擎
+# 6. 量化策略引擎 (含自動通知)
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
 
 analysis_mode = st.radio("選擇分析對象", ["我的持股", "搜尋全市場標的"], horizontal=True)
-
 if analysis_mode == "我的持股":
-    analyze_target = st.selectbox("選擇持倉標的", options=unique_tickers if unique_tickers else ["NVDA"])
-    analyze_ticker = analyze_target
+    analyze_ticker = st.selectbox("選擇持倉標的", options=unique_tickers if unique_tickers else ["NVDA"])
 else:
-    col_s1, col_s2 = st.columns([1, 2])
-    with col_s1: search_manual = st.checkbox("手動輸入代碼")
-    with col_s2:
-        if search_manual:
-            analyze_ticker = st.text_input("請輸入代碼", value="NVDA").upper().strip()
-        else:
-            selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
-            analyze_ticker = selected_s.split(" - ")[0] if selected_s else "NVDA"
+    selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
+    analyze_ticker = selected_s.split(" - ")[0] if selected_s else "NVDA"
 
 hist = get_analysis(analyze_ticker)
 if hist is not None:
@@ -257,13 +244,11 @@ if hist is not None:
     
     with l_col:
         st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
-        # 顯示現價區塊
         st.markdown(f'<div class="price-box"><span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br><span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
         
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_ticker), None)
         held_shares = target_info['Shares'] if target_info else 0
         
-        # 策略評分
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
@@ -272,31 +257,22 @@ if hist is not None:
         if vol_ratio > 1.5 and last['Close'] > last['Open']: score += 1
         
         notify_msg = ""
-        
         if score >= 3:
             buy_p = (last['BB_lower'] + last['SMA20']) / 2
             suggest_qty = math.floor((total_assets * 0.1) / curr_p)
             st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
-            
-            # --- Telegram 價格監控邏輯 (買入) ---
-            # 當現價接近建議價 (差距 < 1%) 且尚未通知
             if curr_p <= buy_p * 1.01:
-                notify_msg = f"🔔 【買入提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議進場價: ${buy_p:.2f}\n評分: {score}/5\n建議股數: {suggest_qty}"
-                
+                notify_msg = f"🔔 【買入提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議進場價: ${buy_p:.2f}\n評分: {score}/5"
         elif score <= 1 and held_shares > 0:
             sell_p = last['BB_upper']
-            sell_qty = math.ceil(held_shares * 0.5)
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
-            
-            # --- Telegram 價格監控邏輯 (賣出) ---
             if curr_p >= sell_p * 0.99:
-                notify_msg = f"🔔 【減碼提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議出場價: ${sell_p:.2f}\n評分: {score}/5\n持有股數: {held_shares}"
+                notify_msg = f"🔔 【減碼提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議出場價: ${sell_p:.2f}\n評分: {score}/5"
         else: 
             st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
 
-        # 執行發送 (使用 Session State 避免重複發送同一訊號)
         if notify_msg:
             msg_key = f"sent_{analyze_ticker}_{date.today()}"
             if msg_key not in st.session_state:
@@ -305,7 +281,7 @@ if hist is not None:
                 st.toast("Telegram 通知已發送！", icon="📩")
 
         st.divider()
-        st.write("🛡️ **ATR 動態風控指標**")
+        st.write(f"🛡️ **ATR 動態風控 (ATR: {curr_atr:.2f})**")
         st.write(f"- 建議停損 (2*ATR): :red[${(curr_p - 2*curr_atr):.2f}]")
         st.write(f"- 建議獲利 (3*ATR): :green[${(curr_p + 3*curr_atr):.2f}]")
 
@@ -315,8 +291,5 @@ if hist is not None:
         fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
         for ma, color in zip(['SMA20','SMA200', 'BB_upper', 'BB_lower'], ['#17BECF','#D62728', 'rgba(173,216,230,0.2)', 'rgba(173,216,230,0.2)']):
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
-        
-        vol_colors = ['#EF5350' if c < o else '#26A69A' for c, o in zip(df_plot['Close'], df_plot['Open'])]
-        fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], name="Volume", marker_color=vol_colors), 2, 1)
         fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
