@@ -1,9 +1,8 @@
 streamlit
-gspread             # <-- 使用標準的 gspread 庫
-pandas
 yfinance
+pandas
 plotly
+gspread
 requests
-numpy
-lxml
 streamlit-autorefresh
+google-generativeai
