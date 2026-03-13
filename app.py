@@ -17,6 +17,18 @@ PORTFOLIO_SHEET_TITLE = 'US Stock'
 st.set_page_config(page_title="Pro 量化投資戰情室 V9.5", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
+# ===============================
+# 1. 通訊函數
+# ===============================
+def send_telegram_msg(message):
+    """發送訊息至 Telegram"""
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, json=payload, timeout=5)
+    except Exception as e:
+        print(f"Telegram 發送失敗: {e}")
+
 # 自定義 CSS 強化視覺
 st.markdown("""
     <style>
@@ -245,16 +257,13 @@ if hist is not None:
     
     with l_col:
         st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
-        st.markdown(f"""
-            <div class="price-box">
-                <span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br>
-                <span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span>
-            </div>
-        """, unsafe_allow_html=True)
+        # 顯示現價區塊
+        st.markdown(f'<div class="price-box"><span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br><span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
         
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_ticker), None)
         held_shares = target_info['Shares'] if target_info else 0
         
+        # 策略評分
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
@@ -262,20 +271,38 @@ if hist is not None:
         vol_ratio = last['Volume'] / last['Vol_MA20']
         if vol_ratio > 1.5 and last['Close'] > last['Open']: score += 1
         
+        notify_msg = ""
+        
         if score >= 3:
             buy_p = (last['BB_lower'] + last['SMA20']) / 2
             suggest_qty = math.floor((total_assets * 0.1) / curr_p)
             st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
-            if suggest_qty > 0: st.markdown(f"📋 建議買進股數: :orange[{suggest_qty}] 股")
+            
+            # --- Telegram 價格監控邏輯 (買入) ---
+            # 當現價接近建議價 (差距 < 1%) 且尚未通知
+            if curr_p <= buy_p * 1.01:
+                notify_msg = f"🔔 【買入提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議進場價: ${buy_p:.2f}\n評分: {score}/5\n建議股數: {suggest_qty}"
+                
         elif score <= 1 and held_shares > 0:
             sell_p = last['BB_upper']
             sell_qty = math.ceil(held_shares * 0.5)
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
-            st.markdown(f"📋 建議減碼股數: :orange[{sell_qty}] 股")
+            
+            # --- Telegram 價格監控邏輯 (賣出) ---
+            if curr_p >= sell_p * 0.99:
+                notify_msg = f"🔔 【減碼提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議出場價: ${sell_p:.2f}\n評分: {score}/5\n持有股數: {held_shares}"
         else: 
             st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
+
+        # 執行發送 (使用 Session State 避免重複發送同一訊號)
+        if notify_msg:
+            msg_key = f"sent_{analyze_ticker}_{date.today()}"
+            if msg_key not in st.session_state:
+                send_telegram_msg(notify_msg)
+                st.session_state[msg_key] = True
+                st.toast("Telegram 通知已發送！", icon="📩")
 
         st.divider()
         st.write("🛡️ **ATR 動態風控指標**")
