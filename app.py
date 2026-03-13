@@ -228,9 +228,14 @@ analysis_mode = st.radio("選擇分析對象", ["我的持股", "搜尋全市場
 if analysis_mode == "我的持股":
     analyze_ticker = st.selectbox("選擇持倉標的", options=unique_tickers if unique_tickers else ["NVDA"])
 else:
-    selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
-    analyze_ticker = selected_s.split(" - ")[0] if selected_s else "NVDA"
-
+    col_s1, col_s2 = st.columns([1, 2])
+    with col_s1: search_manual = st.checkbox("手動輸入代碼")
+    with col_s2:
+        if search_manual: analyze_target = st.text_input("請輸入代碼", value="NVDA").upper().strip()
+        else:
+            selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
+            analyze_target = selected_s.split(" - ")[0] if selected_s else "NVDA"
+            
 hist = get_unified_analysis(analyze_ticker)
 if hist is not None:
     l_col, r_col = st.columns([3, 7])
