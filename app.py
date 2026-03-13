@@ -43,18 +43,9 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 def get_ai_insight(ticker, score, last_price, rsi):
-    """向 Gemini 請求分析，使用最精確的模型路徑解決 404 問題"""
+    """向 Gemini 請求分析，具備動態模型清單偵測功能"""
     if not api_key:
         return "❌ AI 模組未就緒，請檢查 Secrets 中的 API Key 設定。"
-    
-    # 使用完整路徑格式，這是 API 最穩定的呼叫方式
-    # 同時設定安全性，避免因為涉及財經數據被過濾成空白
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
     
     prompt = f"""
     你是專業美股分析師。目前標的 {ticker} 的量化指標如下：
@@ -69,25 +60,55 @@ def get_ai_insight(ticker, score, last_price, rsi):
     請用繁體中文回答。
     """
     
-    # 嘗試清單：完整路徑優先
-    test_names = ['models/gemini-1.5-flash', 'gemini-1.5-flash', 'models/gemini-pro']
-    
-    for m_name in test_names:
-        try:
-            model = genai.GenerativeModel(model_name=m_name, safety_settings=safety_settings)
-            response = model.generate_content(prompt)
-            if response and response.text:
-                return f"*(✅ 成功調用模型: `{m_name}`)*\n\n" + response.text
-        except Exception as e:
-            # 如果是 404 找不到，就繼續嘗試下一個名稱
-            if "404" in str(e):
-                continue
-            # 如果是 429 額度問題，直接回報
-            if "429" in str(e):
-                return "❌ [額度限制] 您目前的使用量已達上限，請等候 1 分鐘後再試。"
-            return f"❌ 呼叫 {m_name} 時發生錯誤: {str(e)}"
-            
-    return "❌ 嘗試了所有已知模型名稱 (Flash/Pro) 均失敗，請確認 API Key 權限或更新 google-generativeai 套件。"
+    try:
+        # 1. 獲取當前 API Key 權限下所有可用的模型
+        # 並過濾出支援 'generateContent' 的模型
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+        
+        if not available_models:
+            return "❌ 您的 API Key 目前似乎不支援任何生成式模型，請檢查 Google AI Studio 權限。"
+
+        # 2. 自動選擇模型：優先順序 flash -> pro -> 清單第一個
+        target_model = None
+        for m_name in available_models:
+            if '1.5-flash' in m_name:
+                target_model = m_name
+                break
+        
+        if not target_model:
+            for m_name in available_models:
+                if 'pro' in m_name:
+                    target_model = m_name
+                    break
+        
+        if not target_model:
+            target_model = available_models[0]
+
+        # 3. 配置安全性設定
+        safety_settings = [
+            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        ]
+
+        # 4. 執行分析
+        model = genai.GenerativeModel(model_name=target_model, safety_settings=safety_settings)
+        response = model.generate_content(prompt)
+        
+        if response and response.text:
+            return f"*(✅ 系統已自動匹配您的最佳模型: `{target_model}`)*\n\n" + response.text
+        else:
+            return "⚠️ AI 回傳內容為空，可能被安全過濾器攔截。"
+
+    except Exception as e:
+        error_msg = str(e)
+        if "429" in error_msg:
+            return "❌ [額度限制] 請求太快，請等候 1 分鐘後再試。"
+        return f"❌ 系統在匹配模型時發生錯誤: {error_msg}\n請確認 google-generativeai 套件版本是否已在 requirements.txt 中更新至最新。"
 
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
