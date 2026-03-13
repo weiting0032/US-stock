@@ -1,3 +1,7 @@
+# ===============================
+# 0. 基礎設定 (新增字體優化 CSS)
+# ===============================
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -10,10 +14,10 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 # ===============================
-# 0. 基礎設定 (新增字體優化 CSS)
+# 0. 基礎設定 (UI 優化)
 # ===============================
 PORTFOLIO_SHEET_TITLE = 'US Stock' # 建議更名以符合多股需求
-st.set_page_config(page_title="Pro 量化投資戰情室 V8.4", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V8.5", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 st.markdown("""
@@ -178,14 +182,14 @@ total_pl_v = total_assets - initial_capital
 # UI: 頂部總覽 (優化字體顯示)
 st.title("🏛️ 專業級資產配置管理")
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("NAV 總值", f"${total_assets:,.1f}") # 減少小數位數以增加顯示空間
+c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
 c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
 c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
 # ===============================
-# 6. 量化策略引擎
+# 6. 量化策略引擎 (V8.5 區間冷卻與 33% 減碼)
 # ===============================
 st.divider()
 analyze_target = st.selectbox("🎯 Target Analysis", options=unique_tickers if unique_tickers else ["NVDA"])
@@ -207,23 +211,29 @@ if hist is not None:
         st.plotly_chart(fig, use_container_width=True)
 
     with r_col:
-        st.subheader("🛠️ 量化策略建議 (V8.4)")
+        st.subheader("🛠️ 量化策略建議 (V8.5)")
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
         held_shares = target_info['Shares'] if target_info else 0
         current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
         
-        today_str = date.today().strftime('%Y-%m-%d')
-        today_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] == today_str)]
-        has_sold_today = not today_trades[today_trades['Type'].str.contains("賣出")].empty
-        has_bought_today = not today_trades[today_trades['Type'].str.contains("買入")].empty
+        # --- 核心修改：3天區間冷卻偵測 ---
+        COOLDOWN_DAYS = 3
+        cutoff_date_str = (date.today() - timedelta(days=COOLDOWN_DAYS)).strftime('%Y-%m-%d')
+        
+        # 篩選該標的在冷卻期內的交易紀錄
+        recent_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] >= cutoff_date_str)]
+        has_sold_recently = not recent_trades[recent_trades['Type'].str.contains("賣出")].empty
+        has_bought_recently = not recent_trades[recent_trades['Type'].str.contains("買入")].empty
 
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
         if last['Hist'] > 0: score += 1 
         
-        if has_sold_today: st.info("✅ 今日已執行減碼。")
-        elif has_bought_today: st.info("✅ 今日已執行加碼。")
+        if has_sold_recently: 
+            st.info(f"⏳ 處於減碼冷卻期 ({COOLDOWN_DAYS} 天內已賣出)，等待指標修復。")
+        elif has_bought_recently: 
+            st.info(f"⏳ 處於建倉冷卻期 ({COOLDOWN_DAYS} 天內已買入)，避免過度交易。")
         elif score >= 3:
             buy_price = (last['BB_lower'] + last['SMA20']) / 2
             suggest_qty = math.floor((cash * 0.2) / buy_price)
@@ -233,7 +243,8 @@ if hist is not None:
             elif suggest_qty >= 1: st.markdown(f"📋 **建議股數**: :orange[**{suggest_qty}**] 股")
         elif score <= 1 and held_shares > 1:
             sell_price = last['BB_upper']
-            sell_qty = math.ceil(held_shares * 0.25)
+            # --- 核心修改：33% 減碼比例 ---
+            sell_qty = math.ceil(held_shares * 0.33)
             st.error(f"⚠️ 建議：分批減碼")
             st.markdown(f"📍 **建議價**: :red[**${sell_price:.2f}**] 以上")
             st.markdown(f"📋 **建議股數**: :orange[**{sell_qty}**] 股")
