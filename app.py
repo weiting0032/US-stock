@@ -300,6 +300,13 @@ if hist is not None:
         st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
         st.markdown(f'<div class="price-box"><span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br><span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
         
+        # 取得目標分析標的之當前持股數
+        current_shares = 0
+        for item in portfolio_cal:
+            if item['Ticker'] == analyze_ticker:
+                current_shares = item['Shares']
+                break
+
         # 評分與指令 logic 與 run_auto_scanner 保持一致
         score = 0
         if curr_p > last['SMA200']: score += 2 
@@ -312,11 +319,18 @@ if hist is not None:
         if score >= 3:
             st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
+            st.markdown(f"📦 建議操作股數: :green[買入 10 股]")
         elif score <= 1:
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
+            if current_shares > 0:
+                reduce_shares = math.ceil(current_shares * 0.5)
+                st.markdown(f"📦 建議操作股數: :red[賣出 {reduce_shares} 股] (目前持股: {current_shares} 股)")
+            else:
+                st.markdown(f"📦 建議操作股數: :gray[無持股可賣出]")
         else:
             st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
+            st.markdown(f"📍 潛在進場價: ${buy_p:.2f} / 潛在出場價: ${sell_p:.2f}")
 
         st.divider()
         st.write(f"🛡️ **ATR 風控 (ATR: {curr_atr:.2f})**")
