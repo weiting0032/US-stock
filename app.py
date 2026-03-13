@@ -277,42 +277,55 @@ if hist is not None:
     last = hist.iloc[-1]
     curr_p, curr_atr = last['Close'], last['ATR']
     
+    # 取得當前持倉資訊
+    held_shares = 0
+    current_weight = 0
+    for item in portfolio_cal:
+        if item['Ticker'] == analyze_ticker:
+            held_shares = item['Shares']
+            current_weight = item['MktVal'] / total_assets
+            break
+
     with l_col:
-        st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
-        st.markdown(f'<div class="price-box"><span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br><span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
+        st.subheader(f"🛠️ 策略詳情: {analyze_ticker}")
+        st.markdown(f'<div class="price-box">現價: <span style="font-size: 1.8rem;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
+
+        # 執行冷卻偵測
+        has_bought, has_sold = get_recent_trade_status(analyze_ticker, trades_df)
         
-        current_shares = 0
-        for item in portfolio_cal:
-            if item['Ticker'] == analyze_ticker:
-                current_shares = item['Shares']
-                break
-
-        # UI 股數邏輯與背景掃描一致
-        risk_per_trade_ratio = 0.05
-        suggested_buy = math.floor((cash * risk_per_trade_ratio) / curr_p) if curr_p > 0 else 0
-
+        # 評分系統
         score = 0
         if curr_p > last['SMA200']: score += 2 
-        if last['RSI'] < 45: score += 1 
+        if last['RSI'] < 40: score += 1.5 
         if last['Hist'] > 0: score += 1 
-        
-        buy_p = (last['BB_lower'] + last['SMA20']) / 2
-        sell_p = last['BB_upper']
+        if curr_p < last['BB_lower']: score += 1 
 
-        if score >= 3:
-            st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
-            st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
-            st.markdown(f"📦 建議操作股數: :green[買入 {suggested_buy} 股]")
-        elif score <= 1:
-            st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
-            st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
-            if current_shares > 0:
-                reduce_shares = math.ceil(current_shares * 0.5)
-                st.markdown(f"📦 建議操作股數: :red[賣出 {reduce_shares} 股]")
-        else:
-            st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
-
+        # 輸出邏輯
+        if has_sold: 
+            st.info(f"⏳ 處於減碼冷卻期 (3天內已有賣出記錄)。")
+        elif has_bought: 
+            st.info(f"⏳ 處於建倉冷卻期 (3天內已有買入記錄)。")
+        elif score >= 3.5:
+            buy_price = (last['BB_lower'] + last['SMA20']) / 2
+            suggest_qty = math.floor((cash * 0.15) / buy_price)
+            st.success(f"🔥 強力建議：分批買入 (評分: {score})")
+            st.markdown(f"📍 建議進場價: :green[${buy_price:.2f}]")
+            if current_weight >= 0.3: 
+                st.warning("⚠️ 警示：單一標的佔比已 > 30%，停止增持。")
+            elif suggest_qty >= 1: 
+                st.markdown(f"📋 建議買進股數: :orange[{suggest_qty}] 股")
+        elif (score <= 1 or last['RSI'] > 75) and held_shares >= 1:
+            sell_price = last['BB_upper']
+            sell_qty = math.ceil(held_shares * 0.33)
+            st.error(f"⚠️ 建議：分批減碼 (評分: {score})")
+            st.markdown(f"📍 建議出場價: :red[${sell_price:.2f}]")
+            st.markdown(f"📋 建議賣出股數: :orange[{sell_qty}] 股")
+        else: 
+            st.warning(f"⚖️ 狀態：觀望 (目前評分: {score})")
+            
         st.divider()
+        st.write(f"- 當前 RSI: `{last['RSI']:.1f}`")
+        st.write(f"- 組合權重: `{current_weight*100:.1f}%`")
         st.write(f"🛡️ **ATR 風控 (ATR: {curr_atr:.2f})**")
         st.write(f"- 建議停損 (2*ATR): :red[${(curr_p - 2*curr_atr):.2f}]")
         st.write(f"- 建議獲利 (3*ATR): :green[${(curr_p + 3*curr_atr):.2f}]")
