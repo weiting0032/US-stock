@@ -14,7 +14,7 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.3", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.4", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 st.markdown("""
@@ -22,6 +22,13 @@ st.markdown("""
     [data-testid="stMetricValue"] { font-size: 1.8rem !important; white-space: nowrap !important; }
     [data-testid="stMetricLabel"] { font-size: 0.9rem !important; }
     .stMetric { border: 1px solid rgba(128, 128, 128, 0.3); padding: 10px !important; border-radius: 10px; }
+    .price-box {
+        background-color: rgba(128, 128, 128, 0.1);
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 5px solid #17BECF;
+        margin-bottom: 20px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -41,40 +48,40 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 # ===============================
-# 2. 技術指標核心 (含 ATR、成交量)
+# 2. 技術指標核心
 # ===============================
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
     try:
         df = yf.Ticker(symbol).history(period="2y")
         if df.empty: return None
-        # 價格與布林帶
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA200'] = df['Close'].rolling(200).mean()
         std = df['Close'].rolling(20).std()
         df['BB_upper'] = df['SMA20'] + 2 * std
         df['BB_lower'] = df['SMA20'] - 2 * std
-        # ATR 動態波動
+        
         high_low = df['High'] - df['Low']
         high_close = (df['High'] - df['Close'].shift()).abs()
         low_close = (df['Low'] - df['Close'].shift()).abs()
         df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
-        # RSI & MACD
+        
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
+        
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = ema12 - ema26
         df['Hist'] = df['MACD'] - df['MACD'].ewm(span=9, adjust=False).mean()
-        # 成交量
+        
         df['Vol_MA20'] = df['Volume'].rolling(20).mean()
         return df
     except: return None
 
 # ===============================
-# 3. Google Sheets 整合 (NAV 紀錄)
+# 3. Google Sheets 整合
 # ===============================
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
@@ -138,7 +145,7 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 5. 資產運算 (NAV & 持倉明細)
+# 5. 資產運算
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -173,8 +180,8 @@ total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 history_df = sync_nav_history(total_assets)
 
-# UI: 頂部總覽
-st.title("🏛️ 專業級資產配置管理 V9.3")
+# UI 佈局
+st.title("🏛️ 專業級資產配置管理 V9.4")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
@@ -182,7 +189,6 @@ c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
 c4.metric("Unrealized 未實現", f"${sum(p['Unrealized'] for p in portfolio_cal):,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
-# --- NAV 曲線與持倉明細 (UI 佈局) ---
 if history_df is not None and not history_df.empty:
     with st.expander("📈 投資組合績效回測追蹤 (NAV Curve) & 持倉明細", expanded=True):
         fig_nav = go.Figure()
@@ -191,7 +197,6 @@ if history_df is not None and not history_df.empty:
         st.plotly_chart(fig_nav, use_container_width=True)
         
         if portfolio_cal:
-            st.markdown("#### 🔍 當前持倉實時明細")
             detail_df = pd.DataFrame(portfolio_cal)
             for col in ['AvgCost', 'RealPrice', 'Unrealized', 'MktVal']:
                 detail_df[col] = detail_df[col].map('${:,.2f}'.format)
@@ -199,7 +204,7 @@ if history_df is not None and not history_df.empty:
             st.dataframe(detail_df[['Ticker', 'Shares', 'AvgCost', 'RealPrice', 'Unrealized', 'PL_Pct', 'MktVal']], use_container_width=True)
 
 # ===============================
-# 6. 量化策略引擎 (新增建議賣價)
+# 6. 量化策略引擎 (顯示現價)
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
@@ -227,10 +232,19 @@ if hist is not None:
     
     with l_col:
         st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
+        
+        # --- 醒目顯示當前現價 ---
+        st.markdown(f"""
+            <div class="price-box">
+                <span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br>
+                <span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span>
+            </div>
+        """, unsafe_allow_html=True)
+        
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_ticker), None)
         held_shares = target_info['Shares'] if target_info else 0
         
-        # 評分與成交量判定
+        # 評分與策略
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
@@ -245,8 +259,7 @@ if hist is not None:
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
             if suggest_qty > 0: st.markdown(f"📋 建議買進股數: :orange[{suggest_qty}] 股")
         elif score <= 1 and held_shares > 0:
-            # --- 修正處：新增建議賣出價格 ---
-            sell_p = last['BB_upper'] # 建議以布林上軌作為減碼參考點
+            sell_p = last['BB_upper']
             sell_qty = math.ceil(held_shares * 0.5)
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
@@ -263,10 +276,10 @@ if hist is not None:
         df_plot = hist.tail(100)
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
         fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
-        for ma, color in zip(['SMA20','SMA200', 'BB_upper', 'BB_lower'], ['#17BECF','#D62728', 'rgba(173,216,230,0.4)', 'rgba(173,216,230,0.4)']):
+        for ma, color in zip(['SMA20','SMA200', 'BB_upper', 'BB_lower'], ['#17BECF','#D62728', 'rgba(173,216,230,0.2)', 'rgba(173,216,230,0.2)']):
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
         
-        vol_colors = ['red' if c < o else 'green' for c, o in zip(df_plot['Close'], df_plot['Open'])]
+        vol_colors = ['#EF5350' if c < o else '#26A69A' for c, o in zip(df_plot['Close'], df_plot['Open'])]
         fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], name="Volume", marker_color=vol_colors), 2, 1)
-        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+        fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
