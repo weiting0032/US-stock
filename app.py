@@ -14,9 +14,10 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V8.7", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V8.8", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
+# 自定義 CSS 強化戰情室感
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.8rem !important; white-space: nowrap !important; }
@@ -26,7 +27,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ===============================
-# 1. 數據獲取 (優化：批量抓取與緩存)
+# 1. 數據獲取 (S&P 500 清單)
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -40,33 +41,17 @@ def get_sp500_tickers():
     except:
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
-@st.cache_data(ttl=300)
-def get_batch_prices(tickers):
-    """效能優化：一次性獲取所有持倉標的當前價格"""
-    if not tickers: return {}
-    try:
-        data = yf.download(tickers, period="1d", group_by='ticker', progress=False)
-        prices = {}
-        for t in tickers:
-            if len(tickers) == 1:
-                prices[t] = data['Close'].iloc[-1]
-            else:
-                prices[t] = data[t]['Close'].iloc[-1]
-        return prices
-    except:
-        return {t: 0 for t in tickers}
-
 # ===============================
-# 2. 技術指標核心 (新增 ATR 與 財報日)
+# 2. 技術指標核心 (防禦性強化)
 # ===============================
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
     try:
-        ticker_obj = yf.Ticker(symbol)
-        df = ticker_obj.history(period="2y")
+        tk = yf.Ticker(symbol)
+        df = tk.history(period="2y")
         if df.empty: return None
         
-        # 基礎指標
+        # 基礎指標計算
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA200'] = df['Close'].rolling(200).mean()
         std = df['Close'].rolling(20).std()
@@ -89,17 +74,21 @@ def get_analysis(symbol):
         df['MACD'] = ema12 - ema26
         df['Hist'] = df['MACD'] - df['MACD'].ewm(span=9, adjust=False).mean()
         
-        # 獲取財報日
-        calendar = ticker_obj.calendar
+        # 財報日獲取 (使用 try 避免因 API 不支援某些個股而報錯)
         earnings_date = "N/A"
-        if calendar is not None and not calendar.empty:
-            if 'Earnings Date' in calendar.index:
-                earnings_date = calendar.loc['Earnings Date'].values[0]
-            elif 'Earnings Date' in calendar.columns:
-                 earnings_date = calendar['Earnings Date'].iloc[0]
+        try:
+            cal = tk.calendar
+            if cal is not None and not cal.empty:
+                # 兼容不同版本的 yfinance 返回格式
+                if 'Earnings Date' in cal.index:
+                    earnings_date = cal.loc['Earnings Date'].values[0]
+                else:
+                    earnings_date = cal.iloc[0, 0]
+        except: pass
 
         return {"data": df, "earnings_date": earnings_date}
-    except: return None
+    except Exception as e:
+        return None
 
 # ===============================
 # 3. Google Sheets 整合
@@ -154,12 +143,10 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 5. 資產運算 (效能優化版)
+# 5. 資產運算 (回歸 yf.Ticker 穩定版)
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
-current_prices = get_batch_prices(unique_tickers)
-
 portfolio_cal = []
 cash = initial_capital
 total_realized_pl = 0
@@ -186,22 +173,25 @@ for ticker in unique_tickers:
     total_realized_pl += ticker_realized_pl
     
     if shares_h > 0:
-        real_p = current_prices.get(ticker, 0)
-        avg_cost_val = cost_b / shares_h
-        unrealized_pl = (real_p - avg_cost_val) * shares_h
-        unrealized_pct = ((real_p / avg_cost_val) - 1) * 100
-        portfolio_cal.append({
-            "Ticker": ticker, "Shares": shares_h, "AvgCost": avg_cost_val, 
-            "MktVal": shares_h*real_p, "RealPrice": real_p, 
-            "Unrealized": unrealized_pl, "PL_Pct": unrealized_pct
-        })
+        try:
+            # 回歸使用單一 Ticker 抓取，確保小型股穩定性
+            real_p = yf.Ticker(ticker).fast_info.last_price
+            avg_cost_val = cost_b / shares_h
+            unrealized_pl = (real_p - avg_cost_val) * shares_h
+            unrealized_pct = ((real_p / avg_cost_val) - 1) * 100
+            portfolio_cal.append({
+                "Ticker": ticker, "Shares": shares_h, "AvgCost": avg_cost_val, 
+                "MktVal": shares_h*real_p, "RealPrice": real_p, 
+                "Unrealized": unrealized_pl, "PL_Pct": unrealized_pct
+            })
+        except: pass
 
 total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 
 # UI: 頂部總覽
-st.title("🏛️ 專業級資產配置管理 V8.7")
+st.title("🏛️ 專業級資產配置管理 V8.8")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
@@ -210,7 +200,7 @@ c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
 # ===============================
-# 5.5 視覺化與風險管理面板 (新增)
+# 5.5 視覺化與風險管理面板
 # ===============================
 if portfolio_cal:
     st.divider()
@@ -232,22 +222,22 @@ if portfolio_cal:
         st.subheader("🛡️ 個股風險管理 (ATR 停損)")
         risk_list = []
         for p in portfolio_cal:
-            analysis_res = get_analysis(p['Ticker'])
-            if analysis_res:
-                df_r = analysis_res['data']
+            res = get_analysis(p['Ticker'])
+            if res:
+                df_r = res['data']
                 atr_val = df_r['ATR'].iloc[-1]
-                # 2倍 ATR 停損建議
+                # 2倍 ATR 作為技術停損位
                 stop_loss = p['RealPrice'] - (2 * atr_val)
                 risk_list.append({
                     "Ticker": p['Ticker'],
                     "當前價": f"${p['RealPrice']:.2f}",
                     "ATR (14D)": f"${atr_val:.2f}",
-                    "停損參考 (2*ATR)": f"${stop_loss:.2f}",
-                    "財報預告": str(analysis_res['earnings_date'])[:10]
+                    "停損參考": f"${stop_loss:.2f}",
+                    "財報日預估": str(res['earnings_date'])[:10]
                 })
         st.dataframe(pd.DataFrame(risk_list), use_container_width=True, hide_index=True)
 
-    with st.expander("🔍 查看個股即時損益明細", expanded=False):
+    with st.expander("🔍 查看個股即時損益明細", expanded=True):
         detail_df = pd.DataFrame(portfolio_cal)
         display_df = detail_df.copy()
         for col in ['AvgCost', 'RealPrice', 'Unrealized', 'MktVal']:
@@ -256,7 +246,7 @@ if portfolio_cal:
         st.dataframe(display_df[['Ticker', 'Shares', 'AvgCost', 'RealPrice', 'Unrealized', 'PL_Pct', 'MktVal']], use_container_width=True)
 
 # ===============================
-# 6. 量化策略引擎 (功能強化)
+# 6. 量化策略引擎
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
@@ -270,7 +260,7 @@ else:
     with col_s1: search_manual = st.checkbox("手動輸入代碼")
     with col_s2:
         if search_manual:
-            analyze_target = st.text_input("請輸入美股代碼", value="NVDA").upper().strip()
+            analyze_target = st.text_input("請輸入美股代碼 (如: AXTI, TSLA)", value="NVDA").upper().strip()
         else:
             selected_s = st.selectbox("從 S&P 500 搜尋標的", options=sp500_list)
             analyze_target = selected_s.split(" - ")[0] if selected_s else "NVDA"
@@ -285,7 +275,6 @@ if analysis_res is not None:
     
     with l_col:
         st.subheader(f"🛠️ 建議策略 ({analyze_target})")
-        # 顯示財報提醒
         if earn_date != "N/A":
             st.warning(f"📅 財報預警: {str(earn_date)[:10]}")
             
@@ -293,21 +282,21 @@ if analysis_res is not None:
         held_shares = target_info['Shares'] if target_info else 0
         current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
         
-        # 冷卻偵測
+        # 3天交易冷卻偵測
         COOLDOWN_DAYS = 3
         cutoff_date_str = (date.today() - timedelta(days=COOLDOWN_DAYS)).strftime('%Y-%m-%d')
         recent_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] >= cutoff_date_str)]
         has_sold_recently = not recent_trades[recent_trades['Type'].str.contains("賣出")].empty
         has_bought_recently = not recent_trades[recent_trades['Type'].str.contains("買入")].empty
 
-        # 評分系統增強
+        # 評分系統 (RSI 超買/賣判定)
         score = 0
         if curr_p > last['SMA200']: score += 2 
-        if last['RSI'] < 40: score += 1.5 # RSI 超賣加分
+        if last['RSI'] < 40: score += 1.5 
         if last['Hist'] > 0: score += 1 
-        if curr_p < last['BB_lower']: score += 1 # 觸碰布林下軌加分
+        if curr_p < last['BB_lower']: score += 1 
         
-        # 決策輸出
+        # 決策輸出邏輯
         if has_sold_recently: 
             st.info(f"⏳ 處於減碼冷卻期。")
         elif has_bought_recently: 
@@ -317,34 +306,34 @@ if analysis_res is not None:
             suggest_qty = math.floor((cash * 0.15) / buy_price)
             st.success(f"🔥 強力建議：分批買入")
             st.markdown(f"📍 建議進場價: :green[${buy_price:.2f}]")
-            if current_weight >= 0.3: st.warning("⚠️ 警示：佔比過高。")
+            if current_weight >= 0.3: st.warning("⚠️ 警示：單一佔比 > 30%。")
             elif suggest_qty >= 1: st.markdown(f"📋 建議買進股數: :orange[{suggest_qty}] 股")
         elif (score <= 1 or last['RSI'] > 75) and held_shares > 1:
             sell_price = last['BB_upper']
             sell_qty = math.ceil(held_shares * 0.33)
             st.error(f"⚠️ 建議：分批減碼")
-            if last['RSI'] > 75: st.warning("💡 原因：RSI 極度超買。")
             st.markdown(f"📍 建議出場價: :red[${sell_price:.2f}]")
         else: 
             st.warning("⚖️ 狀態：觀望 (Neutral)")
             
         st.divider()
+        st.write(f"當前價格: `${curr_p:.2f}`")
         st.write(f"當前 RSI: `{last['RSI']:.1f}`")
         st.write(f"- 組合權重: `{current_weight*100:.1f}%`")
         
     with r_col:
-        st.subheader(f"📊 {analyze_target} 動態分析圖表")
+        st.subheader(f"📊 {analyze_target} 技術分析圖")
         df_plot = hist_df.tail(100)
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-        fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
+        fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="Price"), 1, 1)
         for ma, color in zip(['SMA20','SMA200'], ['#17BECF','#D62728']):
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
         
-        # MACD
+        # MACD Hist
         colors = ['red' if val < 0 else 'green' for val in df_plot['Hist']]
         fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Hist'], name="MACD Hist", marker_color=colors), 2, 1)
         
         fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig, use_container_width=True)
 else:
-    st.error(f"無法獲取標的 {analyze_target} 的數據。")
+    st.error(f"無法獲取標的 {analyze_target} 的數據，請確認代碼是否正確或 Yahoo Finance 是否有資料。")
