@@ -291,7 +291,7 @@ if hist is not None:
         st.markdown(f'<div class="price-box">現價: <span style="font-size: 1.8rem;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
 
         # 執行冷卻偵測
-        has_bought, has_sold = get_recent_trade_status(analyze_ticker, trades_df)
+        has_bought, has_sold = get_recent_trade_status(ticker, trades_df)
         
         # 評分系統
         score = 0
