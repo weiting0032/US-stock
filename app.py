@@ -11,11 +11,22 @@ from datetime import datetime, date, timedelta
 import math
 import gspread
 import requests
+import google.generativeai as genai
 from streamlit_autorefresh import st_autorefresh
 
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V8.6", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.0", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
+
+# 配置 Gemini API (請確保在 st.secrets 中設定 GEMINI_API_KEY)
+try:
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        ai_model = genai.GenerativeModel('gemini-1.5-flash')
+    else:
+        st.sidebar.warning("⚠️ 未偵測到 GEMINI_API_KEY，AI 功能將受限")
+except Exception as e:
+    st.sidebar.error(f"AI 配置出錯: {e}")
 
 st.markdown("""
     <style>
@@ -35,7 +46,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ===============================
-# 1. 數據獲取 (S&P 500 爬蟲)
+# 1. 數據獲取與 AI 邏輯
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -49,8 +60,28 @@ def get_sp500_tickers():
     except:
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
+def get_ai_insight(ticker, score, last_price, rsi):
+    """詢問 AI 對該標的的展望"""
+    prompt = f"""
+    你是專業的美股分析師。目前標的 {ticker} 的量化指標如下：
+    - 技術面總分: {score}/4 (4分為極強勢)
+    - 目前股價: ${last_price:.2f}
+    - RSI 指標: {rsi:.1f}
+    
+    請針對此標的提供：
+    1. 近期公司經營現況與亮點。
+    2. 未來一季的產業前景與潛在催化劑（Catalysts）。
+    3. 針對目前量化得分 {score}，給予風險管理建議。
+    請用繁體中文回答，條列式呈現，語氣客觀且具洞察力。
+    """
+    try:
+        response = ai_model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return f"AI 服務暫時無法回應: {str(e)}"
+
 # ===============================
-# 2. 技術指標核心
+# 2. 技術指標核心 (邏輯維持原樣)
 # ===============================
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
@@ -107,7 +138,6 @@ def save_trade(d, ticker, t, p, s):
 # ===============================
 st.sidebar.title("🎮 Command Center")
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
-
 sp500_list = get_sp500_tickers()
 is_manual = st.sidebar.checkbox("Manual Input (for AXTI, ONDS...)")
 
@@ -130,7 +160,7 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 5. 資產運算 (新增個股損益明細)
+# 5. 資產運算 (包含個股損益明細)
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -183,11 +213,10 @@ c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
 c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
-# 新增：個股持倉損益明細 (功能 1)
+# 個股持倉明細表格
 if portfolio_cal:
     with st.expander("🔍 查看個股即時損益明細", expanded=True):
         detail_df = pd.DataFrame(portfolio_cal)
-        # 格式化顯示
         display_df = detail_df.copy()
         display_df['AvgCost'] = display_df['AvgCost'].map('${:,.2f}'.format)
         display_df['RealPrice'] = display_df['RealPrice'].map('${:,.2f}'.format)
@@ -197,12 +226,12 @@ if portfolio_cal:
         st.dataframe(display_df[['Ticker', 'Shares', 'AvgCost', 'RealPrice', 'Unrealized', 'PL_Pct', 'MktVal']], use_container_width=True)
 
 # ===============================
-# 6. 量化策略引擎 (功能 2：全標的分析)
+# 6. 量化策略引擎 + AI 分析模組
 # ===============================
 st.divider()
-st.subheader("🎯 策略決策中心")
+st.subheader("🎯 策略決策與 AI 洞察")
 
-# 允許用戶選擇現有持股或輸入新標的
+# 分析對象切換
 analysis_mode = st.radio("選擇分析對象", ["我的持股", "搜尋全市場標的"], horizontal=True)
 
 if analysis_mode == "我的持股":
@@ -213,7 +242,7 @@ else:
         search_manual = st.checkbox("手動輸入代碼")
     with col_s2:
         if search_manual:
-            analyze_target = st.text_input("請輸入美股代碼 (如: TSLA, SOXL)", value="NVDA").upper().strip()
+            analyze_target = st.text_input("請輸入代碼 (如: TSLA)", value="NVDA").upper().strip()
         else:
             selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
             analyze_target = selected_s.split(" - ")[0] if selected_s else "NVDA"
@@ -230,47 +259,44 @@ if hist is not None:
         held_shares = target_info['Shares'] if target_info else 0
         current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
         
-        # 3天區間冷卻偵測 (邏輯不變)
+        # 冷卻期判斷
         COOLDOWN_DAYS = 3
         cutoff_date_str = (date.today() - timedelta(days=COOLDOWN_DAYS)).strftime('%Y-%m-%d')
         recent_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] >= cutoff_date_str)]
         has_sold_recently = not recent_trades[recent_trades['Type'].str.contains("賣出")].empty
         has_bought_recently = not recent_trades[recent_trades['Type'].str.contains("買入")].empty
 
-        # 評分系統 (邏輯不變)
+        # 評分邏輯
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
         if last['Hist'] > 0: score += 1 
         
-        # 決策輸出
-        if has_sold_recently: 
-            st.info(f"⏳ 處於減碼冷卻期 ({COOLDOWN_DAYS} 天內已賣出)，等待指標修復。")
-        elif has_bought_recently: 
-            st.info(f"⏳ 處於建倉冷卻期 ({COOLDOWN_DAYS} 天內已買入)，避免過度交易。")
+        if has_sold_recently: st.info(f"⏳ 處於減碼冷卻期 ({COOLDOWN_DAYS} 天內已賣出)")
+        elif has_bought_recently: st.info(f"⏳ 處於建倉冷卻期 ({COOLDOWN_DAYS} 天內已買入)")
         elif score >= 3:
             buy_price = (last['BB_lower'] + last['SMA20']) / 2
-            # 優化：若無持股，以總現金 20% 計算建議股數
             suggest_qty = math.floor((cash * 0.2) / buy_price)
             st.success(f"🔥 建議：分批買入")
-            st.markdown(f"📍 建議進場價: :green[${buy_price:.2f}] 以下")
+            st.markdown(f"📍 建議進場價: :green[${buy_price:.2f}]")
             if current_weight >= 0.3: st.warning("⚠️ 警示：單一持股佔比 > 30%。")
-            elif suggest_qty >= 1: st.markdown(f"📋 建議買進股數: :orange[{suggest_qty}] 股")
+            elif suggest_qty >= 1: st.markdown(f"📋 建議股數: :orange[{suggest_qty}] 股")
         elif score <= 1 and held_shares > 1:
             sell_price = last['BB_upper']
             sell_qty = math.ceil(held_shares * 0.33)
             st.error(f"⚠️ 建議：分批減碼")
-            st.markdown(f"📍 建議出場價: :red[${sell_price:.2f}] 以上")
+            st.markdown(f"📍 建議出場價: :red[${sell_price:.2f}]")
             st.markdown(f"📋 建議減碼股數: :orange[{sell_qty}] 股")
         else: 
-            st.warning("⚖️ 狀態：觀望 (Hold / Neutral)")
-            st.write("目前指標未達買賣門檻，建議維持現狀。")
-            
+            st.warning("⚖️ 狀態：觀望 (Hold)")
+
         st.divider()
-        st.write(f"當前標的數據分析:")
-        st.write(f"- 當前股價: `${curr_p:.2f}`")
-        st.write(f"- 持有股數: `{held_shares:.1f}`")
-        st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控上限: 30%)")
+        # 新增 AI 分析按鈕 (功能擴充)
+        if st.button(f"🤖 詢問 AI 對 {analyze_target} 的看法"):
+            with st.spinner("Gemini 正在調閱資料並分析..."):
+                insight = get_ai_insight(analyze_target, score, curr_p, last['RSI'])
+                st.markdown("### 🧠 AI 投資觀點")
+                st.info(insight)
         
     with r_col:
         st.subheader(f"📊 {analyze_target} 技術面動態圖表")
@@ -280,11 +306,7 @@ if hist is not None:
         for ma, color in zip(['SMA20','SMA200'], ['#17BECF','#D62728']):
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
         
-        # 下方 MACD 柱狀圖
         colors = ['red' if val < 0 else 'green' for val in df_plot['Hist']]
         fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Hist'], name="MACD Hist", marker_color=colors), 2, 1)
-        
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
         st.plotly_chart(fig, use_container_width=True)
-else:
-    st.error(f"無法獲取標的 {analyze_target} 的數據，請檢查代碼是否正確。")
