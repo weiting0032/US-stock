@@ -20,15 +20,11 @@ st_autorefresh(interval=15000, limit=None, key="heartbeat")
 # --- AI 模型初始化 (解決 NameError) ---
 ai_model = None
 try:
-    # 支援兩種 Secret 讀取方式，確保靈活性
-    api_key = st.secrets.get("GEMINI_API_KEY")
-    if api_key:
-        genai.configure(api_key=api_key)
-        ai_model = genai.GenerativeModel('gemini-1.5-flash')
-    else:
-        st.sidebar.warning("⚠️ Secrets 中未偵測到 GEMINI_API_KEY")
-except Exception as e:
-    st.sidebar.error(f"AI 配置失敗: {e}")
+    # 嘗試使用包含 models/ 前綴的完整名稱
+    ai_model = genai.GenerativeModel('models/gemini-1.5-flash')
+except:
+    # 如果還是不行，改用 1.0 穩定版測試
+    ai_model = genai.GenerativeModel('gemini-pro')
 
 # ===============================
 # 1. 核心功能函式
