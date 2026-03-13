@@ -43,50 +43,37 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 def get_ai_insight(ticker, score, last_price, rsi):
-    """向 Gemini 請求分析，具備安全性寬鬆設定與強制顯示機制"""
+    """向 Gemini 請求分析，確保使用 1.5-flash 避免額度問題"""
     if not api_key:
         return "❌ AI 模組未就緒，請檢查 Secrets 中的 API Key 設定。"
     
-    # 設定安全性過濾器為最低，避免因為財經數據被誤判為有害內容而回傳空白
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
+    # 強制指定 1.5-flash，這是目前免費額度最慷慨且穩定的模型
+    # 避免系統自動跳到權限不足的 pro 模型
+    target_model_name = 'gemini-1.5-flash'
     
     prompt = f"""
     你是專業美股分析師。請針對標的 {ticker} 分析：
     1. 當前股價 ${last_price:.2f} 且量化得分 {score}/4 情況下的短評。
     2. 該公司近期營運亮點與未來一季展望。
     3. 針對目前分數給予風險管理建議。
-    請用繁體中文，條列式回答，確保語氣專業。
+    請用繁體中文，條列式回答。
     """
     
     try:
-        available_models = [
-            m.name for m in genai.list_models() 
-            if 'generateContent' in m.supported_generation_methods
-        ]
-        
-        # 優先順序：1.5-flash > 1.0-pro > 清單第一個
-        target_model_name = next((m for m in available_models if '1.5-flash' in m), 
-                                 next((m for m in available_models if 'pro' in m), available_models[0]))
-        
-        model = genai.GenerativeModel(model_name=target_model_name, safety_settings=safety_settings)
+        model = genai.GenerativeModel(model_name=target_model_name)
         response = model.generate_content(prompt)
         
-        # 檢查是否有內容回傳
         if response and response.text:
             return f"*(✅ 實際使用模型: `{target_model_name}`)*\n\n" + response.text
         else:
-            return "⚠️ AI 回傳了空值，可能是內容觸發了 Google 的自動過濾機制。"
+            return "⚠️ AI 回傳了空值，請稍後再試。"
 
     except Exception as e:
-        # 捕捉細節錯誤，例如權限問題或配額限制
         error_msg = str(e)
-        if "User location is not supported" in error_msg:
-            return "❌ 錯誤：您的 API Key 所在的 GCP 專案區域不支援此模型。"
+        if "429" in error_msg:
+            return "❌ [額度限制] 請求過於頻繁，或您的免費額度已達上限。請等候 1 分鐘後再點擊，或檢查 Google AI Studio 是否有設定帳單。"
+        if "404" in error_msg:
+            return f"❌ [模型錯誤] 找不到模型 `{target_model_name}`，請嘗試更換模型名稱。"
         return f"AI 請求發生例外錯誤: {error_msg}"
 
 @st.cache_data(ttl=600)
