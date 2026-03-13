@@ -5,4 +5,3 @@ plotly
 gspread
 requests
 streamlit-autorefresh
-google-generativeai>=0.8.0
