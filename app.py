@@ -13,33 +13,44 @@ import gspread
 import requests
 from streamlit_autorefresh import st_autorefresh
 
-# --- 憑證獲取 ---
-# 請確保在 Streamlit Secrets 中設定了 TG_TOKEN 與 TG_CHAT_ID
-TG_TOKEN = st.secrets.get("TG_TOKEN", "")
-TG_CHAT_ID = st.secrets.get("TG_CHAT_ID", "")
+# --- 憑證設定 ---
+# 優先讀取 Secrets，若無則使用您提供的數值
+TG_TOKEN = st.secrets.get("TG_TOKEN", "8226282394:AAFtOx24a_wcGrqbU_h5M8VFzpKWD0KWRDw")
+TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731"))
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
 st.set_page_config(page_title="Pro 量化投資戰情室 V9.6", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 # ===============================
-# 1. 通訊函數
+# 1. 通訊函數 (強化診斷版)
 # ===============================
 def send_telegram_msg(message):
-    """發送訊息至 Telegram"""
+    """發送訊息至 Telegram 並回報詳細狀態"""
     if not TG_TOKEN or not TG_CHAT_ID:
-        st.error("❌ 找不到 Telegram 憑證，請檢查 Secrets 設定。")
-        return
+        st.error("❌ 找不到憑證！請檢查 Secrets。")
+        return None
+    
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    
     try:
-        r = requests.post(url, json=payload, timeout=5)
-        return r.json()
+        response = requests.post(url, json=payload, timeout=5)
+        result = response.json()
+        if result.get("ok"):
+            return result
+        else:
+            # 報錯給使用者看
+            err_desc = result.get("description", "未知錯誤")
+            st.error(f"⚠️ Telegram 傳送失敗：{err_desc}")
+            if "Forbidden" in err_desc:
+                st.warning("👉 請在 Telegram 搜尋您的機器人並按下『開始 (Start)』！")
+            return None
     except Exception as e:
-        st.error(f"Telegram 發送失敗: {e}")
+        st.error(f"❌ 網路連線錯誤：{e}")
         return None
 
-# 自定義 CSS
+# 自定義 CSS (保持 V9.5 樣式)
 st.markdown("""
     <style>
     [data-testid="stMetricValue"] { font-size: 1.8rem !important; white-space: nowrap !important; }
@@ -53,7 +64,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ===============================
-# 2. 數據獲取與處理 (保持原邏輯)
+# 2. 數據獲取與處理 (原邏輯)
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -94,7 +105,7 @@ def get_analysis(symbol):
     except: return None
 
 # ===============================
-# 3. Google Sheets 整合
+# 3. Google Sheets (保持原邏輯)
 # ===============================
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
@@ -138,11 +149,12 @@ def sync_nav_history(total_assets):
 # ===============================
 st.sidebar.title("🎮 Command Center")
 
-# --- 新增測試按鈕 ---
-st.sidebar.subheader("📡 通訊測試")
+# --- 通訊測試按鈕 ---
+st.sidebar.subheader("📡 通訊監測")
 if st.sidebar.button("發送 TG 測試訊息"):
-    test_res = send_telegram_msg("🚀 測試成功！量化投資戰情室已連線。")
-    if test_res: st.sidebar.success("已送出，請檢查手機！")
+    test_res = send_telegram_msg("🚀 測試成功！量化投資戰情室已連線。\n測試時間: " + datetime.now().strftime("%H:%M:%S"))
+    if test_res:
+        st.sidebar.success("✅ 已成功送達您的手機！")
 
 st.sidebar.divider()
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
@@ -166,7 +178,7 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 5. 資產運算與 UI
+# 5. 資產運算 (核心邏輯)
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -202,6 +214,9 @@ total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 history_df = sync_nav_history(total_assets)
 
+# ===============================
+# 6. UI 顯示 (保持原有的美化格式)
+# ===============================
 st.title("🏛️ 專業級資產配置管理 V9.6")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
@@ -214,7 +229,7 @@ def color_profit_loss(val):
     return f"color: {'#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'}"
 
 if history_df is not None and not history_df.empty:
-    with st.expander("📈 投資組合績效回測追蹤 (NAV Curve) & 持倉明細", expanded=True):
+    with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
         fig_nav = go.Figure()
         fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', fill='tozeroy', name='NAV', line=dict(color='#00FFCC')))
         fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
@@ -224,7 +239,7 @@ if history_df is not None and not history_df.empty:
             st.dataframe(df_styled, use_container_width=True)
 
 # ===============================
-# 6. 量化策略引擎 (含自動通知)
+# 7. 量化策略引擎 (含 TG 通知邏輯)
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
@@ -259,31 +274,31 @@ if hist is not None:
         notify_msg = ""
         if score >= 3:
             buy_p = (last['BB_lower'] + last['SMA20']) / 2
-            suggest_qty = math.floor((total_assets * 0.1) / curr_p)
             st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
             if curr_p <= buy_p * 1.01:
-                notify_msg = f"🔔 【買入提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議進場價: ${buy_p:.2f}\n評分: {score}/5"
+                notify_msg = f"🔔 【買入提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n進場參考價: ${buy_p:.2f}\n評分: {score}/5"
         elif score <= 1 and held_shares > 0:
             sell_p = last['BB_upper']
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
             if curr_p >= sell_p * 0.99:
-                notify_msg = f"🔔 【減碼提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n建議出場價: ${sell_p:.2f}\n評分: {score}/5"
+                notify_msg = f"🔔 【減碼提醒】{analyze_ticker}\n現價: ${curr_p:.2f}\n出場參考價: ${sell_p:.2f}\n評分: {score}/5"
         else: 
             st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
 
+        # 發送邏輯 (同標的一天僅發一次)
         if notify_msg:
             msg_key = f"sent_{analyze_ticker}_{date.today()}"
             if msg_key not in st.session_state:
                 send_telegram_msg(notify_msg)
                 st.session_state[msg_key] = True
-                st.toast("Telegram 通知已發送！", icon="📩")
+                st.toast(f"{analyze_ticker} 通知已送出！", icon="📩")
 
         st.divider()
-        st.write(f"🛡️ **ATR 動態風控 (ATR: {curr_atr:.2f})**")
-        st.write(f"- 建議停損 (2*ATR): :red[${(curr_p - 2*curr_atr):.2f}]")
-        st.write(f"- 建議獲利 (3*ATR): :green[${(curr_p + 3*curr_atr):.2f}]")
+        st.write(f"🛡️ **ATR 風控 (ATR: {curr_atr:.2f})**")
+        st.write(f"- 建議停損: :red[${(curr_p - 2*curr_atr):.2f}]")
+        st.write(f"- 建議獲利: :green[${(curr_p + 3*curr_atr):.2f}]")
 
     with r_col:
         df_plot = hist.tail(100)
