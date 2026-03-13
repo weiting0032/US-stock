@@ -126,7 +126,7 @@ def sync_nav_history(total_assets):
     except: return None
 
 # ===============================
-# 3. 自動化掃描與指令生成引擎 (已修正股數邏輯)
+# 3. 自動化掃描引擎 (採用新策略)
 # ===============================
 def run_auto_scanner(portfolio_list, trades_df, current_cash, total_assets):
     for item in portfolio_list:
