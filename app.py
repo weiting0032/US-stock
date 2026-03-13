@@ -14,34 +14,18 @@ import google.generativeai as genai
 from streamlit_autorefresh import st_autorefresh
 
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.1", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.3", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
-# ===============================
-# 修正後的 AI 配置區塊 (V9.2)
-# ===============================
-ai_model = None
-
+# --- AI 全域配置 ---
+api_key = st.secrets.get("GEMINI_API_KEY")
 try:
-    api_key = st.secrets.get("GEMINI_API_KEY")
     if api_key:
         genai.configure(api_key=api_key)
-        # 修正點：使用完整路徑 'models/gemini-1.5-flash'
-        # 這是為了解決部分 API 版本的 404 報錯
-        ai_model = genai.GenerativeModel('models/gemini-1.5-flash')
-        
-        # 測試連線，若 1.5-flash 依然失敗則備援至 gemini-pro
-        try:
-            # 這裡不實際請求，僅做邏輯檢查
-            pass 
-        except:
-            ai_model = genai.GenerativeModel('gemini-pro')
-            
-        st.sidebar.success("✅ AI 模組已就緒")
     else:
-        st.sidebar.warning("⚠️ 未偵測到 GEMINI_API_KEY")
+        st.sidebar.warning("⚠️ Secrets 中未偵測到 GEMINI_API_KEY")
 except Exception as e:
-    st.sidebar.error(f"AI 配置失敗: {e}")
+    st.sidebar.error(f"AI 初始配置失敗: {e}")
 
 # ===============================
 # 1. 核心功能函式
@@ -59,9 +43,9 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 def get_ai_insight(ticker, score, last_price, rsi):
-    """向 Gemini 請求基本面與展望分析"""
-    if ai_model is None:
-        return "❌ AI 模型未就緒，請檢查 Secrets 中的 API Key 設定。"
+    """向 Gemini 請求基本面與展望分析 (具備模型自動備援機制)"""
+    if not api_key:
+        return "❌ AI 模組未就緒，請檢查 Secrets 中的 API Key 設定。"
     
     prompt = f"""
     你是專業美股分析師。請針對標的 {ticker} 分析：
@@ -70,18 +54,27 @@ def get_ai_insight(ticker, score, last_price, rsi):
     3. 潛在風險提示。
     請用繁體中文，條列式回答。
     """
-    try:
-        response = ai_model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        return f"AI 請求失敗: {str(e)}"
+    
+    # 自動備援名單：依序嘗試不同版本的模型名稱
+    models_to_test = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
+    last_error = ""
+    
+    for m_name in models_to_test:
+        try:
+            temp_model = genai.GenerativeModel(m_name)
+            response = temp_model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            last_error = str(e)
+            continue # 如果這個模型報錯(如404)，就換下一個嘗試
+            
+    return f"AI 請求失敗，已嘗試多種模型。最後錯誤訊息: {last_error}"
 
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
     try:
         df = yf.Ticker(symbol).history(period="2y")
         if df.empty: return None
-        # 技術指標計算 (維持原邏輯)
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA200'] = df['Close'].rolling(200).mean()
         std = df['Close'].rolling(20).std()
@@ -99,10 +92,9 @@ def get_analysis(symbol):
     except: return None
 
 # ===============================
-# 2. Google Sheets 整合 (使用你提供的 service_account)
+# 2. Google Sheets 整合 
 # ===============================
 def get_gsheet_client():
-    # 直接從 secrets 讀取完整字典
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
 
 @st.cache_data(ttl=300)
@@ -233,13 +225,11 @@ if hist is not None:
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
         held_shares = target_info['Shares'] if target_info else 0
         
-        # 評分與冷卻邏輯 (維持原代碼)
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
         if last['Hist'] > 0: score += 1 
 
-        # 顯示建議 (簡化顯示)
         if score >= 3:
             st.success("🔥 建議：分批買入")
             buy_p = (last['BB_lower'] + last['SMA20']) / 2
