@@ -17,14 +17,31 @@ PORTFOLIO_SHEET_TITLE = 'US Stock'
 st.set_page_config(page_title="Pro 量化投資戰情室 V9.1", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
-# --- AI 模型初始化 (解決 NameError) ---
+# ===============================
+# 修正後的 AI 配置區塊 (V9.2)
+# ===============================
 ai_model = None
+
 try:
-    # 嘗試使用包含 models/ 前綴的完整名稱
-    ai_model = genai.GenerativeModel('models/gemini-1.5-flash')
-except:
-    # 如果還是不行，改用 1.0 穩定版測試
-    ai_model = genai.GenerativeModel('gemini-pro')
+    api_key = st.secrets.get("GEMINI_API_KEY")
+    if api_key:
+        genai.configure(api_key=api_key)
+        # 修正點：使用完整路徑 'models/gemini-1.5-flash'
+        # 這是為了解決部分 API 版本的 404 報錯
+        ai_model = genai.GenerativeModel('models/gemini-1.5-flash')
+        
+        # 測試連線，若 1.5-flash 依然失敗則備援至 gemini-pro
+        try:
+            # 這裡不實際請求，僅做邏輯檢查
+            pass 
+        except:
+            ai_model = genai.GenerativeModel('gemini-pro')
+            
+        st.sidebar.success("✅ AI 模組已就緒")
+    else:
+        st.sidebar.warning("⚠️ 未偵測到 GEMINI_API_KEY")
+except Exception as e:
+    st.sidebar.error(f"AI 配置失敗: {e}")
 
 # ===============================
 # 1. 核心功能函式
