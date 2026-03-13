@@ -44,6 +44,23 @@ def send_telegram_msg(message):
         return res.json().get("ok")
     except: return False
 
+# --- 2. 核心分析與冷卻偵測函數 ---
+def get_recent_trade_status(ticker, trades_df):
+    """偵測 3 天內是否有交易紀錄"""
+    if trades_df.empty:
+        return False, False
+    
+    COOLDOWN_DAYS = 3
+    cutoff_date = date.today() - timedelta(days=COOLDOWN_DAYS)
+    
+    # 確保 Date 欄位是 datetime 格式
+    trades_df['Date'] = pd.to_datetime(trades_df['Date']).dt.date
+    recent = trades_df[(trades_df['Ticker'] == ticker) & (trades_df['Date'] >= cutoff_date)]
+    
+    has_bought = not recent[recent['Type'].str.contains("買入")].empty
+    has_sold = not recent[recent['Type'].str.contains("賣出")].empty
+    return has_bought, has_sold
+    
 @st.cache_data(ttl=600)
 def get_unified_analysis(symbol):
     try:
@@ -111,55 +128,46 @@ def sync_nav_history(total_assets):
 # ===============================
 # 3. 自動化掃描與指令生成引擎 (已修正股數邏輯)
 # ===============================
-def run_auto_scanner(portfolio_list, current_cash):
-    """背景掃描，並根據 cash 動態建議買入股數"""
-    risk_per_trade_ratio = 0.05 # 每次交易動用 5% 現金
-
+def run_auto_scanner(portfolio_list, trades_df, current_cash, total_assets):
     for item in portfolio_list:
         ticker = item['Ticker']
-        current_shares = item['Shares']
+        held_shares = item['Shares']
+        current_weight = item['MktVal'] / total_assets if total_assets > 0 else 0
+        
         hist = get_unified_analysis(ticker)
         if hist is None: continue
-        
         last = hist.iloc[-1]
         curr_p, curr_atr = last['Close'], last['ATR']
         
-        # 評分邏輯
+        # 冷卻期與評分
+        has_bought, has_sold = get_recent_trade_status(ticker, trades_df)
         score = 0
-        if curr_p > last['SMA200']: score += 2
-        if last['RSI'] < 45: score += 1
-        if last['Hist'] > 0: score += 1
-        vol_ratio = last['Volume'] / last['Vol_MA20']
-        if vol_ratio > 1.5 and last['Close'] > last['Open']: score += 1
-        
-        buy_target = (last['BB_lower'] + last['SMA20']) / 2
-        sell_target = last['BB_upper']
-        
+        if curr_p > last['SMA200']: score += 2 
+        if last['RSI'] < 40: score += 1.5 
+        if last['Hist'] > 0: score += 1 
+        if curr_p < last['BB_lower']: score += 1 
+
         msg = ""
-        # 買入指令 (動態股數)
-        if score >= 3 and curr_p <= buy_target * 1.01:
-            suggested_buy = math.floor((current_cash * risk_per_trade_ratio) / curr_p)
-            if suggested_buy > 0:
-                msg = (
-                    f"🔥 **【買入指令建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
-                    f"✅ 建議買入價: `${buy_target:.2f}` 以下\n📊 建議操作: **分批買入 {suggested_buy} 股**\n"
-                    f"🛡️ 建議停損: `${(curr_p - 2*curr_atr):.2f}`\n🚀 建議獲利: `${(curr_p + 3*curr_atr):.2f}`\n評分: {score}/5"
-                )
-        # 賣出指令
-        elif score <= 1 and curr_p >= sell_target * 0.99 and current_shares > 0:
-            reduce_shares = math.ceil(current_shares * 0.5)
-            msg = (
-                f"⚠️ **【賣出指令建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
-                f"❌ 建議出場價: `${sell_target:.2f}` 以上\n📊 建議操作: **分批減碼 {reduce_shares} 股**\n"
-                f"📉 目前持股: {current_shares} 股\n評分: {score}/5"
-            )
+        # 買入決策 (評分高於 3.5 且無購買冷卻)
+        if score >= 3.5 and not has_bought:
+            buy_price = (last['BB_lower'] + last['SMA20']) / 2
+            suggest_qty = math.floor((current_cash * 0.15) / buy_price)
+            if suggest_qty >= 1 and current_weight < 0.3:
+                msg = (f"🔥 **【強力買入建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
+                       f"✅ 建議買入價: `${buy_price:.2f}`\n📊 建議股數: **{suggest_qty} 股**\n評分: {score}/5.5")
+
+        # 賣出決策 (評分低或 RSI 過熱且無賣出冷卻)
+        elif (score <= 1 or last['RSI'] > 75) and held_shares > 1 and not has_sold:
+            sell_price = last['BB_upper']
+            sell_qty = math.ceil(held_shares * 0.33)
+            msg = (f"⚠️ **【分批減碼建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
+                   f"❌ 建議出場價: `${sell_price:.2f}`\n📊 建議減碼: **{sell_qty} 股**\n評分: {score}/5.5")
 
         if msg:
-            sent_key = f"auto_{ticker}_{date.today()}"
+            sent_key = f"v996_{ticker}_{date.today()}"
             if sent_key not in st.session_state:
                 if send_telegram_msg(msg):
                     st.session_state[sent_key] = True
-                    st.toast(f"已發送 {ticker} 交易通知！")
 
 # ===============================
 # 4. Sidebar 控制中心
@@ -291,7 +299,7 @@ if hist is not None:
         st.markdown(f'<div class="price-box">現價: <span style="font-size: 1.8rem;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
 
         # 執行冷卻偵測
-        has_bought, has_sold = get_recent_trade_status(ticker, trades_df)
+        has_bought, has_sold = get_recent_trade_status(analyze_ticker, trades_df)
         
         # 評分系統
         score = 0
