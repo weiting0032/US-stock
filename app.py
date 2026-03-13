@@ -307,6 +307,13 @@ if hist is not None:
                 current_shares = item['Shares']
                 break
 
+        # --- 新增：動態計算建議買入股數 ---
+        # 設定每次交易動用剩餘現金的安全比例 (此處預設為 5%)
+        risk_per_trade_ratio = 0.05 
+        investable_amount = cash * risk_per_trade_ratio
+        # 向下取整數，確保不會買超過可用資金
+        suggested_buy_shares = math.floor(investable_amount / curr_p) if curr_p > 0 else 0
+
         # 評分與指令 logic 與 run_auto_scanner 保持一致
         score = 0
         if curr_p > last['SMA200']: score += 2 
@@ -319,7 +326,11 @@ if hist is not None:
         if score >= 3:
             st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
-            st.markdown(f"📦 建議操作股數: :green[買入 10 股]")
+            if suggested_buy_shares > 0:
+                st.markdown(f"📦 建議操作股數: :green[買入 {suggested_buy_shares} 股] (依可用現金 5% 計算)")
+            else:
+                st.markdown(f"📦 建議操作股數: :gray[現金不足，建議觀望] (可用現金: ${cash:.2f})")
+                
         elif score <= 1:
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
