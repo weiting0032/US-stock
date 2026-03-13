@@ -167,6 +167,28 @@ def run_auto_scanner(portfolio_list, trades_df, current_cash, total_assets):
 st.sidebar.title("🎮 Command Center")
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
 
+
+
+# ===============================
+# 5. UI 渲染
+# ===============================
+st.title("🏛️ 專業級資產配置管理 V9.96")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("NAV 總值", f"${total_assets:,.1f}") 
+c2.metric("Cash 購買力", f"${cash:,.1f}")
+c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
+c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
+c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
+
+if history_df is not None and not history_df.empty:
+    with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
+        fig_nav = go.Figure()
+        fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', name='NAV', line=dict(color='#00FFCC')))
+        fig_nav.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig_nav, use_container_width=True)
+        if portfolio_cal:
+            st.dataframe(pd.DataFrame(portfolio_cal), use_container_width=True)
+
 trades_df = load_trades()
 # 資產計算邏輯
 portfolio_cal, cash, total_realized_pl = [], initial_capital, 0
@@ -200,27 +222,6 @@ total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 history_df = sync_nav_history(total_assets)
-
-# ===============================
-# 5. UI 渲染
-# ===============================
-st.title("🏛️ 專業級資產配置管理 V9.96")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("NAV 總值", f"${total_assets:,.1f}") 
-c2.metric("Cash 購買力", f"${cash:,.1f}")
-c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
-c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
-c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
-
-if history_df is not None and not history_df.empty:
-    with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
-        fig_nav = go.Figure()
-        fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', name='NAV', line=dict(color='#00FFCC')))
-        fig_nav.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig_nav, use_container_width=True)
-        if portfolio_cal:
-            st.dataframe(pd.DataFrame(portfolio_cal), use_container_width=True)
-
 # ===============================
 # 7. 量化策略決策中心 (UI 動態股數)
 # ===============================
