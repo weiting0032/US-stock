@@ -6,7 +6,7 @@ import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import math
 import gspread
 import requests
