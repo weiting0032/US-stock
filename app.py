@@ -167,7 +167,8 @@ def run_auto_scanner(portfolio_list, trades_df, current_cash, total_assets):
 st.sidebar.title("🎮 Command Center")
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
 
-
+total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
+history_df = sync_nav_history(total_assets)
 
 # ===============================
 # 5. UI 渲染
