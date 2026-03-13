@@ -251,6 +251,11 @@ c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
 c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}", delta=f"{total_unrealized_pl:,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
+# --- 持倉明細顏色邏輯 ---
+def color_profit_loss(val):
+    color = '#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'
+    return f'color: {color}'
+    
 if history_df is not None and not history_df.empty:
     with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
         fig_nav = go.Figure()
