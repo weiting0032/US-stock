@@ -15,20 +15,17 @@ from streamlit_autorefresh import st_autorefresh
 
 # --- 憑證設定 ---
 # 優先讀取 Secrets，若無則使用您提供的數值
-TG_TOKEN = st.secrets.get("TG_TOKEN", "8226282394:AAFtOx24a_wcGrqbU_h5M8VFzpKWD0KWRDw")
-TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731"))
+TG_TOKEN = st.secrets.get("TG_TOKEN", "8226282394:AAFtOx24a_wcGrqbU_h5M8VFzpKWD0KWRDw").strip()
+TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731")).strip()
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
 st.set_page_config(page_title="Pro 量化投資戰情室 V9.6", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
-# ===============================
-# 1. 通訊函數 (強化診斷版)
-# ===============================
 def send_telegram_msg(message):
-    """發送訊息至 Telegram 並回報詳細狀態"""
+    """發送訊息並針對 chat not found 提供引導"""
     if not TG_TOKEN or not TG_CHAT_ID:
-        st.error("❌ 找不到憑證！請檢查 Secrets。")
+        st.error("❌ 找不到憑證！請檢查 Secrets 設定。")
         return None
     
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -40,14 +37,18 @@ def send_telegram_msg(message):
         if result.get("ok"):
             return result
         else:
-            # 報錯給使用者看
             err_desc = result.get("description", "未知錯誤")
-            st.error(f"⚠️ Telegram 傳送失敗：{err_desc}")
-            if "Forbidden" in err_desc:
-                st.warning("👉 請在 Telegram 搜尋您的機器人並按下『開始 (Start)』！")
+            st.error(f"⚠️ Telegram 錯誤：{err_desc}")
+            
+            # 針對 "chat not found" 的專屬解決方案
+            if "chat not found" in err_desc.lower():
+                st.warning("💡 **解決方案：**")
+                st.markdown(f"1. 請在手機點開此連結: [啟動我的機器人](https://t.me/{(TG_TOKEN.split(':')[0])})")
+                st.markdown("2. 點擊畫面最下方的 **『開始 (Start)』**。")
+                st.markdown("3. 回到這裡再次點擊測試按鈕。")
             return None
     except Exception as e:
-        st.error(f"❌ 網路連線錯誤：{e}")
+        st.error(f"❌ 網路連線失敗：{e}")
         return None
 
 # 自定義 CSS (保持 V9.5 樣式)
