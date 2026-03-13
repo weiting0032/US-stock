@@ -5,3 +5,4 @@ plotly
 gspread
 requests
 streamlit-autorefresh
+lxml
