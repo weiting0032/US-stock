@@ -14,7 +14,7 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V8.9", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.0", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 st.markdown("""
@@ -26,7 +26,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ===============================
-# 1. 數據獲取 (S&P 500)
+# 1. 數據獲取 (S&P 500 爬蟲)
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -41,61 +41,44 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 # ===============================
-# 2. 技術指標核心 (回歸原版 + 財報修正)
+# 2. 技術指標核心 (新增成交量與 ATR 邏輯)
 # ===============================
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
     try:
-        tk = yf.Ticker(symbol)
-        df = tk.history(period="2y")
+        df = yf.Ticker(symbol).history(period="2y")
         if df.empty: return None
-        
-        # 核心指標計算
+        # 價格均線
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA200'] = df['Close'].rolling(200).mean()
+        # 布林帶
         std = df['Close'].rolling(20).std()
         df['BB_upper'] = df['SMA20'] + 2 * std
         df['BB_lower'] = df['SMA20'] - 2 * std
-        
-        # ATR 與 RSI/MACD
+        # ATR 動態波動
         high_low = df['High'] - df['Low']
         high_close = (df['High'] - df['Close'].shift()).abs()
         low_close = (df['Low'] - df['Close'].shift()).abs()
         df['ATR'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(14).mean()
-        
+        # RSI
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-        
+        # MACD
         ema12 = df['Close'].ewm(span=12, adjust=False).mean()
         ema26 = df['Close'].ewm(span=26, adjust=False).mean()
         df['MACD'] = ema12 - ema26
         df['Hist'] = df['MACD'] - df['MACD'].ewm(span=9, adjust=False).mean()
+        # 成交量分析 (20日均量)
+        df['Vol_MA20'] = df['Volume'].rolling(20).mean()
+        df['Vol_Ratio'] = df['Volume'] / df['Vol_MA20']
         
-        # 財報日修正邏輯
-        earnings_date = "N/A"
-        try:
-            # 嘗試多種抓取財報日的方式
-            cal = tk.get_calendar() # 部分版本 yf 需使用 get_calendar()
-            if cal is not None and not cal.empty:
-                if 'Earnings Date' in cal.index:
-                    earnings_date = cal.loc['Earnings Date'].values[0]
-                else:
-                    earnings_date = cal.iloc[0, 0]
-        except:
-            try:
-                # 備援方案：從 info 中找
-                earnings_date = tk.info.get('nextEarningsDate', "N/A")
-                if earnings_date != "N/A":
-                    earnings_date = datetime.fromtimestamp(earnings_date).strftime('%Y-%m-%d')
-            except: pass
-
-        return {"data": df, "earnings_date": earnings_date}
+        return df
     except: return None
 
 # ===============================
-# 3. Google Sheets 整合
+# 3. Google Sheets 整合 (新增 History 功能)
 # ===============================
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
@@ -119,6 +102,26 @@ def save_trade(d, ticker, t, p, s):
         return True
     except: return False
 
+def sync_nav_history(total_assets):
+    """每日自動紀錄淨值 (NAV)"""
+    try:
+        ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
+        try:
+            ws_history = ss.worksheet("History")
+        except gspread.exceptions.WorksheetNotFound:
+            ws_history = ss.add_worksheet(title="History", rows="1000", cols="5")
+            ws_history.append_row(["Date", "Total Assets"])
+        
+        existing_data = ws_history.get_all_records()
+        today_str = date.today().strftime('%Y-%m-%d')
+        
+        # 檢查今天是否已紀錄，若無則更新
+        if not existing_data or existing_data[-1].get("Date") != today_str:
+            ws_history.append_row([today_str, float(total_assets)])
+        return pd.DataFrame(ws_history.get_all_records())
+    except:
+        return None
+
 # ===============================
 # 4. Sidebar 控制中心
 # ===============================
@@ -126,7 +129,7 @@ st.sidebar.title("🎮 Command Center")
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
 
 sp500_list = get_sp500_tickers()
-is_manual = st.sidebar.checkbox("Manual Input (for AXTI, ONDS...)")
+is_manual = st.sidebar.checkbox("Manual Input (Ticker)")
 
 with st.sidebar.form("trade_entry"):
     if is_manual:
@@ -147,7 +150,7 @@ with st.sidebar.form("trade_entry"):
             st.rerun()
 
 # ===============================
-# 5. 資產運算 (原本抓取邏輯)
+# 5. 資產運算與歷史紀錄
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -193,8 +196,11 @@ total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
 total_pl_v = total_assets - initial_capital
 
+# 執行 NAV 歷史同步
+history_df = sync_nav_history(total_assets)
+
 # UI: 頂部總覽
-st.title("🏛️ 專業級資產配置管理 V8.9")
+st.title("🏛️ 專業級資產配置管理 V9")
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
@@ -202,43 +208,29 @@ c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
 c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
-# ===============================
-# 5.5 視覺化與風險管理面板
-# ===============================
+# --- 新增功能：NAV 績效曲線圖 ---
+if history_df is not None and not history_df.empty:
+    with st.expander("📈 投資組合淨值趨勢 (NAV Curve)", expanded=False):
+        fig_nav = go.Figure()
+        fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], 
+                                     mode='lines+markers', name='Total Assets',
+                                     line=dict(color='#00FFCC', width=3),
+                                     fill='tozeroy', fillcolor='rgba(0, 255, 204, 0.1)'))
+        fig_nav.update_layout(template="plotly_dark", height=400, margin=dict(l=20, r=20, t=20, b=20),
+                              xaxis_title="日期", yaxis_title="資產總額 (USD)")
+        st.plotly_chart(fig_nav, use_container_width=True)
+
 if portfolio_cal:
-    st.divider()
-    v_col1, v_col2 = st.columns([4, 6])
-    
-    with v_col1:
-        st.subheader("🍕 持倉權重分析")
-        w_df = pd.DataFrame(portfolio_cal)
-        fig_pie = go.Figure(data=[go.Pie(
-            labels=w_df['Ticker'], values=w_df['MktVal'], hole=.4,
-            marker=dict(colors=['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A'])
-        )])
-        fig_pie.update_layout(margin=dict(t=30, b=0, l=0, r=0), height=350, template="plotly_dark")
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    with v_col2:
-        st.subheader("🛡️ 個股風險管理 (ATR 停損)")
-        risk_list = []
-        for p in portfolio_cal:
-            res = get_analysis(p['Ticker'])
-            if res:
-                df_r = res['data']
-                atr_val = df_r['ATR'].iloc[-1]
-                stop_loss = p['RealPrice'] - (2 * atr_val)
-                risk_list.append({
-                    "Ticker": p['Ticker'],
-                    "當前價": f"${p['RealPrice']:.2f}",
-                    "ATR (14D)": f"${atr_val:.2f}",
-                    "停損參考": f"${stop_loss:.2f}",
-                    "財報日預估": str(res['earnings_date'])[:10]
-                })
-        st.dataframe(pd.DataFrame(risk_list), use_container_width=True, hide_index=True)
+    with st.expander("🔍 查看個股即時損益明細", expanded=True):
+        detail_df = pd.DataFrame(portfolio_cal)
+        display_df = detail_df.copy()
+        for col in ['AvgCost', 'RealPrice', 'Unrealized', 'MktVal']:
+            display_df[col] = display_df[col].map('${:,.2f}'.format)
+        display_df['PL_Pct'] = display_df['PL_Pct'].map('{:,.2f}%'.format)
+        st.dataframe(display_df[['Ticker', 'Shares', 'AvgCost', 'RealPrice', 'Unrealized', 'PL_Pct', 'MktVal']], use_container_width=True)
 
 # ===============================
-# 6. 量化策略引擎 (回歸原版邏輯)
+# 6. 量化策略引擎 (帶量突破 + ATR)
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
@@ -251,74 +243,68 @@ else:
     col_s1, col_s2 = st.columns([1, 2])
     with col_s1: search_manual = st.checkbox("手動輸入代碼")
     with col_s2:
-        if search_manual:
-            analyze_target = st.text_input("請輸入美股代碼", value="NVDA").upper().strip()
+        if search_manual: analyze_target = st.text_input("請輸入代碼", value="NVDA").upper().strip()
         else:
-            selected_s = st.selectbox("從 S&P 500 搜尋標的", options=sp500_list)
+            selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
             analyze_target = selected_s.split(" - ")[0] if selected_s else "NVDA"
 
-res = get_analysis(analyze_target)
-if res is not None:
-    hist = res['data']
+hist = get_analysis(analyze_target)
+if hist is not None:
     l_col, r_col = st.columns([3, 7])
     last = hist.iloc[-1]
     curr_p = last['Close']
+    curr_atr = last['ATR']
     
     with l_col:
         st.subheader(f"🛠️ 建議策略 ({analyze_target})")
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
         held_shares = target_info['Shares'] if target_info else 0
-        current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
         
-        # 3天交易冷卻
-        COOLDOWN_DAYS = 3
-        cutoff_date_str = (date.today() - timedelta(days=COOLDOWN_DAYS)).strftime('%Y-%m-%d')
-        recent_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] >= cutoff_date_str)]
-        has_sold_recently = not recent_trades[recent_trades['Type'].str.contains("賣出")].empty
-        has_bought_recently = not recent_trades[recent_trades['Type'].str.contains("買入")].empty
-
-        # --- 回歸原版評分與觸發門檻 ---
+        # --- 策略邏輯強化 ---
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
         if last['Hist'] > 0: score += 1 
+        # 新增：帶量突破判定 (成交量 > 20MA 1.5倍 且 收盤 > 開盤)
+        is_volume_breakout = last['Vol_Ratio'] > 1.5 and last['Close'] > last['Open']
+        if is_volume_breakout: score += 1
         
-        if has_sold_recently: 
-            st.info(f"⏳ 處於減碼冷卻期。")
-        elif has_bought_recently: 
-            st.info(f"⏳ 處於建倉冷卻期。")
-        elif score >= 3:
+        # 顯示帶量狀態
+        if is_volume_breakout:
+            st.markdown("🚀 **偵測到帶量突破！** (成交量為均量 :orange[{:.1f}] 倍)".format(last['Vol_Ratio']))
+
+        # 決策輸出
+        if score >= 3:
             buy_price = (last['BB_lower'] + last['SMA20']) / 2
-            suggest_qty = math.floor((cash * 0.2) / buy_price)
-            st.success(f"🔥 建議：分批買入")
-            st.markdown(f"📍 建議進場價: :green[${buy_price:.2f}] 以下")
-            if current_weight >= 0.3: st.warning("⚠️ 警示：單一持股佔比 > 30%。")
-            elif suggest_qty >= 1: st.markdown(f"📋 建議買進股數: :orange[{suggest_qty}] 股")
+            st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
+            st.markdown(f"📍 建議進場: :green[${buy_price:.2f}] 以下")
         elif score <= 1 and held_shares > 1:
-            sell_price = last['BB_upper']
-            sell_qty = math.ceil(held_shares * 0.33)
-            st.error(f"⚠️ 建議：分批減碼")
-            st.markdown(f"📍 建議出場價: :red[${sell_price:.2f}] 以上")
-            st.markdown(f"📋 建議減碼股數: :orange[{sell_qty}] 股")
+            st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
         else: 
-            st.warning("⚖️ 狀態：觀望 (Neutral)")
-            
+            st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
+
+        # --- 新增：ATR 動態風控區 ---
         st.divider()
-        st.write(f"- 當前股價: `${curr_p:.2f}`")
-        st.write(f"- 持有股數: `{held_shares:.1f}`")
-        st.write(f"- 財報預估: `{res['earnings_date']}`")
-        
+        st.markdown("🛡️ **ATR 動態風控設置**")
+        stop_loss = curr_p - (2.0 * curr_atr)
+        take_profit = curr_p + (3.0 * curr_atr)
+        st.write(f"- 建議停損 (2.0 ATR): :red[${stop_loss:.2f}]")
+        st.write(f"- 建議獲利 (3.0 ATR): :green[${take_profit:.2f}]")
+        st.caption(f"當前 14D ATR 波動值: {curr_atr:.2f}")
+            
     with r_col:
-        st.subheader(f"📊 {analyze_target} 動態圖表")
+        st.subheader(f"📊 {analyze_target} 技術面動態圖表")
         df_plot = hist.tail(100)
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+        # 主圖：K線與均線
         fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
         for ma, color in zip(['SMA20','SMA200'], ['#17BECF','#D62728']):
             fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
+        # 副圖：成交量 (配合量比顯示)
+        vol_colors = ['#EF5350' if row['Close'] < row['Open'] else '#26A69A' for _, row in df_plot.iterrows()]
+        fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Volume'], name="Volume", marker_color=vol_colors), 2, 1)
         
-        colors = ['red' if val < 0 else 'green' for val in df_plot['Hist']]
-        fig.add_trace(go.Bar(x=df_plot.index, y=df_plot['Hist'], name="MACD Hist", marker_color=colors), 2, 1)
-        fig.update_layout(height=550, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=30, b=10))
         st.plotly_chart(fig, use_container_width=True)
 else:
     st.error(f"無法獲取標的 {analyze_target} 的數據。")
