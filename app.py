@@ -17,7 +17,7 @@ TG_TOKEN = st.secrets.get("TG_TOKEN", "8252298047:AAHJ_HSd_vrZlAC6RHtNQYaW6nJ1ey
 TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731")).strip()
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.96", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.97", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 # 自定義 CSS
@@ -34,7 +34,7 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # ===============================
-# 1. 核心函數
+# 1. 核心函數定義
 # ===============================
 def send_telegram_msg(message):
     if not TG_TOKEN or not TG_CHAT_ID: return False
@@ -46,46 +46,31 @@ def send_telegram_msg(message):
     except: return False
 
 def get_recent_trade_status(ticker, trades_df):
-    """偵測 3 天內是否有交易紀錄"""
     if trades_df.empty: return False, False
     COOLDOWN_DAYS = 3
     cutoff_date = date.today() - timedelta(days=COOLDOWN_DAYS)
-    # 統一日期格式進行比較
     temp_df = trades_df.copy()
     temp_df['Date'] = pd.to_datetime(temp_df['Date']).dt.date
     recent = temp_df[(temp_df['Ticker'] == ticker) & (temp_df['Date'] >= cutoff_date)]
-    has_bought = not recent[recent['Type'].str.contains("買入")].empty
-    has_sold = not recent[recent['Type'].str.contains("賣出")].empty
-    return has_bought, has_sold
+    return not recent[recent['Type'].str.contains("買入")].empty, not recent[recent['Type'].str.contains("賣出")].empty
 
 @st.cache_data(ttl=600)
 def get_unified_analysis(symbol):
     try:
         df = yf.Ticker(symbol).history(period="2y")
         if df.empty: return None
-        df['SMA20'] = df['Close'].rolling(20).mean()
-        df['SMA200'] = df['Close'].rolling(200).mean()
+        df['SMA20'] = df['Close'].rolling(20).mean(); df['SMA200'] = df['Close'].rolling(200).mean()
         std = df['Close'].rolling(20).std()
-        df['BB_upper'] = df['SMA20'] + 2 * std
-        df['BB_lower'] = df['SMA20'] - 2 * std
-        hl = df['High'] - df['Low']
-        hc = (df['High'] - df['Close'].shift()).abs()
-        lc = (df['Low'] - df['Close'].shift()).abs()
+        df['BB_upper'] = df['SMA20'] + 2 * std; df['BB_lower'] = df['SMA20'] - 2 * std
+        hl, hc, lc = df['High']-df['Low'], (df['High']-df['Close'].shift()).abs(), (df['Low']-df['Close'].shift()).abs()
         df['ATR'] = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
         delta = df['Close'].diff()
-        gain = delta.clip(lower=0).rolling(14).mean()
-        loss = -delta.clip(upper=0).rolling(14).mean()
+        gain, loss = delta.clip(lower=0).rolling(14).mean(), -delta.clip(upper=0).rolling(14).mean()
         df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
-        df['Hist'] = df['MACD'] - df['MACD'].ewm(span=9, adjust=False).mean()
+        df['Hist'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
         return df
     except: return None
 
-# ===============================
-# 2. Google Sheets 連線
-# ===============================
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
 
@@ -96,12 +81,9 @@ def load_trades():
         data = sh.get_all_records()
         if not data: return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
         df = pd.DataFrame(data)
-        for c in ['Price', 'Shares', 'Total']:
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        for c in ['Price', 'Shares', 'Total']: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         return df
-    except Exception as e:
-        st.error(f"讀取試算表失敗: {e}")
-        return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
+    except: return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
 
 def save_trade(d, ticker, t, p, s):
     try:
@@ -114,94 +96,60 @@ def sync_nav_history(total_assets):
     try:
         ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
         try: ws_history = ss.worksheet("History")
-        except:
-            ws_history = ss.add_worksheet(title="History", rows="1000", cols="2")
-            ws_history.append_row(["Date", "Total Assets"])
+        except: ws_history = ss.add_worksheet(title="History", rows="1000", cols="2"); ws_history.append_row(["Date", "Total Assets"])
         today_str = date.today().strftime('%Y-%m-%d')
         existing = ws_history.get_all_records()
-        if not (existing and str(existing[-1].get("Date")) == today_str):
-            ws_history.append_row([today_str, float(total_assets)])
+        if not (existing and str(existing[-1].get("Date")) == today_str): ws_history.append_row([today_str, float(total_assets)])
         return pd.DataFrame(ws_history.get_all_records())
     except: return None
 
 # ===============================
-# 3. 自動化掃描引擎 (修正參數傳遞)
-# ===============================
-def run_auto_scanner(portfolio_list, trades_df, current_cash, total_assets):
-    if not portfolio_list: return
-    for item in portfolio_list:
-        ticker = item['Ticker']
-        held_shares = item['Shares']
-        current_weight = item['MktVal'] / total_assets if total_assets > 0 else 0
-        
-        hist = get_unified_analysis(ticker)
-        if hist is None: continue
-        last = hist.iloc[-1]
-        curr_p = last['Close']
-        
-        has_bought, has_sold = get_recent_trade_status(ticker, trades_df)
-        score = 0
-        if curr_p > last['SMA200']: score += 2 
-        if last['RSI'] < 40: score += 1.5 
-        if last['Hist'] > 0: score += 1 
-        if curr_p < last['BB_lower']: score += 1 
-
-        msg = ""
-        if score >= 3.5 and not has_bought:
-            buy_price = (last['BB_lower'] + last['SMA20']) / 2
-            suggest_qty = math.floor((current_cash * 0.15) / buy_price)
-            if suggest_qty >= 1 and current_weight < 0.3:
-                msg = f"🔥 **【強力買入建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n建議股數: {suggest_qty}\n評分: {score}"
-        elif (score <= 1 or last['RSI'] > 75) and held_shares >= 1 and not has_sold:
-            sell_qty = math.ceil(held_shares * 0.33)
-            msg = f"⚠️ **【分批減碼建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n建議賣出: {sell_qty}\n評分: {score}"
-
-        if msg:
-            sent_key = f"v996_{ticker}_{date.today()}"
-            if sent_key not in st.session_state:
-                if send_telegram_msg(msg): st.session_state[sent_key] = True
-
-# ===============================
-# 4. Sidebar & 數據處理
+# 4. Sidebar 控制中心 (UI 優先渲染)
 # ===============================
 st.sidebar.title("🎮 Command Center")
+if st.sidebar.button("發送 TG 測試訊息"):
+    if send_telegram_msg("🚀 測試成功！"): st.sidebar.success("✅ 手機已收到！")
+
+st.sidebar.divider()
 initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
 
-total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
-history_df = sync_nav_history(total_assets)
+# --- 這裡將新增交易功能往上提 ---
+@st.cache_data(ttl=86400)
+def get_sp500_tickers():
+    try:
+        df = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        return sorted((df['Symbol'].str.replace('.', '-', regex=False) + " - " + df['Security']).tolist())
+    except: return ["NVDA - NVIDIA", "AAPL - Apple"]
+
+sp500_list = get_sp500_tickers()
+is_manual = st.sidebar.checkbox("Manual Input (Ticker)")
+
+with st.sidebar.form("trade_entry"):
+    if is_manual: ticker_input = st.text_input("Enter Ticker").upper().strip()
+    else:
+        sel_stock = st.selectbox("Search Stock", options=sp500_list)
+        ticker_input = sel_stock.split(" - ")[0] if sel_stock else ""
+    t_type = st.selectbox("Type", ["買入 (Buy)", "賣出 (Sell)"])
+    t_date = st.date_input("Date", date.today())
+    t_price = st.number_input("Price", min_value=0.01, format="%.2f")
+    t_shares = st.number_input("Shares", min_value=0.01, format="%.2f")
+    if st.form_submit_button("Sync to Cloud"):
+        if ticker_input and save_trade(t_date, ticker_input, t_type, t_price, t_shares):
+            st.cache_data.clear(); st.rerun()
 
 # ===============================
-# 5. UI 渲染
+# 5. 資產運算 (放在 Sidebar 渲染之後)
 # ===============================
-st.title("🏛️ 專業級資產配置管理 V9.96")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("NAV 總值", f"${total_assets:,.1f}") 
-c2.metric("Cash 購買力", f"${cash:,.1f}")
-c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
-c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}")
-c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
-
-if history_df is not None and not history_df.empty:
-    with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
-        fig_nav = go.Figure()
-        fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', name='NAV', line=dict(color='#00FFCC')))
-        fig_nav.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig_nav, use_container_width=True)
-        if portfolio_cal:
-            st.dataframe(pd.DataFrame(portfolio_cal), use_container_width=True)
-
 trades_df = load_trades()
-# 資產計算邏輯
-portfolio_cal, cash, total_realized_pl = [], initial_capital, 0
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
+portfolio_cal, cash, total_realized_pl = [], initial_capital, 0
 
 for ticker in unique_tickers:
     t_df = trades_df[trades_df['Ticker'] == ticker]
     shares_h, cost_b, ticker_realized_pl = 0, 0, 0
     for _, r in t_df.iterrows():
         val = r['Price'] * r['Shares']
-        if "買入" in r['Type']:
-            shares_h += r['Shares']; cost_b += val; cash -= val
+        if "買入" in r['Type']: shares_h += r['Shares']; cost_b += val; cash -= val
         else:
             if shares_h > 0:
                 avg_cost = cost_b / shares_h
@@ -218,6 +166,26 @@ for ticker in unique_tickers:
                 "MktVal": shares_h * real_p
             })
         except: pass
+
+total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
+history_df = sync_nav_history(total_assets)
+
+# ===============================
+# 6. UI 主畫面
+# ===============================
+st.title("🏛️ 專業級資產配置管理 V9.97")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("NAV 總值", f"${total_assets:,.1f}") 
+c2.metric("Cash 購買力", f"${cash:,.1f}")
+c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
+c4.metric("Total P/L", f"${(total_assets - initial_capital):,.1f}", f"{((total_assets/initial_capital-1)*100):.2f}%")
+
+if history_df is not None and not history_df.empty:
+    with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
+        fig_nav = go.Figure(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], fill='tozeroy', line=dict(color='#00FFCC')))
+        fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=0, r=0, t=0, b=0))
+        st.plotly_chart(fig_nav, use_container_width=True)
+        if portfolio_cal: st.dataframe(pd.DataFrame(portfolio_cal), use_container_width=True)
 
 total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
