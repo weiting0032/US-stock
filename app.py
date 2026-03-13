@@ -196,12 +196,12 @@ analyze_target = st.selectbox("🎯 Target Analysis", options=unique_tickers if 
 
 hist = get_analysis(analyze_target)
 if hist is not None:
-    l_col, r_col = st.columns([7, 3])
+    l_col, r_col = st.columns([3, 7])
     last = hist.iloc[-1]
     curr_p = last['Close']
     
-    with r_col:
-        st.subheader("🛠️ 量化策略建議 (V8.5)")
+    with l_col:
+        st.subheader("🛠️ 量化策略建議 (V8.6)")
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
         held_shares = target_info['Shares'] if target_info else 0
         current_weight = (target_info['MktVal'] / total_assets) if total_assets > 0 and target_info else 0
@@ -245,7 +245,7 @@ if hist is not None:
         st.write(f"- 持有股數: `{held_shares:.1f}`")
         st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控: 30%)")
         
-    with l_col:
+    with r_col:
         st.subheader(f"📊 {analyze_target} 技術面動態圖表")
         df_plot = hist.tail(100)
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
