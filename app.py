@@ -43,40 +43,51 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 def get_ai_insight(ticker, score, last_price, rsi):
-    """向 Gemini 請求基本面與展望分析 (具備動態模型探索機制)"""
+    """向 Gemini 請求分析，具備安全性寬鬆設定與強制顯示機制"""
     if not api_key:
         return "❌ AI 模組未就緒，請檢查 Secrets 中的 API Key 設定。"
+    
+    # 設定安全性過濾器為最低，避免因為財經數據被誤判為有害內容而回傳空白
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
     
     prompt = f"""
     你是專業美股分析師。請針對標的 {ticker} 分析：
     1. 當前股價 ${last_price:.2f} 且量化得分 {score}/4 情況下的短評。
     2. 該公司近期營運亮點與未來一季展望。
-    3. 潛在風險提示。
-    請用繁體中文，條列式回答。
+    3. 針對目前分數給予風險管理建議。
+    請用繁體中文，條列式回答，確保語氣專業。
     """
     
     try:
-        # 1. 動態探索：向 Google 請求該 API Key 支援的所有模型清單
         available_models = [
             m.name for m in genai.list_models() 
             if 'generateContent' in m.supported_generation_methods
         ]
         
-        if not available_models:
-            return "❌ 您的 API Key 目前無法存取任何支援文本生成的模型，請檢查 Google Cloud 專案權限。"
-            
-        # 2. 自動挑選：優先尋找 1.5-flash，若無則選擇清單中的第一個可用模型
-        target_model_name = next((m for m in available_models if '1.5-flash' in m), available_models[0])
+        # 優先順序：1.5-flash > 1.0-pro > 清單第一個
+        target_model_name = next((m for m in available_models if '1.5-flash' in m), 
+                                 next((m for m in available_models if 'pro' in m), available_models[0]))
         
-        # 3. 執行生成
-        model = genai.GenerativeModel(target_model_name)
+        model = genai.GenerativeModel(model_name=target_model_name, safety_settings=safety_settings)
         response = model.generate_content(prompt)
         
-        # 在回傳結果開頭印出實際使用的模型，方便追蹤
-        return f"*(✅ 系統已自動匹配最佳模型: `{target_model_name}`)*\n\n" + response.text
+        # 檢查是否有內容回傳
+        if response and response.text:
+            return f"*(✅ 實際使用模型: `{target_model_name}`)*\n\n" + response.text
+        else:
+            return "⚠️ AI 回傳了空值，可能是內容觸發了 Google 的自動過濾機制。"
 
     except Exception as e:
-        return f"AI 請求發生例外錯誤: {str(e)}\n(可能原因：網路連線中斷或套件版本過舊)"
+        # 捕捉細節錯誤，例如權限問題或配額限制
+        error_msg = str(e)
+        if "User location is not supported" in error_msg:
+            return "❌ 錯誤：您的 API Key 所在的 GCP 專案區域不支援此模型。"
+        return f"AI 請求發生例外錯誤: {error_msg}"
 
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
@@ -258,8 +269,10 @@ if hist is not None:
 
         st.divider()
         if st.button(f"🤖 詢問 AI 對 {analyze_target} 的看法"):
-            with st.spinner("🚀 AI 正在探索可用模型並進行分析..."):
-                st.info(get_ai_insight(analyze_target, score, curr_p, last['RSI']))
+            with st.spinner("🚀 AI 正在深度分析中..."):
+                result = get_ai_insight(analyze_target, score, curr_p, last['RSI'])
+                st.markdown(f"### 🧠 AI 投資觀點 ({analyze_target})")
+                st.write(result) # 使用 st.write 或 st.markdown
 
     with r_col:
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3])
