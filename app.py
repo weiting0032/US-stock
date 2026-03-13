@@ -192,9 +192,11 @@ c4.metric("Total P/L", f"${(total_assets - initial_capital):,.1f}", f"{((total_a
 
 if history_df is not None and not history_df.empty:
     with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
-        fig_nav = go.Figure(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], fill='tozeroy', line=dict(color='#00FFCC')))
-        fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=0, r=0, t=0, b=0))
+        fig_nav = go.Figure()
+        fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', fill='tozeroy', name='NAV', line=dict(color='#00FFCC')))
+        fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig_nav, use_container_width=True)
+        
         if portfolio_cal:
             st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
             df_styled = pd.DataFrame(portfolio_cal)
