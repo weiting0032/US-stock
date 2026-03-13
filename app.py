@@ -43,38 +43,51 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 def get_ai_insight(ticker, score, last_price, rsi):
-    """向 Gemini 請求分析，確保使用 1.5-flash 避免額度問題"""
+    """向 Gemini 請求分析，使用最精確的模型路徑解決 404 問題"""
     if not api_key:
         return "❌ AI 模組未就緒，請檢查 Secrets 中的 API Key 設定。"
     
-    # 強制指定 1.5-flash，這是目前免費額度最慷慨且穩定的模型
-    # 避免系統自動跳到權限不足的 pro 模型
-    target_model_name = 'gemini-1.5-flash'
+    # 使用完整路徑格式，這是 API 最穩定的呼叫方式
+    # 同時設定安全性，避免因為涉及財經數據被過濾成空白
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
     
     prompt = f"""
-    你是專業美股分析師。請針對標的 {ticker} 分析：
-    1. 當前股價 ${last_price:.2f} 且量化得分 {score}/4 情況下的短評。
-    2. 該公司近期營運亮點與未來一季展望。
-    3. 針對目前分數給予風險管理建議。
-    請用繁體中文，條列式回答。
+    你是專業美股分析師。目前標的 {ticker} 的量化指標如下：
+    - 技術面總分: {score}/4
+    - 目前股價: ${last_price:.2f}
+    - RSI 指標: {rsi:.1f}
+    
+    請提供：
+    1. 該公司近期經營現況。
+    2. 未來一季展望與潛在催化劑。
+    3. 針對 {score} 分的風險建議。
+    請用繁體中文回答。
     """
     
-    try:
-        model = genai.GenerativeModel(model_name=target_model_name)
-        response = model.generate_content(prompt)
-        
-        if response and response.text:
-            return f"*(✅ 實際使用模型: `{target_model_name}`)*\n\n" + response.text
-        else:
-            return "⚠️ AI 回傳了空值，請稍後再試。"
-
-    except Exception as e:
-        error_msg = str(e)
-        if "429" in error_msg:
-            return "❌ [額度限制] 請求過於頻繁，或您的免費額度已達上限。請等候 1 分鐘後再點擊，或檢查 Google AI Studio 是否有設定帳單。"
-        if "404" in error_msg:
-            return f"❌ [模型錯誤] 找不到模型 `{target_model_name}`，請嘗試更換模型名稱。"
-        return f"AI 請求發生例外錯誤: {error_msg}"
+    # 嘗試清單：完整路徑優先
+    test_names = ['models/gemini-1.5-flash', 'gemini-1.5-flash', 'models/gemini-pro']
+    
+    for m_name in test_names:
+        try:
+            model = genai.GenerativeModel(model_name=m_name, safety_settings=safety_settings)
+            response = model.generate_content(prompt)
+            if response and response.text:
+                return f"*(✅ 成功調用模型: `{m_name}`)*\n\n" + response.text
+        except Exception as e:
+            # 如果是 404 找不到，就繼續嘗試下一個名稱
+            if "404" in str(e):
+                continue
+            # 如果是 429 額度問題，直接回報
+            if "429" in str(e):
+                return "❌ [額度限制] 您目前的使用量已達上限，請等候 1 分鐘後再試。"
+            return f"❌ 呼叫 {m_name} 時發生錯誤: {str(e)}"
+            
+    return "❌ 嘗試了所有已知模型名稱 (Flash/Pro) 均失敗，請確認 API Key 權限或更新 google-generativeai 套件。"
 
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
