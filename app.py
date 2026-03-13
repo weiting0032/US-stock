@@ -200,16 +200,6 @@ if hist is not None:
     last = hist.iloc[-1]
     curr_p = last['Close']
     
-    with l_col:
-        st.subheader(f"📊 {analyze_target} 技術面動態圖表")
-        df_plot = hist.tail(100)
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-        fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
-        for ma, color in zip(['SMA20','SMA200'], ['#17BECF','#D62728']):
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
-        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
-
     with r_col:
         st.subheader("🛠️ 量化策略建議 (V8.5)")
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
@@ -254,4 +244,13 @@ if hist is not None:
         st.write(f"**持倉數據摘要**:")
         st.write(f"- 持有股數: `{held_shares:.1f}`")
         st.write(f"- 組合權重: `{current_weight*100:.1f}%` (風控: 30%)")
-
+        
+    with l_col:
+        st.subheader(f"📊 {analyze_target} 技術面動態圖表")
+        df_plot = hist.tail(100)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
+        fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
+        for ma, color in zip(['SMA20','SMA200'], ['#17BECF','#D62728']):
+            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
+        fig.update_layout(height=600, template="plotly_dark", xaxis_rangeslider_visible=False)
+        st.plotly_chart(fig, use_container_width=True)
