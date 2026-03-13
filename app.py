@@ -116,10 +116,15 @@ initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, ste
 # --- 這裡將新增交易功能往上提 ---
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        df = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
-        return sorted((df['Symbol'].str.replace('.', '-', regex=False) + " - " + df['Security']).tolist())
-    except: return ["NVDA - NVIDIA", "AAPL - Apple"]
+        response = requests.get(url, headers=headers, timeout=10)
+        df = pd.read_html(response.text)[0]
+        df['Display'] = df['Symbol'].str.replace('.', '-', regex=False) + " - " + df['Security']
+        return sorted(df['Display'].tolist())
+    except:
+        return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 sp500_list = get_sp500_tickers()
 is_manual = st.sidebar.checkbox("Manual Input (Ticker)")
