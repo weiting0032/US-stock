@@ -272,6 +272,36 @@ if hist is not None:
         fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
+def run_auto_scanner(portfolio_list, trades_df, current_cash, total_assets):
+    if not portfolio_list: return
+    for item in portfolio_list:
+        ticker = item['Ticker']
+        held_shares = item['Shares']
+        current_weight = item['MktVal'] / total_assets if total_assets > 0 else 0
+        hist = get_unified_analysis(ticker)
+        if hist is None: continue
+        last = hist.iloc[-1]
+        curr_p = last['Close']
+        has_bought, has_sold = get_recent_trade_status(ticker, trades_df)
+        score = 0
+        if curr_p > last['SMA200']: score += 2 
+        if last['RSI'] < 40: score += 1.5 
+        if last['Hist'] > 0: score += 1 
+        if curr_p < last['BB_lower']: score += 1 
+        
+        msg = ""
+        if score >= 3.5 and not has_bought and current_weight < 0.3:
+            buy_price = (last['BB_lower'] + last['SMA20']) / 2
+            qty = math.floor((current_cash * 0.15) / buy_price)
+            if qty >= 1: msg = f"🔥 強力買入 {ticker}: {qty} 股"
+        elif (score <= 1 or last['RSI'] > 75) and held_shares >= 1 and not has_sold:
+            qty = math.ceil(held_shares * 0.33)
+            msg = f"⚠️ 建議減碼 {ticker}: {qty} 股"
+        
+        if msg:
+            if f"tg_{ticker}_{date.today()}" not in st.session_state:
+                if send_telegram_msg(msg): st.session_state[f"tg_{ticker}_{date.today()}"] = True
+
 if portfolio_cal:
     run_auto_scanner(portfolio_cal, trades_df, cash, total_assets)
     st.sidebar.success("🤖 自動掃描引擎：運行中")
