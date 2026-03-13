@@ -54,6 +54,11 @@ def get_recent_trade_status(ticker, trades_df):
     recent = temp_df[(temp_df['Ticker'] == ticker) & (temp_df['Date'] >= cutoff_date)]
     return not recent[recent['Type'].str.contains("買入")].empty, not recent[recent['Type'].str.contains("賣出")].empty
 
+# --- 持倉明細顏色邏輯 ---
+def color_profit_loss(val):
+    color = '#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'
+    return f'color: {color}'
+
 @st.cache_data(ttl=600)
 def get_unified_analysis(symbol):
     try:
@@ -190,7 +195,20 @@ if history_df is not None and not history_df.empty:
         fig_nav = go.Figure(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], fill='tozeroy', line=dict(color='#00FFCC')))
         fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig_nav, use_container_width=True)
-        if portfolio_cal: st.dataframe(pd.DataFrame(portfolio_cal), use_container_width=True)
+        if portfolio_cal:
+            st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
+            df_styled = pd.DataFrame(portfolio_cal)
+            
+            # 使用 Styler 進行顏色美化
+            styled_table = df_styled.style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
+                .format({
+                    'AvgCost': '${:,.2f}', 
+                    'RealPrice': '${:,.2f}', 
+                    'Unrealized': '${:,.2f}', 
+                    'PL_Pct': '{:.2f}%', 
+                    'MktVal': '${:,.2f}'
+                })
+            st.dataframe(styled_table, use_container_width=True)
 
 total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
