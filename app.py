@@ -13,13 +13,11 @@ import requests
 from streamlit_autorefresh import st_autorefresh
 
 # --- 憑證設定 ---
-# 優先讀取 Secrets，若無則使用您提供的數值
 TG_TOKEN = st.secrets.get("TG_TOKEN", "8252298047:AAHJ_HSd_vrZlAC6RHtNQYaW6nJ1eywdKx4").strip()
 TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731")).strip()
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
 st.set_page_config(page_title="Pro 量化投資戰情室 V9.95", layout="wide")
-# 每 15 秒自動刷新，確保自動掃描引擎持續運行
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 # 自定義 CSS
@@ -39,7 +37,6 @@ st.markdown("""
 # 1. 通訊與數據核心函數
 # ===============================
 def send_telegram_msg(message):
-    """發送訊息至 Telegram"""
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
@@ -49,22 +46,18 @@ def send_telegram_msg(message):
 
 @st.cache_data(ttl=600)
 def get_unified_analysis(symbol):
-    """統一技術指標計算邏輯"""
     try:
         df = yf.Ticker(symbol).history(period="2y")
         if df.empty: return None
-        # 均線與布林帶
         df['SMA20'] = df['Close'].rolling(20).mean()
         df['SMA200'] = df['Close'].rolling(200).mean()
         std = df['Close'].rolling(20).std()
         df['BB_upper'] = df['SMA20'] + 2 * std
         df['BB_lower'] = df['SMA20'] - 2 * std
-        # ATR 風控計算
         hl = df['High'] - df['Low']
         hc = (df['High'] - df['Close'].shift()).abs()
         lc = (df['Low'] - df['Close'].shift()).abs()
         df['ATR'] = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
-        # RSI 與 MACD
         delta = df['Close'].diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = -delta.clip(upper=0).rolling(14).mean()
@@ -116,10 +109,12 @@ def sync_nav_history(total_assets):
     except: return None
 
 # ===============================
-# 3. 自動化掃描與指令生成引擎
+# 3. 自動化掃描與指令生成引擎 (已修正股數邏輯)
 # ===============================
-def run_auto_scanner(portfolio_list):
-    """背景掃描所有持股，偵測是否達到買賣指令觸發價"""
+def run_auto_scanner(portfolio_list, current_cash):
+    """背景掃描，並根據 cash 動態建議買入股數"""
+    risk_per_trade_ratio = 0.05 # 每次交易動用 5% 現金
+
     for item in portfolio_list:
         ticker = item['Ticker']
         current_shares = item['Shares']
@@ -129,7 +124,7 @@ def run_auto_scanner(portfolio_list):
         last = hist.iloc[-1]
         curr_p, curr_atr = last['Close'], last['ATR']
         
-        # 評分邏輯 (加權計算)
+        # 評分邏輯
         score = 0
         if curr_p > last['SMA200']: score += 2
         if last['RSI'] < 45: score += 1
@@ -141,14 +136,16 @@ def run_auto_scanner(portfolio_list):
         sell_target = last['BB_upper']
         
         msg = ""
-        # 買入指令 (分數高且接近建議價 1%)
+        # 買入指令 (動態股數)
         if score >= 3 and curr_p <= buy_target * 1.01:
-            msg = (
-                f"🔥 **【買入指令建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
-                f"✅ 建議買入價: `${buy_target:.2f}` 以下\n📊 建議操作: **分批買入 10 股**\n"
-                f"🛡️ 建議停損: `${(curr_p - 2*curr_atr):.2f}`\n🚀 建議獲利: `${(curr_p + 3*curr_atr):.2f}`\n評分: {score}/5"
-            )
-        # 賣出指令 (分數低且接近上軌 1%)
+            suggested_buy = math.floor((current_cash * risk_per_trade_ratio) / curr_p)
+            if suggested_buy > 0:
+                msg = (
+                    f"🔥 **【買入指令建議】**\n📌 標的: `{ticker}`\n💰 現價: `${curr_p:.2f}`\n"
+                    f"✅ 建議買入價: `${buy_target:.2f}` 以下\n📊 建議操作: **分批買入 {suggested_buy} 股**\n"
+                    f"🛡️ 建議停損: `${(curr_p - 2*curr_atr):.2f}`\n🚀 建議獲利: `${(curr_p + 3*curr_atr):.2f}`\n評分: {score}/5"
+                )
+        # 賣出指令
         elif score <= 1 and curr_p >= sell_target * 0.99 and current_shares > 0:
             reduce_shares = math.ceil(current_shares * 0.5)
             msg = (
@@ -251,11 +248,6 @@ c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
 c4.metric("Unrealized 未實現", f"${total_unrealized_pl:,.1f}", delta=f"{total_unrealized_pl:,.1f}")
 c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
-# --- 持倉明細顏色邏輯 ---
-def color_profit_loss(val):
-    color = '#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'
-    return f'color: {color}'
-    
 if history_df is not None and not history_df.empty:
     with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
         fig_nav = go.Figure()
@@ -263,22 +255,11 @@ if history_df is not None and not history_df.empty:
         fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig_nav, use_container_width=True)
         if portfolio_cal:
-            st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
             df_styled = pd.DataFrame(portfolio_cal)
-            
-            # 使用 Styler 進行顏色美化
-            styled_table = df_styled.style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
-                .format({
-                    'AvgCost': '${:,.2f}', 
-                    'RealPrice': '${:,.2f}', 
-                    'Unrealized': '${:,.2f}', 
-                    'PL_Pct': '{:.2f}%', 
-                    'MktVal': '${:,.2f}'
-                })
-            st.dataframe(styled_table, use_container_width=True)
+            st.dataframe(df_styled, use_container_width=True)
 
 # ===============================
-# 7. 量化策略決策中心
+# 7. 量化策略決策中心 (UI 動態股數)
 # ===============================
 st.divider()
 st.subheader("🎯 策略決策中心")
@@ -300,21 +281,16 @@ if hist is not None:
         st.subheader(f"🛠️ 建議策略 ({analyze_ticker})")
         st.markdown(f'<div class="price-box"><span style="font-size: 0.9rem; color: #888;">Current Market Price</span><br><span style="font-size: 2.2rem; font-weight: bold; color: #17BECF;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
         
-        # 取得目標分析標的之當前持股數
         current_shares = 0
         for item in portfolio_cal:
             if item['Ticker'] == analyze_ticker:
                 current_shares = item['Shares']
                 break
 
-        # --- 新增：動態計算建議買入股數 ---
-        # 設定每次交易動用剩餘現金的安全比例 (此處預設為 5%)
-        risk_per_trade_ratio = 0.05 
-        investable_amount = cash * risk_per_trade_ratio
-        # 向下取整數，確保不會買超過可用資金
-        suggested_buy_shares = math.floor(investable_amount / curr_p) if curr_p > 0 else 0
+        # UI 股數邏輯與背景掃描一致
+        risk_per_trade_ratio = 0.05
+        suggested_buy = math.floor((cash * risk_per_trade_ratio) / curr_p) if curr_p > 0 else 0
 
-        # 評分與指令 logic 與 run_auto_scanner 保持一致
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
@@ -326,22 +302,15 @@ if hist is not None:
         if score >= 3:
             st.success(f"🔥 建議：分批買入 (評分: {score}/5)")
             st.markdown(f"📍 建議進場價: :green[${buy_p:.2f}] 以下")
-            if suggested_buy_shares > 0:
-                st.markdown(f"📦 建議操作股數: :green[買入 {suggested_buy_shares} 股] (依可用現金 5% 計算)")
-            else:
-                st.markdown(f"📦 建議操作股數: :gray[現金不足，建議觀望] (可用現金: ${cash:.2f})")
-                
+            st.markdown(f"📦 建議操作股數: :green[買入 {suggested_buy} 股]")
         elif score <= 1:
             st.error(f"⚠️ 建議：分批減碼 (評分: {score}/5)")
             st.markdown(f"📍 建議出場價: :red[${sell_p:.2f}] 以上")
             if current_shares > 0:
                 reduce_shares = math.ceil(current_shares * 0.5)
-                st.markdown(f"📦 建議操作股數: :red[賣出 {reduce_shares} 股] (目前持股: {current_shares} 股)")
-            else:
-                st.markdown(f"📦 建議操作股數: :gray[無持股可賣出]")
+                st.markdown(f"📦 建議操作股數: :red[賣出 {reduce_shares} 股]")
         else:
             st.warning(f"⚖️ 狀態：觀望 (評分: {score}/5)")
-            st.markdown(f"📍 潛在進場價: ${buy_p:.2f} / 潛在出場價: ${sell_p:.2f}")
 
         st.divider()
         st.write(f"🛡️ **ATR 風控 (ATR: {curr_atr:.2f})**")
@@ -357,7 +326,7 @@ if hist is not None:
         fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig, use_container_width=True)
 
-# --- 核心：執行自動化持股掃描 ---
+# --- 核心執行：傳入 cash 確保掃描器邏輯一致 ---
 if portfolio_cal:
-    run_auto_scanner(portfolio_cal)
+    run_auto_scanner(portfolio_cal, cash)
     st.sidebar.success("🤖 自動掃描引擎：運行中")
