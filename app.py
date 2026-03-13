@@ -14,7 +14,7 @@ import google.generativeai as genai
 from streamlit_autorefresh import st_autorefresh
 
 PORTFOLIO_SHEET_TITLE = 'US Stock' 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.3", layout="wide")
+st.set_page_config(page_title="Pro 量化投資戰情室 V9.4", layout="wide")
 st_autorefresh(interval=15000, limit=None, key="heartbeat")
 
 # --- AI 全域配置 ---
@@ -28,7 +28,7 @@ except Exception as e:
     st.sidebar.error(f"AI 初始配置失敗: {e}")
 
 # ===============================
-# 1. 核心功能函式
+# 1. 核心功能函式 (新增動態模型探索)
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
@@ -43,7 +43,7 @@ def get_sp500_tickers():
         return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
 
 def get_ai_insight(ticker, score, last_price, rsi):
-    """向 Gemini 請求基本面與展望分析 (具備模型自動備援機制)"""
+    """向 Gemini 請求基本面與展望分析 (具備動態模型探索機制)"""
     if not api_key:
         return "❌ AI 模組未就緒，請檢查 Secrets 中的 API Key 設定。"
     
@@ -55,20 +55,28 @@ def get_ai_insight(ticker, score, last_price, rsi):
     請用繁體中文，條列式回答。
     """
     
-    # 自動備援名單：依序嘗試不同版本的模型名稱
-    models_to_test = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-pro']
-    last_error = ""
-    
-    for m_name in models_to_test:
-        try:
-            temp_model = genai.GenerativeModel(m_name)
-            response = temp_model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            last_error = str(e)
-            continue # 如果這個模型報錯(如404)，就換下一個嘗試
+    try:
+        # 1. 動態探索：向 Google 請求該 API Key 支援的所有模型清單
+        available_models = [
+            m.name for m in genai.list_models() 
+            if 'generateContent' in m.supported_generation_methods
+        ]
+        
+        if not available_models:
+            return "❌ 您的 API Key 目前無法存取任何支援文本生成的模型，請檢查 Google Cloud 專案權限。"
             
-    return f"AI 請求失敗，已嘗試多種模型。最後錯誤訊息: {last_error}"
+        # 2. 自動挑選：優先尋找 1.5-flash，若無則選擇清單中的第一個可用模型
+        target_model_name = next((m for m in available_models if '1.5-flash' in m), available_models[0])
+        
+        # 3. 執行生成
+        model = genai.GenerativeModel(target_model_name)
+        response = model.generate_content(prompt)
+        
+        # 在回傳結果開頭印出實際使用的模型，方便追蹤
+        return f"*(✅ 系統已自動匹配最佳模型: `{target_model_name}`)*\n\n" + response.text
+
+    except Exception as e:
+        return f"AI 請求發生例外錯誤: {str(e)}\n(可能原因：網路連線中斷或套件版本過舊)"
 
 @st.cache_data(ttl=600)
 def get_analysis(symbol):
@@ -225,12 +233,21 @@ if hist is not None:
         target_info = next((item for item in portfolio_cal if item["Ticker"] == analyze_target), None)
         held_shares = target_info['Shares'] if target_info else 0
         
+        # 冷卻期判斷
+        COOLDOWN_DAYS = 3
+        cutoff_date_str = (date.today() - timedelta(days=COOLDOWN_DAYS)).strftime('%Y-%m-%d')
+        recent_trades = trades_df[(trades_df['Ticker'] == analyze_target) & (trades_df['Date'] >= cutoff_date_str)]
+        has_sold_recently = not recent_trades[recent_trades['Type'].str.contains("賣出")].empty
+        has_bought_recently = not recent_trades[recent_trades['Type'].str.contains("買入")].empty
+        
         score = 0
         if curr_p > last['SMA200']: score += 2 
         if last['RSI'] < 45: score += 1 
         if last['Hist'] > 0: score += 1 
 
-        if score >= 3:
+        if has_sold_recently: st.info(f"⏳ 處於減碼冷卻期 ({COOLDOWN_DAYS} 天內已賣出)")
+        elif has_bought_recently: st.info(f"⏳ 處於建倉冷卻期 ({COOLDOWN_DAYS} 天內已買入)")
+        elif score >= 3:
             st.success("🔥 建議：分批買入")
             buy_p = (last['BB_lower'] + last['SMA20']) / 2
             st.write(f"建議價: ${buy_p:.2f} 以下")
@@ -241,7 +258,7 @@ if hist is not None:
 
         st.divider()
         if st.button(f"🤖 詢問 AI 對 {analyze_target} 的看法"):
-            with st.spinner("AI 分析中..."):
+            with st.spinner("🚀 AI 正在探索可用模型並進行分析..."):
                 st.info(get_ai_insight(analyze_target, score, curr_p, last['RSI']))
 
     with r_col:
