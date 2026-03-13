@@ -257,16 +257,20 @@ if history_df is not None and not history_df.empty:
         fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', fill='tozeroy', name='NAV', line=dict(color='#00FFCC')))
         fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig_nav, use_container_width=True)
-        # 使用 Styler 進行顏色美化
-        styled_table = df_styled.style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
-            .format({
-                'AvgCost': '${:,.2f}', 
-                'RealPrice': '${:,.2f}', 
-                'Unrealized': '${:,.2f}', 
-                'PL_Pct': '{:.2f}%', 
-                'MktVal': '${:,.2f}'
-            })
-        st.dataframe(styled_table, use_container_width=True)
+        if portfolio_cal:
+            st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
+            df_styled = pd.DataFrame(portfolio_cal)
+            
+            # 使用 Styler 進行顏色美化
+            styled_table = df_styled.style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
+                .format({
+                    'AvgCost': '${:,.2f}', 
+                    'RealPrice': '${:,.2f}', 
+                    'Unrealized': '${:,.2f}', 
+                    'PL_Pct': '{:.2f}%', 
+                    'MktVal': '${:,.2f}'
+                })
+            st.dataframe(styled_table, use_container_width=True)
 
 # ===============================
 # 7. 量化策略決策中心
