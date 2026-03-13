@@ -148,7 +148,7 @@ with st.sidebar.form("trade_entry"):
             st.cache_data.clear(); st.rerun()
 
 # ===============================
-# 5. 資產運算 (核心修正點)
+# 5. 資產運算
 # ===============================
 trades_df = load_trades()
 unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
@@ -159,7 +159,7 @@ for ticker in unique_tickers:
     shares_h, cost_b, ticker_realized_pl = 0, 0, 0
     for _, r in t_df.iterrows():
         val = r['Price'] * r['Shares']
-        if "買入" in r['Type']: 
+        if "買入" in r['Type']:
             shares_h += r['Shares']; cost_b += val; cash -= val
         else:
             if shares_h > 0:
@@ -171,56 +171,40 @@ for ticker in unique_tickers:
     if shares_h > 0:
         try:
             real_p = yf.Ticker(ticker).fast_info.last_price
-            avg_c = cost_b/shares_h
-            unrealized = (real_p - avg_c) * shares_h
+            avg_cost_val = cost_b / shares_h
             portfolio_cal.append({
-                "Ticker": ticker, 
-                "Shares": shares_h, 
-                "AvgCost": avg_c, 
-                "RealPrice": real_p, 
-                "Unrealized": unrealized,
-                "PL_Pct": (real_p / avg_c - 1) * 100, # 補上缺失欄位
-                "MktVal": shares_h * real_p
+                "Ticker": ticker, "Shares": shares_h, "AvgCost": avg_cost_val, 
+                "MktVal": shares_h*real_p, "RealPrice": real_p, 
+                "Unrealized": (real_p - avg_cost_val) * shares_h, "PL_Pct": ((real_p / avg_cost_val) - 1) * 100
             })
         except: pass
 
-total_mkt_val = sum(p['MktVal'] for p in portfolio_cal)
-total_assets = total_mkt_val + cash
+total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
+total_pl_v = total_assets - initial_capital
 history_df = sync_nav_history(total_assets)
 
-# ===============================
-# 6. UI 主畫面
-# ===============================
-st.title("🏛️ 專業級資產配置管理 V9.98")
-c1, c2, c3, c4 = st.columns(4)
+# UI 佈局
+st.title("🏛️ 專業級資產配置管理 V9.4")
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("NAV 總值", f"${total_assets:,.1f}") 
 c2.metric("Cash 購買力", f"${cash:,.1f}")
 c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
-c4.metric("Total P/L", f"${(total_assets - initial_capital):,.1f}", f"{((total_assets/initial_capital-1)*100):.2f}%")
+c4.metric("Unrealized 未實現", f"${sum(p['Unrealized'] for p in portfolio_cal):,.1f}")
+c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
-with st.expander("📈 績效回測追蹤 & 持倉明細", expanded=True):
-    if history_df is not None and not history_df.empty:
+if history_df is not None and not history_df.empty:
+    with st.expander("📈 投資組合績效回測追蹤 (NAV Curve) & 持倉明細", expanded=True):
         fig_nav = go.Figure()
         fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', fill='tozeroy', name='NAV', line=dict(color='#00FFCC')))
-        fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
+        fig_nav.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=10, b=10))
         st.plotly_chart(fig_nav, use_container_width=True)
-    
-    if portfolio_cal:
-        st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
-        df_styled = pd.DataFrame(portfolio_cal)
-        # 修正 Styler 並優化顯示
-        styled_table = df_styled.style.map(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
-            .format({
-                'AvgCost': '${:,.2f}', 
-                'RealPrice': '${:,.2f}', 
-                'Unrealized': '${:,.2f}', 
-                'PL_Pct': '{:.2f}%', 
-                'MktVal': '${:,.2f}',
-                'Shares': '{:.2f}'
-            })
-        st.dataframe(styled_table, use_container_width=True)
-    else:
-        st.info("目前無持倉數據。")
+        
+        if portfolio_cal:
+            detail_df = pd.DataFrame(portfolio_cal)
+            for col in ['AvgCost', 'RealPrice', 'Unrealized', 'MktVal']:
+                detail_df[col] = detail_df[col].map('${:,.2f}'.format)
+            detail_df['PL_Pct'] = detail_df['PL_Pct'].map('{:,.2f}%'.format)
+            st.dataframe(detail_df[['Ticker', 'Shares', 'AvgCost', 'RealPrice', 'Unrealized', 'PL_Pct', 'MktVal']], use_container_width=True)
 
 total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
 total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
