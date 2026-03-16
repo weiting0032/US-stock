@@ -146,9 +146,12 @@ def get_gsheet_client():
     try:
         import streamlit as st
 
+        if "gcp_service_account" in st.secrets:
+            creds = dict(st.secrets["gcp_service_account"])
+            return gspread.service_account_from_dict(creds)
+
         if "GCP_SERVICE_ACCOUNT" in st.secrets:
             secret_val = st.secrets["GCP_SERVICE_ACCOUNT"]
-
             if isinstance(secret_val, dict):
                 return gspread.service_account_from_dict(dict(secret_val))
 
