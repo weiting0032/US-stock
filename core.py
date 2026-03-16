@@ -33,6 +33,10 @@ ALERT_MIN_SCORE_CHANGE = float(os.getenv("ALERT_MIN_SCORE_CHANGE", "0.8"))
 def normalize_ticker(symbol: str) -> str:
     return str(symbol).upper().strip().replace(".", "-")
 
+def color_pl(val):
+    color = "#26A69A" if val > 0 else "#EF5350" if val < 0 else "white"
+    return f"color: {color}; font-weight: 600;"
+
 def get_recent_trade_status(ticker: str, trades_df: pd.DataFrame) -> Tuple[bool, bool]:
     if trades_df.empty:
         return False, False
@@ -49,7 +53,24 @@ def get_recent_trade_status(ticker: str, trades_df: pd.DataFrame) -> Tuple[bool,
     recent_buy = not recent[recent["Type"] == "BUY"].empty
     recent_sell = not recent[recent["Type"] == "SELL"].empty
     return recent_buy, recent_sell
-
+    
+def get_sp500_tickers() -> List[str]:
+    url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        df = pd.read_html(response.text)[0]
+        df["Display"] = df["Symbol"].astype(str).str.replace(".", "-", regex=False) + " - " + df["Security"].astype(str)
+        return sorted(df["Display"].tolist())
+    except Exception:
+        return [
+            "AAPL - Apple",
+            "MSFT - Microsoft",
+            "NVDA - NVIDIA",
+            "AMZN - Amazon",
+            "TSLA - Tesla",
+        ]
+        
 def normalize_trade_type(x: str) -> str:
     s = str(x).strip().upper()
     if "買" in s or "BUY" in s:
