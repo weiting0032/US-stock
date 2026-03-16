@@ -1,339 +1,1033 @@
-# ===============================
-# 0. 基礎設定 (V9.95 整合精確指令版)
-# ===============================
-import streamlit as st
-import yfinance as yf
+import math
+from datetime import date, timedelta, datetime
+from typing import Dict, List, Optional, Tuple
+
+import gspread
 import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime, date, timedelta
-import math
-import gspread
 import requests
+import streamlit as st
+import yfinance as yf
+from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
 
-# --- 憑證設定 ---
-TG_TOKEN = st.secrets.get("TG_TOKEN", "8252298047:AAHJ_HSd_vrZlAC6RHtNQYaW6nJ1eywdKx4").strip()
-TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "6484933731")).strip()
-PORTFOLIO_SHEET_TITLE = 'US Stock' 
 
-st.set_page_config(page_title="Pro 量化投資戰情室 V9.97", layout="wide")
-st_autorefresh(interval=15000, limit=None, key="heartbeat")
+# ===============================
+# 0. App Config
+# ===============================
+st.set_page_config(page_title="US Stock Portfolio Pro", layout="wide")
+st_autorefresh(interval=30000, limit=None, key="heartbeat_30s")
 
-# 自定義 CSS
-st.markdown("""
+st.markdown(
+    """
     <style>
-    [data-testid="stMetricValue"] { font-size: 1.8rem !important; white-space: nowrap !important; }
-    [data-testid="stMetricLabel"] { font-size: 0.9rem !important; }
-    .stMetric { border: 1px solid rgba(128, 128, 128, 0.3); padding: 10px !important; border-radius: 10px; }
+    [data-testid="stMetricValue"] {
+        font-size: 1.6rem !important;
+        white-space: nowrap !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 0.95rem !important;
+    }
+    .stMetric {
+        border: 1px solid rgba(128, 128, 128, 0.25);
+        padding: 10px !important;
+        border-radius: 12px;
+        background: rgba(255,255,255,0.02);
+    }
     .price-box {
-        background-color: rgba(128, 128, 128, 0.1);
-        padding: 15px; border-radius: 10px; border-left: 5px solid #17BECF; margin-bottom: 20px;
+        background-color: rgba(128, 128, 128, 0.08);
+        padding: 14px;
+        border-radius: 12px;
+        border-left: 5px solid #17BECF;
+        margin-bottom: 14px;
+    }
+    .section-card {
+        padding: 14px;
+        border-radius: 12px;
+        border: 1px solid rgba(128, 128, 128, 0.25);
+        background-color: rgba(255,255,255,0.02);
     }
     </style>
-    """, unsafe_allow_html=True)
+    """,
+    unsafe_allow_html=True
+)
+
+APP_TITLE = "🏛️ US Stock Portfolio Pro"
+PORTFOLIO_SHEET_TITLE = "US Stock"
+
+# --- Secrets ---
+TG_TOKEN = str(st.secrets.get("TG_TOKEN", "")).strip()
+TG_CHAT_ID = str(st.secrets.get("TG_CHAT_ID", "")).strip()
+
+# --- Strategy / Risk Params ---
+DEFAULT_INITIAL_CAPITAL = 32000.0
+MAX_POSITION_WEIGHT = 0.30
+RISK_PER_TRADE_PCT = 0.01
+CASH_RESERVE_PCT = 0.10
+COOLDOWN_DAYS = 3
+
 
 # ===============================
-# 1. 核心函數定義
+# 1. Utility Functions
 # ===============================
-def send_telegram_msg(message):
-    if not TG_TOKEN or not TG_CHAT_ID: return False
-    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+def normalize_ticker(symbol: str) -> str:
+    return symbol.upper().strip().replace(".", "-")
+
+
+def safe_float(x, default=0.0) -> float:
     try:
-        res = requests.post(url, json=payload, timeout=5)
-        return res.json().get("ok")
-    except: return False
+        return float(x)
+    except Exception:
+        return default
 
-def get_recent_trade_status(ticker, trades_df):
-    if trades_df.empty: return False, False
-    COOLDOWN_DAYS = 3
+
+def color_pl(val):
+    color = "#26A69A" if val > 0 else "#EF5350" if val < 0 else "white"
+    return f"color: {color}; font-weight: 600;"
+
+
+def send_telegram_msg(message: str) -> bool:
+    if not TG_TOKEN or not TG_CHAT_ID:
+        return False
+
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=8)
+        data = res.json()
+        return bool(data.get("ok"))
+    except Exception:
+        return False
+
+
+def get_recent_trade_status(ticker: str, trades_df: pd.DataFrame) -> Tuple[bool, bool]:
+    if trades_df.empty:
+        return False, False
+
     cutoff_date = date.today() - timedelta(days=COOLDOWN_DAYS)
     temp_df = trades_df.copy()
-    temp_df['Date'] = pd.to_datetime(temp_df['Date']).dt.date
-    recent = temp_df[(temp_df['Ticker'] == ticker) & (temp_df['Date'] >= cutoff_date)]
-    return not recent[recent['Type'].str.contains("買入")].empty, not recent[recent['Type'].str.contains("賣出")].empty
+    temp_df["Date"] = pd.to_datetime(temp_df["Date"], errors="coerce").dt.date
 
-# --- 持倉明細顏色邏輯 ---
-def color_profit_loss(val):
-    color = '#26A69A' if val > 0 else '#EF5350' if val < 0 else 'white'
-    return f'color: {color}'
+    recent = temp_df[
+        (temp_df["Ticker"] == ticker) &
+        (temp_df["Date"] >= cutoff_date)
+    ]
 
-@st.cache_data(ttl=600)
-def get_unified_analysis(symbol):
-    try:
-        df = yf.Ticker(symbol).history(period="2y")
-        if df.empty: return None
-        df['SMA20'] = df['Close'].rolling(20).mean(); df['SMA200'] = df['Close'].rolling(200).mean()
-        std = df['Close'].rolling(20).std()
-        df['BB_upper'] = df['SMA20'] + 2 * std; df['BB_lower'] = df['SMA20'] - 2 * std
-        hl, hc, lc = df['High']-df['Low'], (df['High']-df['Close'].shift()).abs(), (df['Low']-df['Close'].shift()).abs()
-        df['ATR'] = pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(14).mean()
-        delta = df['Close'].diff()
-        gain, loss = delta.clip(lower=0).rolling(14).mean(), -delta.clip(upper=0).rolling(14).mean()
-        df['RSI'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
-        df['Hist'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
-        return df
-    except: return None
+    recent_buy = not recent[recent["Type"] == "BUY"].empty
+    recent_sell = not recent[recent["Type"] == "SELL"].empty
+    return recent_buy, recent_sell
 
+
+# ===============================
+# 2. Google Sheets Layer
+# ===============================
+@st.cache_resource
 def get_gsheet_client():
     return gspread.service_account_from_dict(st.secrets["gcp_service_account"])
 
+
+def get_or_create_worksheet(spreadsheet, title: str, rows: int = 1000, cols: int = 12):
+    try:
+        return spreadsheet.worksheet(title)
+    except Exception:
+        return spreadsheet.add_worksheet(title=title, rows=str(rows), cols=str(cols))
+
+
+def init_sheets():
+    ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
+
+    ws_trades = get_or_create_worksheet(ss, "Trades", rows=3000, cols=10)
+    ws_history = get_or_create_worksheet(ss, "History", rows=3000, cols=5)
+
+    trades_headers = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
+    history_headers = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
+
+    if not ws_trades.get_all_values():
+        ws_trades.append_row(trades_headers)
+    if not ws_history.get_all_values():
+        ws_history.append_row(history_headers)
+
+    return ss, ws_trades, ws_history
+
+
 @st.cache_data(ttl=300)
-def load_trades():
+def load_trades() -> pd.DataFrame:
     try:
-        sh = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE).sheet1
-        data = sh.get_all_records()
-        if not data: return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
-        df = pd.DataFrame(data)
-        for c in ['Price', 'Shares', 'Total']: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+        _, ws_trades, _ = init_sheets()
+        records = ws_trades.get_all_records()
+        if not records:
+            return pd.DataFrame(columns=["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"])
+
+        df = pd.DataFrame(records)
+        expected_cols = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
+        for c in expected_cols:
+            if c not in df.columns:
+                df[c] = ""
+
+        df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
+        df["Type"] = df["Type"].astype(str).str.upper().str.strip()
+        for col in ["Price", "Shares", "Total"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.sort_values("Date").reset_index(drop=True)
         return df
-    except: return pd.DataFrame(columns=['Date','Ticker','Type','Price','Shares','Total'])
+    except Exception as e:
+        st.error(f"讀取交易紀錄失敗：{e}")
+        return pd.DataFrame(columns=["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"])
 
-def save_trade(d, ticker, t, p, s):
-    try:
-        sh = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE).sheet1
-        sh.append_row([str(d), ticker.upper().strip(), t, float(p), float(s), float(p*s)])
-        return True
-    except: return False
 
-def sync_nav_history(total_assets):
+def get_current_holding_shares(trades_df: pd.DataFrame, ticker: str) -> float:
+    ticker = normalize_ticker(ticker)
+    if trades_df.empty:
+        return 0.0
+    temp = trades_df[trades_df["Ticker"] == ticker].copy()
+    if temp.empty:
+        return 0.0
+    buy_shares = temp.loc[temp["Type"] == "BUY", "Shares"].sum()
+    sell_shares = temp.loc[temp["Type"] == "SELL", "Shares"].sum()
+    return max(0.0, buy_shares - sell_shares)
+
+
+def save_trade(trade_date: date, ticker: str, trade_type: str, price: float, shares: float, note: str = "") -> Tuple[bool, str]:
+    ticker = normalize_ticker(ticker)
+    trade_type = trade_type.upper().strip()
+    price = safe_float(price)
+    shares = safe_float(shares)
+
+    if not ticker:
+        return False, "Ticker 不可為空。"
+    if trade_type not in ["BUY", "SELL"]:
+        return False, "交易類型必須為 BUY 或 SELL。"
+    if price <= 0 or shares <= 0:
+        return False, "價格與股數必須大於 0。"
+    if trade_date > date.today():
+        return False, "交易日期不可大於今天。"
+
+    trades_df = load_trades()
+    holding_shares = get_current_holding_shares(trades_df, ticker)
+
+    if trade_type == "SELL" and shares > holding_shares:
+        return False, f"賣出股數超過持有股數，目前僅持有 {holding_shares:.4f} 股。"
+
     try:
-        ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
-        try: ws_history = ss.worksheet("History")
-        except: ws_history = ss.add_worksheet(title="History", rows="1000", cols="2"); ws_history.append_row(["Date", "Total Assets"])
-        today_str = date.today().strftime('%Y-%m-%d')
-        existing = ws_history.get_all_records()
-        if not (existing and str(existing[-1].get("Date")) == today_str): ws_history.append_row([today_str, float(total_assets)])
-        return pd.DataFrame(ws_history.get_all_records())
-    except: return None
+        _, ws_trades, _ = init_sheets()
+        total = round(price * shares, 4)
+        ws_trades.append_row([
+            str(trade_date),
+            ticker,
+            trade_type,
+            float(price),
+            float(shares),
+            float(total),
+            note
+        ])
+        st.cache_data.clear()
+        return True, "交易已成功寫入雲端。"
+    except Exception as e:
+        return False, f"寫入失敗：{e}"
+
+
+def sync_nav_history(total_assets: float, cash: float, market_value: float, total_pl: float) -> Optional[pd.DataFrame]:
+    try:
+        _, _, ws_history = init_sheets()
+        today_str = date.today().strftime("%Y-%m-%d")
+        records = ws_history.get_all_records()
+
+        should_append = True
+        if records:
+            last_row = records[-1]
+            if str(last_row.get("Date", "")) == today_str:
+                should_append = False
+
+        if should_append:
+            ws_history.append_row([
+                today_str,
+                float(total_assets),
+                float(cash),
+                float(market_value),
+                float(total_pl),
+            ])
+
+        history_df = pd.DataFrame(ws_history.get_all_records())
+        if not history_df.empty:
+            for c in ["Total Assets", "Cash", "Market Value", "Total P/L"]:
+                history_df[c] = pd.to_numeric(history_df[c], errors="coerce")
+        return history_df
+    except Exception as e:
+        st.warning(f"歷史 NAV 同步失敗：{e}")
+        return None
+
 
 # ===============================
-# 4. Sidebar 控制中心 (UI 優先渲染)
+# 3. Market Data / Indicator Layer
 # ===============================
-st.sidebar.title("🎮 Command Center")
-if st.sidebar.button("發送 TG 測試訊息"):
-    if send_telegram_msg("🚀 測試成功！"): st.sidebar.success("✅ 手機已收到！")
-
-st.sidebar.divider()
-initial_capital = st.sidebar.number_input("Initial Fund (USD)", value=32000, step=1000)
-
-# --- 這裡將新增交易功能往上提 ---
 @st.cache_data(ttl=86400)
-def get_sp500_tickers():
+def get_sp500_tickers() -> List[str]:
     url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(url, headers=headers, timeout=10)
         df = pd.read_html(response.text)[0]
-        df['Display'] = df['Symbol'].str.replace('.', '-', regex=False) + " - " + df['Security']
-        return sorted(df['Display'].tolist())
-    except:
-        return ["NVDA - NVIDIA", "AAPL - Apple", "TSLA - Tesla", "MSFT - Microsoft"]
+        df["Display"] = df["Symbol"].astype(str).str.replace(".", "-", regex=False) + " - " + df["Security"].astype(str)
+        return sorted(df["Display"].tolist())
+    except Exception:
+        return [
+            "AAPL - Apple",
+            "MSFT - Microsoft",
+            "NVDA - NVIDIA",
+            "AMZN - Amazon",
+            "TSLA - Tesla",
+        ]
 
-sp500_list = get_sp500_tickers()
-is_manual = st.sidebar.checkbox("Manual Input (Ticker)")
 
-with st.sidebar.form("trade_entry"):
-    if is_manual: ticker_input = st.text_input("Enter Ticker").upper().strip()
-    else:
-        sel_stock = st.selectbox("Search Stock", options=sp500_list)
-        ticker_input = sel_stock.split(" - ")[0] if sel_stock else ""
-    t_type = st.selectbox("Type", ["買入 (Buy)", "賣出 (Sell)"])
-    t_date = st.date_input("Date", date.today())
-    t_price = st.number_input("Price", min_value=0.01, format="%.2f")
-    t_shares = st.number_input("Shares", min_value=0.01, format="%.2f")
-    if st.form_submit_button("Sync to Cloud"):
-        if ticker_input and save_trade(t_date, ticker_input, t_type, t_price, t_shares):
-            st.cache_data.clear(); st.rerun()
+@st.cache_data(ttl=600)
+def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
+    try:
+        symbol = normalize_ticker(symbol)
+        df = yf.Ticker(symbol).history(period="2y", auto_adjust=False)
+        if df.empty:
+            return None
+
+        df = df.copy()
+        df["SMA20"] = df["Close"].rolling(20).mean()
+        df["SMA50"] = df["Close"].rolling(50).mean()
+        df["SMA200"] = df["Close"].rolling(200).mean()
+
+        std20 = df["Close"].rolling(20).std()
+        df["BB_upper"] = df["SMA20"] + 2 * std20
+        df["BB_lower"] = df["SMA20"] - 2 * std20
+
+        hl = df["High"] - df["Low"]
+        hc = (df["High"] - df["Close"].shift(1)).abs()
+        lc = (df["Low"] - df["Close"].shift(1)).abs()
+        tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+        df["ATR"] = tr.rolling(14).mean()
+
+        delta = df["Close"].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(14).mean()
+        avg_loss = loss.rolling(14).mean()
+        rs = avg_gain / (avg_loss + 1e-9)
+        df["RSI"] = 100 - (100 / (1 + rs))
+
+        ema12 = df["Close"].ewm(span=12, adjust=False).mean()
+        ema26 = df["Close"].ewm(span=26, adjust=False).mean()
+        df["MACD"] = ema12 - ema26
+        df["MACD_Signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
+        df["MACD_Hist"] = df["MACD"] - df["MACD_Signal"]
+
+        df["VOL_SMA20"] = df["Volume"].rolling(20).mean()
+        return df.dropna().copy()
+    except Exception:
+        return None
+
+
+def get_last_price(symbol: str) -> Optional[float]:
+    try:
+        ticker = yf.Ticker(normalize_ticker(symbol))
+        fi = getattr(ticker, "fast_info", None)
+        if fi and getattr(fi, "last_price", None):
+            return float(fi.last_price)
+    except Exception:
+        pass
+
+    try:
+        hist = yf.Ticker(normalize_ticker(symbol)).history(period="5d")
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+    except Exception:
+        pass
+
+    return None
+
 
 # ===============================
-# 5. 資產運算
+# 4. Portfolio Calculation
+# ===============================
+def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[List[Dict], float, float]:
+    if trades_df.empty:
+        return [], initial_capital, 0.0
+
+    cash = float(initial_capital)
+    portfolio = []
+    total_realized_pl = 0.0
+
+    for ticker in sorted(trades_df["Ticker"].dropna().unique().tolist()):
+        tdf = trades_df[trades_df["Ticker"] == ticker].sort_values("Date").copy()
+
+        shares_held = 0.0
+        cost_basis = 0.0
+        realized_pl = 0.0
+
+        for _, row in tdf.iterrows():
+            price = safe_float(row["Price"])
+            shares = safe_float(row["Shares"])
+            total = price * shares
+            trade_type = str(row["Type"]).upper().strip()
+
+            if trade_type == "BUY":
+                shares_held += shares
+                cost_basis += total
+                cash -= total
+
+            elif trade_type == "SELL":
+                if shares_held > 0:
+                    avg_cost = cost_basis / shares_held
+                    sellable = min(shares, shares_held)
+                    realized_pl += (price - avg_cost) * sellable
+                    cost_basis -= avg_cost * sellable
+                    shares_held -= sellable
+                cash += total
+
+        total_realized_pl += realized_pl
+
+        if shares_held > 0:
+            last_price = get_last_price(ticker)
+            if last_price is None:
+                continue
+
+            avg_cost_val = cost_basis / shares_held if shares_held > 0 else 0.0
+            market_value = shares_held * last_price
+            unrealized = (last_price - avg_cost_val) * shares_held
+            pl_pct = ((last_price / avg_cost_val) - 1) * 100 if avg_cost_val > 0 else 0.0
+
+            portfolio.append({
+                "Ticker": ticker,
+                "Shares": round(shares_held, 4),
+                "AvgCost": round(avg_cost_val, 4),
+                "LastPrice": round(last_price, 4),
+                "MarketValue": round(market_value, 4),
+                "Unrealized": round(unrealized, 4),
+                "PL_Pct": round(pl_pct, 2),
+                "RealizedPL": round(realized_pl, 4),
+            })
+
+    return portfolio, cash, total_realized_pl
+
+
+# ===============================
+# 5. Strategy Engine
+# ===============================
+def evaluate_strategy(
+    ticker: str,
+    hist: pd.DataFrame,
+    held_shares: float,
+    current_mkt_value: float,
+    total_assets: float,
+    cash: float
+) -> Tuple[float, str, Dict, str]:
+    last = hist.iloc[-1]
+    close = safe_float(last["Close"])
+    sma20 = safe_float(last["SMA20"])
+    sma50 = safe_float(last["SMA50"])
+    sma200 = safe_float(last["SMA200"])
+    rsi = safe_float(last["RSI"])
+    atr = safe_float(last["ATR"])
+    bb_upper = safe_float(last["BB_upper"])
+    bb_lower = safe_float(last["BB_lower"])
+    macd_hist = safe_float(last["MACD_Hist"])
+    volume = safe_float(last["Volume"])
+    vol_sma20 = safe_float(last["VOL_SMA20"])
+
+    score = 0.0
+    reasons = []
+
+    if close > sma200:
+        score += 1.5
+        reasons.append("Price > SMA200")
+    if sma20 > sma50 > sma200:
+        score += 1.5
+        reasons.append("SMA20 > SMA50 > SMA200")
+    if macd_hist > 0:
+        score += 1.0
+        reasons.append("MACD Hist > 0")
+    if 45 <= rsi <= 65:
+        score += 1.0
+        reasons.append("RSI healthy zone")
+    elif rsi < 35:
+        score += 0.5
+        reasons.append("RSI oversold")
+    if close < bb_lower:
+        score += 0.8
+        reasons.append("Below lower BB")
+    if volume > vol_sma20:
+        score += 0.7
+        reasons.append("Volume > 20D Avg")
+
+    current_weight = current_mkt_value / total_assets if total_assets > 0 else 0.0
+
+    stop_loss = close - 2 * atr if atr > 0 else None
+    take_profit = close + 3 * atr if atr > 0 else None
+
+    risk_budget = total_assets * RISK_PER_TRADE_PCT
+    risk_per_share = max(0.01, 2 * atr) if atr > 0 else max(0.01, close * 0.05)
+    qty_by_risk = math.floor(risk_budget / risk_per_share)
+
+    max_position_value = total_assets * MAX_POSITION_WEIGHT
+    remaining_position_value = max(0.0, max_position_value - current_mkt_value)
+    qty_by_weight = math.floor(remaining_position_value / close) if close > 0 else 0
+
+    usable_cash = max(0.0, cash - total_assets * CASH_RESERVE_PCT)
+    qty_by_cash = math.floor(usable_cash / close) if close > 0 else 0
+
+    suggested_buy_qty = max(0, min(qty_by_risk, qty_by_weight, qty_by_cash))
+    suggested_sell_qty = math.ceil(held_shares * 0.33) if held_shares > 0 else 0
+
+    action = "WATCH"
+    if score >= 4.0 and suggested_buy_qty >= 1 and current_weight < MAX_POSITION_WEIGHT:
+        action = "BUY"
+    elif ((score <= 1.5) or (rsi >= 75) or (close > bb_upper)) and held_shares > 0:
+        action = "SELL"
+
+    details = {
+        "close": close,
+        "sma20": sma20,
+        "sma50": sma50,
+        "sma200": sma200,
+        "rsi": rsi,
+        "atr": atr,
+        "bb_upper": bb_upper,
+        "bb_lower": bb_lower,
+        "macd_hist": macd_hist,
+        "current_weight": current_weight,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "suggested_buy_qty": suggested_buy_qty,
+        "suggested_sell_qty": suggested_sell_qty,
+        "qty_by_risk": qty_by_risk,
+        "qty_by_weight": qty_by_weight,
+        "qty_by_cash": qty_by_cash,
+        "reasons": reasons,
+    }
+
+    note = " | ".join(reasons) if reasons else "No strong signal"
+    return score, action, details, note
+
+
+def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: float, cash: float) -> List[Dict]:
+    result = []
+    for item in portfolio:
+        ticker = item["Ticker"]
+        hist = get_unified_analysis(ticker)
+        atr = None
+        stop_loss = None
+        take_profit = None
+        signal = "WATCH"
+
+        if hist is not None and not hist.empty:
+            last = hist.iloc[-1]
+            atr = safe_float(last.get("ATR"))
+            lp = item["LastPrice"]
+            if atr > 0:
+                stop_loss = lp - 2 * atr
+                take_profit = lp + 3 * atr
+
+            _, action, _, _ = evaluate_strategy(
+                ticker=ticker,
+                hist=hist,
+                held_shares=item["Shares"],
+                current_mkt_value=item["MarketValue"],
+                total_assets=total_assets,
+                cash=cash
+            )
+            signal = action
+
+        weight = (item["MarketValue"] / total_assets) if total_assets > 0 else 0.0
+
+        row = item.copy()
+        row["WeightPct"] = round(weight * 100, 2)
+        row["ATR"] = round(atr, 4) if atr else None
+        row["StopLoss"] = round(stop_loss, 4) if stop_loss else None
+        row["TakeProfit"] = round(take_profit, 4) if take_profit else None
+        row["Signal"] = signal
+        result.append(row)
+    return result
+
+
+def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float, total_assets: float):
+    if not portfolio:
+        return
+
+    if "alert_sent" not in st.session_state:
+        st.session_state["alert_sent"] = {}
+
+    today_key = date.today().strftime("%Y-%m-%d")
+
+    for item in portfolio:
+        ticker = item["Ticker"]
+        hist = get_unified_analysis(ticker)
+        if hist is None or hist.empty:
+            continue
+
+        recent_buy, recent_sell = get_recent_trade_status(ticker, trades_df)
+
+        score, action, details, note = evaluate_strategy(
+            ticker=ticker,
+            hist=hist,
+            held_shares=item["Shares"],
+            current_mkt_value=item["MarketValue"],
+            total_assets=total_assets,
+            cash=cash,
+        )
+
+        send_msg = None
+        if action == "BUY" and not recent_buy:
+            qty = details["suggested_buy_qty"]
+            if qty >= 1:
+                send_msg = (
+                    f"🔥 *BUY Signal* `{ticker}`\n"
+                    f"Score: `{score:.1f}`\n"
+                    f"Price: `${details['close']:.2f}`\n"
+                    f"Qty: `{qty}`\n"
+                    f"Stop: `${details['stop_loss']:.2f}`\n"
+                    f"TP: `${details['take_profit']:.2f}`\n"
+                    f"{note}"
+                )
+        elif action == "SELL" and not recent_sell:
+            qty = details["suggested_sell_qty"]
+            if qty >= 1:
+                send_msg = (
+                    f"⚠️ *SELL Signal* `{ticker}`\n"
+                    f"Score: `{score:.1f}`\n"
+                    f"Price: `${details['close']:.2f}`\n"
+                    f"Qty: `{qty}`\n"
+                    f"RSI: `{details['rsi']:.1f}`\n"
+                    f"{note}"
+                )
+
+        dedup_key = f"{today_key}_{ticker}_{action}"
+        if send_msg and not st.session_state["alert_sent"].get(dedup_key, False):
+            ok = send_telegram_msg(send_msg)
+            if ok:
+                st.session_state["alert_sent"][dedup_key] = True
+
+
+# ===============================
+# 6. Sidebar
+# ===============================
+st.sidebar.title("🎮 Control Center")
+
+if st.sidebar.button("🔄 Manual Refresh"):
+    st.cache_data.clear()
+    st.rerun()
+
+if st.sidebar.button("📨 發送 Telegram 測試訊息"):
+    if send_telegram_msg("✅ Telegram 連線測試成功"):
+        st.sidebar.success("訊息已送出")
+    else:
+        st.sidebar.warning("送出失敗，請檢查 TG_TOKEN / TG_CHAT_ID")
+
+st.sidebar.divider()
+
+initial_capital = st.sidebar.number_input(
+    "Initial Capital (USD)",
+    min_value=1000.0,
+    value=float(DEFAULT_INITIAL_CAPITAL),
+    step=1000.0
+)
+
+enable_auto_scan = st.sidebar.toggle("🤖 啟用自動掃描", value=True)
+
+
+# ===============================
+# 7. Load Core Data
 # ===============================
 trades_df = load_trades()
-unique_tickers = trades_df['Ticker'].unique().tolist() if not trades_df.empty else []
-portfolio_cal, cash, total_realized_pl = [], initial_capital, 0
+portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
+market_value = sum(x["MarketValue"] for x in portfolio_raw)
+total_assets = cash + market_value
+total_pl = total_assets - initial_capital
+portfolio = enrich_portfolio_with_weight_and_risk(portfolio_raw, total_assets, cash) if portfolio_raw else []
 
-for ticker in unique_tickers:
-    t_df = trades_df[trades_df['Ticker'] == ticker]
-    shares_h, cost_b, ticker_realized_pl = 0, 0, 0
-    for _, r in t_df.iterrows():
-        val = r['Price'] * r['Shares']
-        if "買入" in r['Type']:
-            shares_h += r['Shares']; cost_b += val; cash -= val
-        else:
-            if shares_h > 0:
-                avg_cost = cost_b / shares_h
-                ticker_realized_pl += (r['Price'] - avg_cost) * r['Shares']
-                cost_b -= avg_cost * r['Shares']
-            shares_h -= r['Shares']; cash += val
-    total_realized_pl += ticker_realized_pl
-    if shares_h > 0:
-        try:
-            real_p = yf.Ticker(ticker).fast_info.last_price
-            avg_cost_val = cost_b / shares_h
-            portfolio_cal.append({
-                "Ticker": ticker, "Shares": shares_h, "AvgCost": avg_cost_val, 
-                "MktVal": shares_h*real_p, "RealPrice": real_p, 
-                "Unrealized": (real_p - avg_cost_val) * shares_h, "PL_Pct": ((real_p / avg_cost_val) - 1) * 100
-            })
-        except: pass
+history_df = sync_nav_history(
+    total_assets=total_assets,
+    cash=cash,
+    market_value=market_value,
+    total_pl=total_pl
+)
 
-total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
-total_pl_v = total_assets - initial_capital
-history_df = sync_nav_history(total_assets)
+if enable_auto_scan and portfolio:
+    run_auto_scanner(portfolio, trades_df, cash, total_assets)
 
-# UI 佈局
-st.title("🏛️ 專業級資產配置管理 V9.4")
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("NAV 總值", f"${total_assets:,.1f}") 
-c2.metric("Cash 購買力", f"${cash:,.1f}")
-c3.metric("Realized 實現", f"${total_realized_pl:,.1f}")
-c4.metric("Unrealized 未實現", f"${sum(p['Unrealized'] for p in portfolio_cal):,.1f}")
-c5.metric("Total P/L 總損益", f"${total_pl_v:,.1f}", f"{(total_pl_v/initial_capital*100):.2f}%")
 
-if history_df is not None and not history_df.empty:
-    with st.expander("📈 投資組合績效回測追蹤 (NAV Curve) & 持倉明細", expanded=True):
-        fig_nav = go.Figure()
-        fig_nav.add_trace(go.Scatter(x=history_df['Date'], y=history_df['Total Assets'], mode='lines+markers', fill='tozeroy', name='NAV', line=dict(color='#00FFCC')))
-        fig_nav.update_layout(template="plotly_dark", height=250, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig_nav, use_container_width=True)
-        
-        if portfolio_cal:
-            st.markdown("#### 🔍 當前持倉實時明細 (顏色標註盈虧)")
-            df_styled = pd.DataFrame(portfolio_cal)
-            
-            # 使用 Styler 進行顏色美化
-            styled_table = df_styled.style.applymap(color_profit_loss, subset=['Unrealized', 'PL_Pct'])\
-                .format({
-                    'AvgCost': '${:,.2f}', 
-                    'RealPrice': '${:,.2f}', 
-                    'Unrealized': '${:,.2f}', 
-                    'PL_Pct': '{:.2f}%', 
-                    'MktVal': '${:,.2f}'
-                })
-            st.dataframe(styled_table, use_container_width=True)
-            
-total_unrealized_pl = sum(p['Unrealized'] for p in portfolio_cal)
-total_assets = (sum(p['MktVal'] for p in portfolio_cal)) + cash
-total_pl_v = total_assets - initial_capital
-history_df = sync_nav_history(total_assets)
 # ===============================
-# 7. 量化策略決策中心 (UI 動態股數)
+# 8. Main UI
 # ===============================
-st.divider()
-st.subheader("🎯 策略決策中心")
+st.title(APP_TITLE)
+st.caption(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-analysis_mode = st.radio("選擇分析對象", ["我的持股", "搜尋全市場標的"], horizontal=True)
-if analysis_mode == "我的持股":
-    analyze_ticker = st.selectbox("選擇持倉標的", options=unique_tickers if unique_tickers else ["NVDA"])
-else:
-    col_s1, col_s2 = st.columns([1, 2])
-    with col_s1: search_manual = st.checkbox("手動輸入代碼")
-    with col_s2:
-        if search_manual: analyze_ticker = st.text_input("請輸入代碼", value="NVDA").upper().strip()
+m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1.metric("NAV", f"${total_assets:,.2f}")
+m2.metric("Cash", f"${cash:,.2f}")
+m3.metric("Market Value", f"${market_value:,.2f}")
+m4.metric("Realized P/L", f"${total_realized_pl:,.2f}")
+m5.metric("Unrealized P/L", f"${sum(p['Unrealized'] for p in portfolio):,.2f}")
+m6.metric("Total P/L", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
+
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📝 Trade Center", "🎯 Strategy Center", "⚙️ Monitor"])
+
+
+# ===============================
+# Tab 1 Dashboard
+# ===============================
+with tab1:
+    left, right = st.columns([6, 4])
+
+    with left:
+        st.subheader("📈 NAV Curve")
+        if history_df is not None and not history_df.empty:
+            fig_nav = go.Figure()
+            fig_nav.add_trace(
+                go.Scatter(
+                    x=history_df["Date"],
+                    y=history_df["Total Assets"],
+                    mode="lines+markers",
+                    fill="tozeroy",
+                    name="NAV",
+                    line=dict(color="#00FFCC", width=2),
+                )
+            )
+            fig_nav.update_layout(
+                template="plotly_dark",
+                height=320,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="Date",
+                yaxis_title="Total Assets",
+            )
+            st.plotly_chart(fig_nav, use_container_width=True)
         else:
-            selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
-            analyze_ticker = selected_s.split(" - ")[0] if selected_s else "NVDA"
-            
-hist = get_unified_analysis(analyze_ticker)
-if hist is not None:
-    l_col, r_col = st.columns([3, 7])
-    last = hist.iloc[-1]
-    curr_p, curr_atr = last['Close'], last['ATR']
-    
-    # 取得當前持倉資訊
-    held_shares = 0
-    current_weight = 0
-    for item in portfolio_cal:
-        if item['Ticker'] == analyze_ticker:
-            held_shares = item['Shares']
-            current_weight = item['MktVal'] / total_assets
-            break
+            st.info("尚無 NAV 歷史資料。")
 
-    with l_col:
-        st.subheader(f"🛠️ 策略詳情: {analyze_ticker}")
-        st.markdown(f'<div class="price-box">現價: <span style="font-size: 1.8rem;">${curr_p:.2f}</span></div>', unsafe_allow_html=True)
+    with right:
+        st.subheader("📌 Portfolio Snapshot")
+        invested_ratio = (market_value / total_assets * 100) if total_assets > 0 else 0
+        cash_ratio = (cash / total_assets * 100) if total_assets > 0 else 0
+        max_weight = max([p["WeightPct"] for p in portfolio], default=0)
 
-        # 執行冷卻偵測
-        has_bought, has_sold = get_recent_trade_status(analyze_ticker, trades_df)
-        
-        # 評分系統
-        score = 0
-        if curr_p > last['SMA200']: score += 2 
-        if last['RSI'] < 40: score += 1.5 
-        if last['Hist'] > 0: score += 1 
-        if curr_p < last['BB_lower']: score += 1 
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Invested", f"{invested_ratio:.1f}%")
+        s2.metric("Cash Ratio", f"{cash_ratio:.1f}%")
+        s3.metric("Max Position", f"{max_weight:.1f}%")
 
-        # 輸出邏輯
-        if has_sold: 
-            st.info(f"⏳ 處於減碼冷卻期 (3天內已有賣出記錄)。")
-        elif has_bought: 
-            st.info(f"⏳ 處於建倉冷卻期 (3天內已有買入記錄)。")
-        elif score >= 3.5:
-            buy_price = (last['BB_lower'] + last['SMA20']) / 2
-            suggest_qty = math.floor((cash * 0.15) / buy_price)
-            st.success(f"🔥 強力建議：分批買入 (評分: {score})")
-            st.markdown(f"📍 建議進場價: :green[${buy_price:.2f}]")
-            if current_weight >= 0.3: 
-                st.warning("⚠️ 警示：單一標的佔比已 > 30%，停止增持。")
-            elif suggest_qty >= 1: 
-                st.markdown(f"📋 建議買進股數: :orange[{suggest_qty}] 股")
-        elif (score <= 1 or last['RSI'] > 75) and held_shares >= 1:
-            sell_price = last['BB_upper']
-            sell_qty = math.ceil(held_shares * 0.33)
-            st.error(f"⚠️ 建議：分批減碼 (評分: {score})")
-            st.markdown(f"📍 建議出場價: :red[${sell_price:.2f}]")
-            st.markdown(f"📋 建議賣出股數: :orange[{sell_qty}] 股")
-        else: 
-            st.warning(f"⚖️ 狀態：觀望 (目前評分: {score})")
-            
-        st.divider()
-        st.write(f"- 當前 RSI: `{last['RSI']:.1f}`")
-        st.write(f"- 組合權重: `{current_weight*100:.1f}%`")
-        st.write(f"🛡️ **ATR 風控 (ATR: {curr_atr:.2f})**")
-        st.write(f"- 建議停損 (2*ATR): :red[${(curr_p - 2*curr_atr):.2f}]")
-        st.write(f"- 建議獲利 (3*ATR): :green[${(curr_p + 3*curr_atr):.2f}]")
+        st.markdown("### 持倉分布")
+        if portfolio:
+            pie_fig = go.Figure(data=[
+                go.Pie(
+                    labels=[p["Ticker"] for p in portfolio],
+                    values=[p["MarketValue"] for p in portfolio],
+                    hole=0.45
+                )
+            ])
+            pie_fig.update_layout(template="plotly_dark", height=320, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(pie_fig, use_container_width=True)
+        else:
+            st.info("目前無持倉。")
 
-    with r_col:
-        df_plot = hist.tail(100)
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-        fig.add_trace(go.Candlestick(x=df_plot.index, open=df_plot['Open'], high=df_plot['High'], low=df_plot['Low'], close=df_plot['Close'], name="K線"), 1, 1)
-        for ma, color in zip(['SMA20','SMA200', 'BB_upper', 'BB_lower'], ['#17BECF','#D62728', 'rgba(173,216,230,0.1)', 'rgba(173,216,230,0.1)']):
-            fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[ma], name=ma, line=dict(width=1, color=color)), 1, 1)
-        fig.update_layout(height=500, template="plotly_dark", xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("📋 Current Holdings")
+    if portfolio:
+        holdings_df = pd.DataFrame(portfolio)
+        display_cols = [
+            "Ticker", "Shares", "AvgCost", "LastPrice", "MarketValue",
+            "Unrealized", "PL_Pct", "WeightPct", "ATR", "StopLoss", "TakeProfit", "Signal"
+        ]
+        holdings_df = holdings_df[display_cols].sort_values("MarketValue", ascending=False)
 
-def run_auto_scanner(portfolio_list, trades_df, current_cash, total_assets):
-    if not portfolio_list: return
-    for item in portfolio_list:
-        ticker = item['Ticker']
-        held_shares = item['Shares']
-        current_weight = item['MktVal'] / total_assets if total_assets > 0 else 0
-        hist = get_unified_analysis(ticker)
-        if hist is None: continue
+        styled = holdings_df.style.applymap(color_pl, subset=["Unrealized", "PL_Pct"]).format({
+            "AvgCost": "${:,.2f}",
+            "LastPrice": "${:,.2f}",
+            "MarketValue": "${:,.2f}",
+            "Unrealized": "${:,.2f}",
+            "PL_Pct": "{:.2f}%",
+            "WeightPct": "{:.2f}%",
+            "ATR": "{:.2f}",
+            "StopLoss": "${:,.2f}",
+            "TakeProfit": "${:,.2f}",
+        })
+        st.dataframe(styled, use_container_width=True)
+    else:
+        st.info("尚無持倉資料。")
+
+
+# ===============================
+# Tab 2 Trade Center
+# ===============================
+with tab2:
+    st.subheader("📝 Add New Trade")
+    sp500_list = get_sp500_tickers()
+
+    with st.form("trade_form", clear_on_submit=False):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            manual_input = st.checkbox("Manual Ticker Input", value=False)
+            if manual_input:
+                ticker_input = normalize_ticker(st.text_input("Ticker", value="NVDA"))
+            else:
+                selected_stock = st.selectbox("Search Stock", options=sp500_list)
+                ticker_input = normalize_ticker(selected_stock.split(" - ")[0]) if selected_stock else ""
+
+        with c2:
+            trade_type = st.selectbox("Type", ["BUY", "SELL"])
+            trade_date = st.date_input("Date", value=date.today())
+
+        with c3:
+            trade_price = st.number_input("Price", min_value=0.01, value=100.00, format="%.2f")
+            trade_shares = st.number_input("Shares", min_value=0.0001, value=1.0, format="%.4f")
+
+        note = st.text_input("Note", value="")
+        submitted = st.form_submit_button("☁️ Sync to Cloud")
+
+        if submitted:
+            ok, msg = save_trade(
+                trade_date=trade_date,
+                ticker=ticker_input,
+                trade_type=trade_type,
+                price=trade_price,
+                shares=trade_shares,
+                note=note,
+            )
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+    st.divider()
+    st.subheader("📚 Trade Records")
+    if not trades_df.empty:
+        show_df = trades_df.copy()
+        show_df["Date"] = show_df["Date"].dt.strftime("%Y-%m-%d")
+        show_df["Price"] = show_df["Price"].round(2)
+        show_df["Shares"] = show_df["Shares"].round(4)
+        show_df["Total"] = show_df["Total"].round(2)
+        st.dataframe(show_df.sort_values("Date", ascending=False), use_container_width=True)
+    else:
+        st.info("尚無交易資料。")
+
+
+# ===============================
+# Tab 3 Strategy Center
+# ===============================
+with tab3:
+    st.subheader("🎯 Strategy Decision Center")
+
+    sp500_list = get_sp500_tickers()
+    analysis_mode = st.radio("選擇分析對象", ["我的持股", "搜尋全市場標的"], horizontal=True)
+
+    if analysis_mode == "我的持股":
+        available = [p["Ticker"] for p in portfolio] if portfolio else ["NVDA"]
+        analyze_ticker = st.selectbox("選擇標的", options=available)
+    else:
+        col_a, col_b = st.columns([1, 2])
+        with col_a:
+            search_manual = st.checkbox("手動輸入代碼", value=False)
+        with col_b:
+            if search_manual:
+                analyze_ticker = normalize_ticker(st.text_input("請輸入代碼", value="NVDA"))
+            else:
+                selected_s = st.selectbox("從 S&P 500 搜尋", options=sp500_list)
+                analyze_ticker = normalize_ticker(selected_s.split(" - ")[0]) if selected_s else "NVDA"
+
+    hist = get_unified_analysis(analyze_ticker)
+
+    if hist is None or hist.empty:
+        st.error("無法取得該股票資料。")
+    else:
         last = hist.iloc[-1]
-        curr_p = last['Close']
-        has_bought, has_sold = get_recent_trade_status(ticker, trades_df)
-        score = 0
-        if curr_p > last['SMA200']: score += 2 
-        if last['RSI'] < 40: score += 1.5 
-        if last['Hist'] > 0: score += 1 
-        if curr_p < last['BB_lower']: score += 1 
-        
-        msg = ""
-        if score >= 3.5 and not has_bought and current_weight < 0.3:
-            buy_price = (last['BB_lower'] + last['SMA20']) / 2
-            qty = math.floor((current_cash * 0.15) / buy_price)
-            if qty >= 1: msg = f"🔥 強力買入 {ticker}: {qty} 股"
-        elif (score <= 1 or last['RSI'] > 75) and held_shares >= 1 and not has_sold:
-            qty = math.ceil(held_shares * 0.33)
-            msg = f"⚠️ 建議減碼 {ticker}: {qty} 股"
-        
-        if msg:
-            if f"tg_{ticker}_{date.today()}" not in st.session_state:
-                if send_telegram_msg(msg): st.session_state[f"tg_{ticker}_{date.today()}"] = True
+        current_price = float(last["Close"])
 
-if portfolio_cal:
-    run_auto_scanner(portfolio_cal, trades_df, cash, total_assets)
-    st.sidebar.success("🤖 自動掃描引擎：運行中")
+        held_shares = 0.0
+        current_mkt_value = 0.0
+        for p in portfolio:
+            if p["Ticker"] == analyze_ticker:
+                held_shares = p["Shares"]
+                current_mkt_value = p["MarketValue"]
+                break
+
+        recent_buy, recent_sell = get_recent_trade_status(analyze_ticker, trades_df)
+        score, action, details, note = evaluate_strategy(
+            ticker=analyze_ticker,
+            hist=hist,
+            held_shares=held_shares,
+            current_mkt_value=current_mkt_value,
+            total_assets=total_assets,
+            cash=cash,
+        )
+
+        left, right = st.columns([3, 7])
+
+        with left:
+            st.subheader(f"🛠️ {analyze_ticker}")
+            st.markdown(
+                f'<div class="price-box">現價: <span style="font-size: 1.8rem;">${current_price:.2f}</span></div>',
+                unsafe_allow_html=True
+            )
+
+            st.write(f"**Strategy Score:** `{score:.1f}`")
+            st.write(f"**Current Weight:** `{details['current_weight']*100:.2f}%`")
+            st.write(f"**Held Shares:** `{held_shares:.4f}`")
+            st.write(f"**RSI:** `{details['rsi']:.1f}`")
+            st.write(f"**ATR:** `{details['atr']:.2f}`")
+
+            if recent_buy:
+                st.info(f"⏳ 建倉冷卻中：{COOLDOWN_DAYS} 天內已有買入紀錄")
+            if recent_sell:
+                st.info(f"⏳ 減碼冷卻中：{COOLDOWN_DAYS} 天內已有賣出紀錄")
+
+            if action == "BUY" and not recent_buy:
+                st.success("🔥 建議：分批買入")
+                st.markdown(f"- 建議買入股數：`{details['suggested_buy_qty']}`")
+                st.markdown(f"- 風險股數上限：`{details['qty_by_risk']}`")
+                st.markdown(f"- 權重股數上限：`{details['qty_by_weight']}`")
+                st.markdown(f"- 現金股數上限：`{details['qty_by_cash']}`")
+            elif action == "SELL" and not recent_sell and held_shares > 0:
+                st.error("⚠️ 建議：分批減碼")
+                st.markdown(f"- 建議賣出股數：`{details['suggested_sell_qty']}`")
+            else:
+                st.warning("⚖️ 建議：觀望")
+
+            st.divider()
+            st.markdown("**風控建議**")
+            st.markdown(f"- Stop Loss：`${details['stop_loss']:.2f}`" if details["stop_loss"] else "- Stop Loss：N/A")
+            st.markdown(f"- Take Profit：`${details['take_profit']:.2f}`" if details["take_profit"] else "- Take Profit：N/A")
+
+            st.divider()
+            st.markdown("**訊號原因**")
+            for r in details["reasons"]:
+                st.write(f"- {r}")
+            if not details["reasons"]:
+                st.write("- 暫無強訊號")
+
+            st.caption(note)
+
+        with right:
+            plot_df = hist.tail(120)
+
+            fig = make_subplots(
+                rows=3, cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.04,
+                row_heights=[0.58, 0.20, 0.22]
+            )
+
+            fig.add_trace(
+                go.Candlestick(
+                    x=plot_df.index,
+                    open=plot_df["Open"],
+                    high=plot_df["High"],
+                    low=plot_df["Low"],
+                    close=plot_df["Close"],
+                    name="Candlestick"
+                ),
+                row=1, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["SMA20"], name="SMA20", line=dict(color="#17BECF", width=1.3)),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["SMA50"], name="SMA50", line=dict(color="#FF9800", width=1.2)),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["SMA200"], name="SMA200", line=dict(color="#D62728", width=1.2)),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["BB_upper"], name="BB Upper", line=dict(color="rgba(173,216,230,0.8)", width=1)),
+                row=1, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["BB_lower"], name="BB Lower", line=dict(color="rgba(173,216,230,0.8)", width=1)),
+                row=1, col=1
+            )
+
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["RSI"], name="RSI", line=dict(color="#00E676", width=1.2)),
+                row=2, col=1
+            )
+            fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
+            fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
+
+            fig.add_trace(
+                go.Bar(
+                    x=plot_df.index,
+                    y=plot_df["MACD_Hist"],
+                    name="MACD Hist",
+                    marker_color=["#26A69A" if x >= 0 else "#EF5350" for x in plot_df["MACD_Hist"]]
+                ),
+                row=3, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["MACD"], name="MACD", line=dict(color="#42A5F5", width=1.2)),
+                row=3, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=plot_df.index, y=plot_df["MACD_Signal"], name="Signal", line=dict(color="#FFCA28", width=1.2)),
+                row=3, col=1
+            )
+
+            fig.update_layout(
+                template="plotly_dark",
+                height=760,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_rangeslider_visible=False,
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0)
+            )
+
+            fig.update_yaxes(title_text="Price", row=1, col=1)
+            fig.update_yaxes(title_text="RSI", row=2, col=1, range=[0, 100])
+            fig.update_yaxes(title_text="MACD", row=3, col=1)
+
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ===============================
+# Tab 4 Monitor
+# ===============================
+with tab4:
+    st.subheader("⚙️ System Monitor")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown("### 系統狀態")
+        st.write(f"- 自動掃描：`{'啟用' if enable_auto_scan else '停用'}`")
+        st.write(f"- Telegram Token：`{'已設定' if TG_TOKEN else '未設定'}`")
+        st.write(f"- Telegram Chat ID：`{'已設定' if TG_CHAT_ID else '未設定'}`")
+        st.write(f"- 交易筆數：`{len(trades_df)}`")
+        st.write(f"- 持倉檔數：`{len(portfolio)}`")
+        st.write(f"- 更新時間：`{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
+
+    with c2:
+        st.markdown("### 風險參數")
+        st.write(f"- 單一持股上限：`{MAX_POSITION_WEIGHT*100:.0f}%`")
+        st.write(f"- 單筆風險上限：`{RISK_PER_TRADE_PCT*100:.0f}%`")
+        st.write(f"- 現金保留：`{CASH_RESERVE_PCT*100:.0f}%`")
+        st.write(f"- 冷卻期：`{COOLDOWN_DAYS}` 天")
+
+    st.divider()
+
+    st.markdown("### Alert 去重狀態")
+    if "alert_sent" in st.session_state and st.session_state["alert_sent"]:
+        alert_df = pd.DataFrame(
+            [{"Key": k, "Sent": v} for k, v in st.session_state["alert_sent"].items()]
+        )
+        st.dataframe(alert_df, use_container_width=True)
+    else:
+        st.info("目前沒有已發送的 alert 記錄。")
+
+    st.divider()
+
+    if st.button("清除快取與 Alert 狀態"):
+        st.cache_data.clear()
+        if "alert_sent" in st.session_state:
+            del st.session_state["alert_sent"]
+        st.success("已清除完成，請重新整理。")
