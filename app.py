@@ -67,6 +67,40 @@ CASH_RESERVE_PCT = 0.10
 COOLDOWN_DAYS = 3
 
 
+def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
+    try:
+        values = ws.get_all_values()
+        if not values:
+            return pd.DataFrame(columns=expected_headers)
+
+        header = values[0]
+        data_rows = values[1:] if len(values) > 1 else []
+
+        # 去除尾端空白欄
+        while header and str(header[-1]).strip() == "":
+            header.pop()
+
+        # 若表頭不符，直接用 expected_headers 重建 dataframe
+        cleaned_rows = []
+        for row in data_rows:
+            row = row[:len(expected_headers)] + [""] * max(0, len(expected_headers) - len(row))
+            cleaned_rows.append(row[:len(expected_headers)])
+
+        # 檢查 header 是否有效
+        header_valid = (
+            len(header) >= len(expected_headers)
+            and [str(h).strip() for h in header[:len(expected_headers)]] == expected_headers
+        )
+
+        if header_valid:
+            return pd.DataFrame(cleaned_rows, columns=expected_headers)
+
+        # 若 header 異常，嘗試直接以 expected_headers 套用
+        return pd.DataFrame(cleaned_rows, columns=expected_headers)
+
+    except Exception:
+        return pd.DataFrame(columns=expected_headers)
+        
 # ===============================
 # 1. Utility Functions
 # ===============================
@@ -146,10 +180,25 @@ def init_sheets():
     trades_headers = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
     history_headers = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
 
-    if not ws_trades.get_all_values():
+    # 初始化 Trades
+    trades_values = ws_trades.get_all_values()
+    if not trades_values:
         ws_trades.append_row(trades_headers)
-    if not ws_history.get_all_values():
+    else:
+        first_row = [str(x).strip() for x in trades_values[0][:len(trades_headers)]]
+        if first_row != trades_headers:
+            ws_trades.clear()
+            ws_trades.append_row(trades_headers)
+
+    # 初始化 History
+    history_values = ws_history.get_all_values()
+    if not history_values:
         ws_history.append_row(history_headers)
+    else:
+        first_row = [str(x).strip() for x in history_values[0][:len(history_headers)]]
+        if first_row != history_headers:
+            ws_history.clear()
+            ws_history.append_row(history_headers)
 
     return ss, ws_trades, ws_history
 
@@ -158,24 +207,22 @@ def init_sheets():
 def load_trades() -> pd.DataFrame:
     try:
         _, ws_trades, _ = init_sheets()
-        records = ws_trades.get_all_records()
-        if not records:
-            return pd.DataFrame(columns=["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"])
-
-        df = pd.DataFrame(records)
         expected_cols = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
-        for c in expected_cols:
-            if c not in df.columns:
-                df[c] = ""
+        df = read_worksheet_as_df(ws_trades, expected_cols)
+
+        if df.empty:
+            return pd.DataFrame(columns=expected_cols)
 
         df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
         df["Type"] = df["Type"].astype(str).str.upper().str.strip()
+
         for col in ["Price", "Shares", "Total"]:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         df = df.sort_values("Date").reset_index(drop=True)
         return df
+
     except Exception as e:
         st.error(f"讀取交易紀錄失敗：{e}")
         return pd.DataFrame(columns=["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"])
@@ -235,13 +282,16 @@ def save_trade(trade_date: date, ticker: str, trade_type: str, price: float, sha
 def sync_nav_history(total_assets: float, cash: float, market_value: float, total_pl: float) -> Optional[pd.DataFrame]:
     try:
         _, _, ws_history = init_sheets()
-        today_str = date.today().strftime("%Y-%m-%d")
-        records = ws_history.get_all_records()
+        expected_cols = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
 
+        history_df = read_worksheet_as_df(ws_history, expected_cols)
+
+        today_str = date.today().strftime("%Y-%m-%d")
         should_append = True
-        if records:
-            last_row = records[-1]
-            if str(last_row.get("Date", "")) == today_str:
+
+        if not history_df.empty and "Date" in history_df.columns:
+            last_date = str(history_df.iloc[-1]["Date"]).strip()
+            if last_date == today_str:
                 should_append = False
 
         if should_append:
@@ -252,12 +302,14 @@ def sync_nav_history(total_assets: float, cash: float, market_value: float, tota
                 float(market_value),
                 float(total_pl),
             ])
+            history_df = read_worksheet_as_df(ws_history, expected_cols)
 
-        history_df = pd.DataFrame(ws_history.get_all_records())
         if not history_df.empty:
             for c in ["Total Assets", "Cash", "Market Value", "Total P/L"]:
                 history_df[c] = pd.to_numeric(history_df[c], errors="coerce")
+
         return history_df
+
     except Exception as e:
         st.warning(f"歷史 NAV 同步失敗：{e}")
         return None
