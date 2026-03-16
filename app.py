@@ -72,7 +72,7 @@ if "trade_note" not in st.session_state:
 # ===============================
 st.sidebar.title("🎮 控制中心")
 
-if st.sidebar.button("🔄 手動重新整理""):
+if st.sidebar.button("🔄 手動重新整理"):
     st.rerun()
 
 if st.sidebar.button("📨 發送 Telegram 測試訊息"):
