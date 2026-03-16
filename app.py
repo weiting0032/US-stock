@@ -17,8 +17,6 @@ from streamlit_autorefresh import st_autorefresh
 # 0. App Config
 # ===============================
 st.set_page_config(page_title="US Stock Portfolio Pro", layout="wide")
-
-# 配額優化：由 30 秒改為 120 秒
 st_autorefresh(interval=120000, limit=None, key="heartbeat_120s")
 
 st.markdown(
@@ -115,10 +113,27 @@ def color_pl(val):
     return f"color: {color}; font-weight: 600;"
 
 
+def display_na(val, prefix: str = "", suffix: str = "", decimals: int = 2) -> str:
+    if val is None or pd.isna(val):
+        return "N/A"
+    try:
+        return f"{prefix}{float(val):,.{decimals}f}{suffix}"
+    except Exception:
+        return "N/A"
+
+
+def display_divergence(div: str) -> str:
+    div = str(div).strip().upper()
+    if div == "BULLISH":
+        return "多方量價背離"
+    elif div == "BEARISH":
+        return "空方量價背離"
+    return "無明顯量價背離"
+
+
 def send_telegram_msg(message: str) -> bool:
     if not TG_TOKEN or not TG_CHAT_ID:
         return False
-
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
     payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
@@ -132,16 +147,10 @@ def send_telegram_msg(message: str) -> bool:
 def get_recent_trade_status(ticker: str, trades_df: pd.DataFrame) -> Tuple[bool, bool]:
     if trades_df.empty:
         return False, False
-
     cutoff_date = date.today() - timedelta(days=COOLDOWN_DAYS)
     temp_df = trades_df.copy()
     temp_df["Date"] = pd.to_datetime(temp_df["Date"], errors="coerce").dt.date
-
-    recent = temp_df[
-        (temp_df["Ticker"] == ticker) &
-        (temp_df["Date"] >= cutoff_date)
-    ]
-
+    recent = temp_df[(temp_df["Ticker"] == ticker) & (temp_df["Date"] >= cutoff_date)]
     recent_buy = not recent[recent["Type"] == "BUY"].empty
     recent_sell = not recent[recent["Type"] == "SELL"].empty
     return recent_buy, recent_sell
@@ -152,13 +161,11 @@ def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
         values = ws.get_all_values()
         if not values:
             return pd.DataFrame(columns=expected_headers)
-
         data_rows = values[1:] if len(values) > 1 else []
         cleaned_rows = []
         for row in data_rows:
             row = row[:len(expected_headers)] + [""] * max(0, len(expected_headers) - len(row))
             cleaned_rows.append(row[:len(expected_headers)])
-
         return pd.DataFrame(cleaned_rows, columns=expected_headers)
     except Exception:
         return pd.DataFrame(columns=expected_headers)
@@ -167,7 +174,6 @@ def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
 def get_market_session() -> str:
     eastern = pytz.timezone("US/Eastern")
     now_et = datetime.now(eastern)
-
     if now_et.weekday() >= 5:
         return "CLOSED"
 
@@ -189,7 +195,77 @@ def calc_target_zone_hit(current_price: float, target_price: Optional[float], to
 
 
 # ===============================
-# 3. Google Sheets Layer
+# 3. Alert Dedup Helpers
+# ===============================
+def build_alert_fingerprint(
+    ticker: str,
+    action: str,
+    session: str,
+    price: float,
+    score: float,
+    target_price: Optional[float]
+) -> str:
+    tp = round(float(target_price), 2) if target_price is not None and not pd.isna(target_price) else 0.0
+    return f"{ticker}|{action}|{session}|{round(float(price), 2)}|{round(float(score), 1)}|{tp}"
+
+
+def normalize_alert_df(alerts_df: pd.DataFrame) -> pd.DataFrame:
+    if alerts_df is None or alerts_df.empty:
+        return pd.DataFrame(columns=[
+            "DateTime", "Ticker", "Action", "BaseKey", "Price",
+            "Score", "Session", "TargetPrice", "Message", "Fingerprint"
+        ])
+
+    df = alerts_df.copy()
+    if "Fingerprint" not in df.columns:
+        df["Fingerprint"] = ""
+
+    df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+    df["Action"] = df["Action"].astype(str).str.upper().str.strip()
+    df["BaseKey"] = df["BaseKey"].astype(str).str.strip()
+    df["Session"] = df["Session"].astype(str).str.strip()
+    df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+    df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
+    df["TargetPrice"] = pd.to_numeric(df["TargetPrice"], errors="coerce")
+    df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
+    return df
+
+
+def has_same_fingerprint(alerts_df: pd.DataFrame, fingerprint: str) -> bool:
+    if alerts_df is None or alerts_df.empty:
+        return False
+    if "Fingerprint" not in alerts_df.columns:
+        return False
+    temp = alerts_df["Fingerprint"].astype(str).str.strip()
+    return fingerprint in temp.values
+
+
+def get_last_sent_alert(alerts_df: pd.DataFrame, ticker: str, action: str) -> Optional[dict]:
+    if alerts_df is None or alerts_df.empty:
+        return None
+
+    base_key = f"{ticker}_{action}"
+    temp = alerts_df[alerts_df["BaseKey"] == base_key]
+    if temp.empty:
+        return None
+
+    last_row = temp.sort_values("DateTime").iloc[-1]
+    return {
+        "DateTime": last_row["DateTime"],
+        "Ticker": last_row["Ticker"],
+        "Action": last_row["Action"],
+        "BaseKey": last_row["BaseKey"],
+        "Price": safe_float(last_row["Price"]),
+        "Score": safe_float(last_row["Score"]),
+        "Session": str(last_row["Session"]),
+        "TargetPrice": safe_float(last_row["TargetPrice"]),
+        "Message": str(last_row["Message"]),
+        "Fingerprint": str(last_row.get("Fingerprint", "")),
+    }
+
+
+# ===============================
+# 4. Google Sheets Layer
 # ===============================
 @st.cache_resource
 def get_gsheet_client():
@@ -218,7 +294,10 @@ def get_sheet_handles():
         ws_history.append_row(["Date", "Total Assets", "Cash", "Market Value", "Total P/L"])
 
     if not ws_alerts.get_all_values():
-        ws_alerts.append_row(["DateTime", "Ticker", "Action", "BaseKey", "Price", "Score", "Session", "TargetPrice", "Message"])
+        ws_alerts.append_row([
+            "DateTime", "Ticker", "Action", "BaseKey", "Price",
+            "Score", "Session", "TargetPrice", "Message", "Fingerprint"
+        ])
 
     return ss, ws_trades, ws_history, ws_alerts
 
@@ -235,7 +314,6 @@ def load_trades() -> pd.DataFrame:
 
         df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
         df["Type"] = df["Type"].astype(str).apply(normalize_trade_type)
-
         for col in ["Price", "Shares", "Total"]:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
@@ -252,25 +330,21 @@ def load_trades() -> pd.DataFrame:
 def load_alerts() -> pd.DataFrame:
     try:
         _, _, _, ws_alerts = get_sheet_handles()
-        expected_cols = ["DateTime", "Ticker", "Action", "BaseKey", "Price", "Score", "Session", "TargetPrice", "Message"]
+        expected_cols = [
+            "DateTime", "Ticker", "Action", "BaseKey", "Price",
+            "Score", "Session", "TargetPrice", "Message", "Fingerprint"
+        ]
         df = read_worksheet_as_df(ws_alerts, expected_cols)
-
         if df.empty:
             return pd.DataFrame(columns=expected_cols)
-
-        df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
-        df["Action"] = df["Action"].astype(str).str.upper().str.strip()
-        df["BaseKey"] = df["BaseKey"].astype(str).str.strip()
-        df["Session"] = df["Session"].astype(str).str.strip()
-        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
-        df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
-        df["TargetPrice"] = pd.to_numeric(df["TargetPrice"], errors="coerce")
-        df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
-
+        df = normalize_alert_df(df)
         return df.sort_values("DateTime").reset_index(drop=True)
     except Exception as e:
         st.warning(f"讀取 Alerts 失敗：{e}")
-        return pd.DataFrame(columns=["DateTime", "Ticker", "Action", "BaseKey", "Price", "Score", "Session", "TargetPrice", "Message"])
+        return pd.DataFrame(columns=[
+            "DateTime", "Ticker", "Action", "BaseKey", "Price",
+            "Score", "Session", "TargetPrice", "Message", "Fingerprint"
+        ])
 
 
 def get_current_holding_shares(trades_df: pd.DataFrame, ticker: str) -> float:
@@ -310,13 +384,8 @@ def save_trade(trade_date: date, ticker: str, trade_type: str, price: float, sha
         _, ws_trades, _, _ = get_sheet_handles()
         total = round(price * shares, 4)
         ws_trades.append_row([
-            str(trade_date),
-            ticker,
-            trade_type,
-            float(price),
-            float(shares),
-            float(total),
-            note
+            str(trade_date), ticker, trade_type,
+            float(price), float(shares), float(total), note
         ])
         st.cache_data.clear()
         return True, "交易已成功寫入雲端。"
@@ -330,8 +399,6 @@ def sync_nav_history(total_assets: float, cash: float, market_value: float, tota
         expected_cols = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
 
         today_str = date.today().strftime("%Y-%m-%d")
-
-        # 當次 session 當天只同步一次
         if st.session_state.get("nav_synced_today") != today_str:
             values = ws_history.get_all_values()
             last_date = None
@@ -340,31 +407,42 @@ def sync_nav_history(total_assets: float, cash: float, market_value: float, tota
 
             if last_date != today_str:
                 ws_history.append_row([
-                    today_str,
-                    float(total_assets),
-                    float(cash),
-                    float(market_value),
-                    float(total_pl),
+                    today_str, float(total_assets), float(cash),
+                    float(market_value), float(total_pl)
                 ])
-
             st.session_state["nav_synced_today"] = today_str
 
         history_df = read_worksheet_as_df(ws_history, expected_cols)
         if not history_df.empty:
             for c in ["Total Assets", "Cash", "Market Value", "Total P/L"]:
                 history_df[c] = pd.to_numeric(history_df[c], errors="coerce")
-
         return history_df
     except Exception as e:
         st.warning(f"歷史 NAV 同步失敗：{e}")
         return None
 
 
-def log_sent_alert(ticker: str, action: str, price: float, score: float, session: str, target_price: Optional[float], message: str) -> bool:
+def log_sent_alert(
+    ticker: str,
+    action: str,
+    price: float,
+    score: float,
+    session: str,
+    target_price: Optional[float],
+    message: str
+) -> bool:
     try:
         _, _, _, ws_alerts = get_sheet_handles()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         base_key = f"{ticker}_{action}"
+        fingerprint = build_alert_fingerprint(
+            ticker=ticker,
+            action=action,
+            session=session,
+            price=price,
+            score=score,
+            target_price=target_price
+        )
 
         ws_alerts.append_row([
             now_str,
@@ -375,7 +453,8 @@ def log_sent_alert(ticker: str, action: str, price: float, score: float, session
             float(score),
             session,
             float(target_price) if target_price else "",
-            message
+            message,
+            fingerprint
         ])
         st.cache_data.clear()
         return True
@@ -385,31 +464,8 @@ def log_sent_alert(ticker: str, action: str, price: float, score: float, session
 
 
 # ===============================
-# 4. Alert Dedup Logic
+# 5. Alert Decision
 # ===============================
-def get_last_sent_alert(alerts_df: pd.DataFrame, ticker: str, action: str) -> Optional[dict]:
-    if alerts_df is None or alerts_df.empty:
-        return None
-
-    base_key = f"{ticker}_{action}"
-    temp = alerts_df[alerts_df["BaseKey"] == base_key]
-    if temp.empty:
-        return None
-
-    last_row = temp.sort_values("DateTime").iloc[-1]
-    return {
-        "DateTime": last_row["DateTime"],
-        "Ticker": last_row["Ticker"],
-        "Action": last_row["Action"],
-        "BaseKey": last_row["BaseKey"],
-        "Price": safe_float(last_row["Price"]),
-        "Score": safe_float(last_row["Score"]),
-        "Session": str(last_row["Session"]),
-        "TargetPrice": safe_float(last_row["TargetPrice"]),
-        "Message": str(last_row["Message"]),
-    }
-
-
 def should_send_alert(
     alerts_df: pd.DataFrame,
     ticker: str,
@@ -422,6 +478,19 @@ def should_send_alert(
     min_price_change_pct: float = ALERT_MIN_PRICE_CHANGE,
     min_score_change: float = ALERT_MIN_SCORE_CHANGE,
 ) -> bool:
+    alerts_df = normalize_alert_df(alerts_df)
+
+    fingerprint = build_alert_fingerprint(
+        ticker=ticker,
+        action=action,
+        session=current_session,
+        price=current_price,
+        score=current_score,
+        target_price=target_price
+    )
+    if has_same_fingerprint(alerts_df, fingerprint):
+        return False
+
     last_alert = get_last_sent_alert(alerts_df, ticker, action)
     if last_alert is None:
         return True
@@ -461,7 +530,7 @@ def should_send_alert(
 
 
 # ===============================
-# 5. Market Data / Indicator Layer
+# 6. Market Data / Indicator Layer
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers() -> List[str]:
@@ -604,7 +673,6 @@ def detect_volume_price_divergence(hist: pd.DataFrame) -> str:
 
     recent = hist.tail(20)
     prev = hist.tail(40).head(20)
-
     if recent.empty or prev.empty:
         return "NONE"
 
@@ -621,19 +689,17 @@ def detect_volume_price_divergence(hist: pd.DataFrame) -> str:
 
     if recent_price_high > prev_price_high and (recent_obv < prev_obv or recent_vol_avg < prev_vol_avg):
         return "BEARISH"
-
     if recent_price_low < prev_price_low and (recent_obv > prev_obv or recent_vol_avg > prev_vol_avg):
         return "BULLISH"
-
     return "NONE"
 
 
 # ===============================
-# 6. Portfolio Calculation
+# 7. FIFO Portfolio Calculation
 # ===============================
 def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[List[Dict], float, float]:
     if trades_df.empty:
-        return [], initial_capital, 0.0
+        return [], float(initial_capital), 0.0
 
     cash = float(initial_capital)
     portfolio = []
@@ -642,45 +708,63 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
     for ticker in sorted(trades_df["Ticker"].dropna().unique().tolist()):
         tdf = trades_df[trades_df["Ticker"] == ticker].sort_values("Date").copy()
 
-        shares_held = 0.0
-        cost_basis = 0.0
+        lots = []
         realized_pl = 0.0
 
         for _, row in tdf.iterrows():
+            trade_type = normalize_trade_type(row["Type"])
             price = safe_float(row["Price"])
             shares = safe_float(row["Shares"])
             total = price * shares
-            trade_type = normalize_trade_type(row["Type"])
+
+            if shares <= 0 or price <= 0:
+                continue
 
             if trade_type == "BUY":
-                shares_held += shares
-                cost_basis += total
+                lots.append({
+                    "shares": shares,
+                    "price": price,
+                    "date": row["Date"]
+                })
                 cash -= total
+
             elif trade_type == "SELL":
-                if shares_held > 0:
-                    avg_cost = cost_basis / shares_held
-                    sellable = min(shares, shares_held)
-                    realized_pl += (price - avg_cost) * sellable
-                    cost_basis -= avg_cost * sellable
-                    shares_held -= sellable
+                sell_qty = shares
                 cash += total
 
-        total_realized_pl += realized_pl
+                while sell_qty > 0 and lots:
+                    first_lot = lots[0]
+                    lot_shares = safe_float(first_lot["shares"])
+                    lot_price = safe_float(first_lot["price"])
 
-        if shares_held > 0:
+                    matched_qty = min(sell_qty, lot_shares)
+                    realized_pl += (price - lot_price) * matched_qty
+
+                    first_lot["shares"] = lot_shares - matched_qty
+                    sell_qty -= matched_qty
+
+                    if first_lot["shares"] <= 1e-9:
+                        lots.pop(0)
+
+        total_realized_pl += realized_pl
+        remaining_shares = sum(lot["shares"] for lot in lots)
+
+        if remaining_shares > 1e-9:
             last_price = get_last_price(ticker)
             if last_price is None:
                 continue
 
-            avg_cost_val = cost_basis / shares_held if shares_held > 0 else 0.0
-            market_value = shares_held * last_price
-            unrealized = (last_price - avg_cost_val) * shares_held
+            fifo_cost_basis = sum(lot["shares"] * lot["price"] for lot in lots)
+            avg_cost_val = fifo_cost_basis / remaining_shares if remaining_shares > 0 else 0.0
+            market_value = remaining_shares * last_price
+            unrealized = market_value - fifo_cost_basis
             pl_pct = ((last_price / avg_cost_val) - 1) * 100 if avg_cost_val > 0 else 0.0
 
             portfolio.append({
                 "Ticker": ticker,
-                "Shares": round(shares_held, 4),
+                "Shares": round(remaining_shares, 4),
                 "AvgCost": round(avg_cost_val, 4),
+                "FIFOCostBasis": round(fifo_cost_basis, 4),
                 "LastPrice": round(last_price, 4),
                 "MarketValue": round(market_value, 4),
                 "Unrealized": round(unrealized, 4),
@@ -692,7 +776,7 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
 
 
 # ===============================
-# 7. Strategy Engine
+# 8. Strategy Engine
 # ===============================
 def evaluate_strategy(
     ticker: str,
@@ -876,14 +960,15 @@ def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: f
 
 
 # ===============================
-# 8. Auto Scanner
+# 9. Auto Scanner
 # ===============================
 def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float, total_assets: float, market_regime: Dict):
     if not portfolio:
         return
 
     current_session = get_market_session()
-    alerts_df = load_alerts()  # 一次讀取，避免每檔都 hit Google Sheets
+    alerts_df = normalize_alert_df(load_alerts())
+    sent_fingerprints_in_run = set()
 
     for item in portfolio:
         ticker = item["Ticker"]
@@ -905,6 +990,10 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
 
         send_msg = None
         target_price = None
+
+        # 休市不發正式 BUY/SELL，避免重複轟炸
+        if current_session == "CLOSED" and action in ["BUY", "SELL"]:
+            continue
 
         if action == "BUY" and not recent_buy:
             qty = details["suggested_buy_qty"]
@@ -969,6 +1058,18 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         if not send_msg:
             continue
 
+        fingerprint = build_alert_fingerprint(
+            ticker=ticker,
+            action=action,
+            session=current_session,
+            price=details["close"],
+            score=score,
+            target_price=target_price
+        )
+
+        if fingerprint in sent_fingerprints_in_run:
+            continue
+
         allow_send = should_send_alert(
             alerts_df=alerts_df,
             ticker=ticker,
@@ -995,6 +1096,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
                     message=send_msg
                 )
                 if success:
+                    sent_fingerprints_in_run.add(fingerprint)
                     new_row = pd.DataFrame([{
                         "DateTime": pd.to_datetime(datetime.now()),
                         "Ticker": ticker,
@@ -1004,13 +1106,14 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
                         "Score": score,
                         "Session": current_session,
                         "TargetPrice": target_price,
-                        "Message": send_msg
+                        "Message": send_msg,
+                        "Fingerprint": fingerprint
                     }])
                     alerts_df = pd.concat([alerts_df, new_row], ignore_index=True)
 
 
 # ===============================
-# 9. Sidebar
+# 10. Sidebar
 # ===============================
 st.sidebar.title("🎮 Control Center")
 
@@ -1037,7 +1140,7 @@ enable_auto_scan = st.sidebar.toggle("🤖 啟用自動掃描", value=True)
 
 
 # ===============================
-# 10. Load Core Data
+# 11. Load Core Data
 # ===============================
 trades_df = load_trades()
 portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
@@ -1060,7 +1163,7 @@ if enable_auto_scan and portfolio:
 
 
 # ===============================
-# 11. Main UI
+# 12. Main UI
 # ===============================
 st.title(APP_TITLE)
 st.caption(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1138,14 +1241,19 @@ with tab1:
     if portfolio:
         holdings_df = pd.DataFrame(portfolio)
         display_cols = [
-            "Ticker", "Shares", "AvgCost", "LastPrice", "MarketValue",
+            "Ticker", "Shares", "AvgCost", "FIFOCostBasis", "LastPrice", "MarketValue",
             "Unrealized", "PL_Pct", "WeightPct", "ATR", "StopLoss",
             "TakeProfit", "TrailingStop", "Signal", "Divergence"
         ]
         holdings_df = holdings_df[display_cols].sort_values("MarketValue", ascending=False)
 
+        for col in ["ATR", "StopLoss", "TakeProfit", "TrailingStop", "FIFOCostBasis"]:
+            if col in holdings_df.columns:
+                holdings_df[col] = pd.to_numeric(holdings_df[col], errors="coerce")
+
         styled = holdings_df.style.applymap(color_pl, subset=["Unrealized", "PL_Pct"]).format({
             "AvgCost": "${:,.2f}",
+            "FIFOCostBasis": "${:,.2f}",
             "LastPrice": "${:,.2f}",
             "MarketValue": "${:,.2f}",
             "Unrealized": "${:,.2f}",
@@ -1301,13 +1409,13 @@ with tab3:
                 unsafe_allow_html=True
             )
 
-            st.write(f"**Strategy Score:** `{score:.1f}`")
-            st.write(f"**Current Weight:** `{details['current_weight']*100:.2f}%`")
-            st.write(f"**Held Shares:** `{held_shares:.4f}`")
-            st.write(f"**RSI:** `{details['rsi']:.1f}`")
-            st.write(f"**ATR:** `{details['atr']:.2f}`")
-            st.write(f"**Market Regime:** `{details['market_regime']}`")
-            st.write(f"**Volume Divergence:** `{details['divergence']}`")
+            st.write(f"**Strategy Score:** `{display_na(score, decimals=1)}`")
+            st.write(f"**Current Weight:** `{display_na(details.get('current_weight', 0) * 100, suffix='%', decimals=2)}`")
+            st.write(f"**Held Shares:** `{display_na(held_shares, decimals=4)}`")
+            st.write(f"**RSI:** `{display_na(details.get('rsi'), decimals=1)}`")
+            st.write(f"**ATR:** `{display_na(details.get('atr'), decimals=2)}`")
+            st.write(f"**Market Regime:** `{details.get('market_regime', 'N/A')}`")
+            st.write(f"**Volume Divergence:** `{display_divergence(details.get('divergence', 'NONE'))}`")
 
             if recent_buy:
                 st.info(f"⏳ 建倉冷卻中：{COOLDOWN_DAYS} 天內已有買入紀錄")
@@ -1335,7 +1443,7 @@ with tab3:
                 st.error("⚠️ 建議：分批減碼")
                 st.markdown(f"- 建議賣出股數：`{details['suggested_sell_qty']}`")
                 st.markdown(f"- 建議出場價：`${details['target_sell_price']:.2f}`")
-                st.markdown(f"- 移動止損價：`${details['trailing_stop']:.2f}`")
+                st.markdown(f"- 移動止損價：`${display_na(details.get('trailing_stop'), decimals=2)}`")
 
                 quick_trade_type = "SELL"
                 quick_trade_qty = max(1, int(details["suggested_sell_qty"])) if details["suggested_sell_qty"] >= 1 else 1
@@ -1370,9 +1478,9 @@ with tab3:
 
             st.divider()
             st.markdown("**風控建議**")
-            st.markdown(f"- Stop Loss：`${details['stop_loss']:.2f}`" if details["stop_loss"] else "- Stop Loss：N/A")
-            st.markdown(f"- Take Profit：`${details['take_profit']:.2f}`" if details["take_profit"] else "- Take Profit：N/A")
-            st.markdown(f"- Trailing Stop：`${details['trailing_stop']:.2f}`" if details["trailing_stop"] else "- Trailing Stop：N/A")
+            st.markdown(f"- Stop Loss：`{display_na(details.get('stop_loss'), prefix='$')}`")
+            st.markdown(f"- Take Profit：`{display_na(details.get('take_profit'), prefix='$')}`")
+            st.markdown(f"- Trailing Stop：`{display_na(details.get('trailing_stop'), prefix='$')}`")
 
             st.divider()
             st.markdown("**訊號原因**")
@@ -1414,35 +1522,14 @@ with tab3:
                 row=1, col=1
             )
 
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["SMA20"], name="SMA20", line=dict(color="#17BECF", width=1.3)),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["SMA50"], name="SMA50", line=dict(color="#FF9800", width=1.2)),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["SMA200"], name="SMA200", line=dict(color="#D62728", width=1.2)),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["BB_upper"], name="BB Upper", line=dict(color="rgba(173,216,230,0.8)", width=1)),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["BB_lower"], name="BB Lower", line=dict(color="rgba(173,216,230,0.8)", width=1)),
-                row=1, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["TrailingStop"], name="Trailing Stop", line=dict(color="#FF5252", width=1.2, dash="dash")),
-                row=1, col=1
-            )
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["SMA20"], name="SMA20", line=dict(color="#17BECF", width=1.3)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["SMA50"], name="SMA50", line=dict(color="#FF9800", width=1.2)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["SMA200"], name="SMA200", line=dict(color="#D62728", width=1.2)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_upper"], name="BB Upper", line=dict(color="rgba(173,216,230,0.8)", width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_lower"], name="BB Lower", line=dict(color="rgba(173,216,230,0.8)", width=1)), row=1, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["TrailingStop"], name="Trailing Stop", line=dict(color="#FF5252", width=1.2, dash="dash")), row=1, col=1)
 
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["RSI"], name="RSI", line=dict(color="#00E676", width=1.2)),
-                row=2, col=1
-            )
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["RSI"], name="RSI", line=dict(color="#00E676", width=1.2)), row=2, col=1)
             fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
             fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
 
@@ -1455,33 +1542,11 @@ with tab3:
                 ),
                 row=3, col=1
             )
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["MACD"], name="MACD", line=dict(color="#42A5F5", width=1.2)),
-                row=3, col=1
-            )
-            fig.add_trace(
-                go.Scatter(x=plot_df.index, y=plot_df["MACD_Signal"], name="Signal", line=dict(color="#FFCA28", width=1.2)),
-                row=3, col=1
-            )
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["MACD"], name="MACD", line=dict(color="#42A5F5", width=1.2)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["MACD_Signal"], name="Signal", line=dict(color="#FFCA28", width=1.2)), row=3, col=1)
 
-            fig.add_trace(
-                go.Bar(
-                    x=plot_df.index,
-                    y=plot_df["Volume"],
-                    name="Volume",
-                    marker_color="#7E57C2"
-                ),
-                row=4, col=1
-            )
-            fig.add_trace(
-                go.Scatter(
-                    x=plot_df.index,
-                    y=plot_df["VOL_SMA20"],
-                    name="VOL SMA20",
-                    line=dict(color="#FFD54F", width=1.2)
-                ),
-                row=4, col=1
-            )
+            fig.add_trace(go.Bar(x=plot_df.index, y=plot_df["Volume"], name="Volume", marker_color="#7E57C2"), row=4, col=1)
+            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["VOL_SMA20"], name="VOL SMA20", line=dict(color="#FFD54F", width=1.2)), row=4, col=1)
 
             fig.update_layout(
                 template="plotly_dark",
