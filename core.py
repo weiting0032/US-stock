@@ -109,6 +109,14 @@ def send_telegram_msg(message: str) -> bool:
     except Exception:
         return False
 
+def display_market_session(session: str) -> str:
+    mapping = {
+        "PREMARKET": "盤前",
+        "REGULAR": "正常盤",
+        "AFTERMARKET": "盤後",
+        "CLOSED": "休市",
+    }
+    return mapping.get(str(session).upper(), session)
 
 def get_market_session() -> str:
     eastern = pytz.timezone("US/Eastern")
@@ -820,7 +828,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             if qty >= 1:
                 send_msg = (
                     f"🟢 *買入訊號* `{ticker}`\n"
-                    f"市場時段：`{current_session}`\n"
+                    f"市場時段：`{display_market_session(current_session)}`\n"
                     f"市場狀態：`{details['market_regime']}`\n"
                     f"策略分數：`{score:.1f}`\n"
                     f"現價：`${details['close']:.2f}`\n"
@@ -838,7 +846,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             if qty >= 1:
                 send_msg = (
                     f"🔴 *賣出訊號* `{ticker}`\n"
-                    f"市場時段：`{current_session}`\n"
+                    f"市場時段：`{display_market_session(current_session)}`\n"
                     f"市場狀態：`{details['market_regime']}`\n"
                     f"策略分數：`{score:.1f}`\n"
                     f"現價：`${details['close']:.2f}`\n"
@@ -853,7 +861,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             target_price = details["target_buy_price"]
             send_msg = (
                 f"🟡 *買入準備訊號* `{ticker}`\n"
-                f"市場時段：`{current_session}`\n"
+                f"市場時段：`{display_market_session(current_session)}`\n"
                 f"市場狀態：`{details['market_regime']}`\n"
                 f"現價：`${details['close']:.2f}`\n"
                 f"目標區間：`${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
@@ -866,7 +874,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             target_price = details["target_sell_price"]
             send_msg = (
                 f"🟠 *賣出準備訊號* `{ticker}`\n"
-                f"市場時段：`{current_session}`\n"
+                f"市場時段：`{display_market_session(current_session)}`\n"
                 f"現價：`${details['close']:.2f}`\n"
                 f"目標區間：`${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
                 f"目標價格：`${target_price:.2f}`\n"
