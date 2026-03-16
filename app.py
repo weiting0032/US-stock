@@ -170,6 +170,15 @@ def get_or_create_worksheet(spreadsheet, title: str, rows: int = 1000, cols: int
     except Exception:
         return spreadsheet.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
+def normalize_trade_type(x: str) -> str:
+    s = str(x).strip().upper()
+
+    if "買" in s or "BUY" in s:
+        return "BUY"
+    if "賣" in s or "SELL" in s:
+        return "SELL"
+
+    return s
 
 def init_sheets():
     ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
@@ -204,6 +213,7 @@ def init_sheets():
 
 
 @st.cache_data(ttl=300)
+@st.cache_data(ttl=300)
 def load_trades() -> pd.DataFrame:
     try:
         _, ws_trades, _ = init_sheets()
@@ -214,13 +224,15 @@ def load_trades() -> pd.DataFrame:
             return pd.DataFrame(columns=expected_cols)
 
         df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
-        df["Type"] = df["Type"].astype(str).str.upper().str.strip()
+        df["Type"] = df["Type"].astype(str).apply(normalize_trade_type)
 
         for col in ["Price", "Shares", "Total"]:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        df = df.dropna(subset=["Date"])
         df = df.sort_values("Date").reset_index(drop=True)
+
         return df
 
     except Exception as e:
