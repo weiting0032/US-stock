@@ -146,7 +146,7 @@ m6.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100
 
 st.info(f"📡 市場狀態：{display_market_regime(market_regime['regime'])} ｜ 分數：{market_regime['score']}")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 儀表板"", "📝 交易中心", "🎯 策略中心", "⚙️ 系統監控"])
+tab1, tab2, tab3, tab4 = st.tabs(["📊 儀表板", "📝 交易中心", "🎯 策略中心", "⚙️ 系統監控"])
 
 
 # ===============================
