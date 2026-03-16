@@ -343,7 +343,7 @@ def init_sheets():
 @st.cache_data(ttl=300)
 def load_trades() -> pd.DataFrame:
     try:
-        _, ws_trades, _ = init_sheets()
+        _, ws_trades, _, _ = init_sheets()
         expected_cols = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
         df = read_worksheet_as_df(ws_trades, expected_cols)
 
@@ -401,7 +401,7 @@ def save_trade(trade_date: date, ticker: str, trade_type: str, price: float, sha
         return False, f"賣出股數超過持有股數，目前僅持有 {holding_shares:.4f} 股。"
 
     try:
-        _, ws_trades, _ = init_sheets()
+        _, ws_trades, _, _ = init_sheets()
         total = round(price * shares, 4)
         ws_trades.append_row([
             str(trade_date),
@@ -420,7 +420,7 @@ def save_trade(trade_date: date, ticker: str, trade_type: str, price: float, sha
 
 def sync_nav_history(total_assets: float, cash: float, market_value: float, total_pl: float) -> Optional[pd.DataFrame]:
     try:
-        _, _, ws_history = init_sheets()
+        _, _, ws_history, _ = init_sheets()
         expected_cols = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
 
         history_df = read_worksheet_as_df(ws_history, expected_cols)
