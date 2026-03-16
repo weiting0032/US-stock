@@ -17,6 +17,8 @@ from streamlit_autorefresh import st_autorefresh
 # 0. App Config
 # ===============================
 st.set_page_config(page_title="US Stock Portfolio Pro", layout="wide")
+
+# 配額優化：由 30 秒改為 120 秒
 st_autorefresh(interval=120000, limit=None, key="heartbeat_120s")
 
 st.markdown(
@@ -42,12 +44,6 @@ st.markdown(
         border-left: 5px solid #17BECF;
         margin-bottom: 14px;
     }
-    .section-card {
-        padding: 14px;
-        border-radius: 12px;
-        border: 1px solid rgba(128, 128, 128, 0.25);
-        background-color: rgba(255,255,255,0.02);
-    }
     </style>
     """,
     unsafe_allow_html=True
@@ -65,25 +61,30 @@ RISK_PER_TRADE_PCT = 0.01
 CASH_RESERVE_PCT = 0.10
 COOLDOWN_DAYS = 3
 
-PRE_ALERT_PCT = 0.01           # 進入目標價 ±1% 預警
-ALERT_MIN_MINUTES = 30         # 同方向最短重發間隔
-ALERT_MIN_PRICE_CHANGE = 1.0   # 價格至少變動 1%
-ALERT_MIN_SCORE_CHANGE = 0.8   # 分數至少變動 0.8
+PRE_ALERT_PCT = 0.01
+ALERT_MIN_MINUTES = 30
+ALERT_MIN_PRICE_CHANGE = 1.0
+ALERT_MIN_SCORE_CHANGE = 0.8
 
 
 # ===============================
 # 1. Session Defaults
 # ===============================
-if "trade_ticker" not in st.session_state:
-    st.session_state["trade_ticker"] = "NVDA"
-if "trade_type" not in st.session_state:
-    st.session_state["trade_type"] = "BUY"
-if "trade_price" not in st.session_state:
-    st.session_state["trade_price"] = 100.0
-if "trade_shares" not in st.session_state:
-    st.session_state["trade_shares"] = 1.0
-if "trade_note" not in st.session_state:
-    st.session_state["trade_note"] = ""
+def init_session_state():
+    defaults = {
+        "trade_ticker": "NVDA",
+        "trade_type": "BUY",
+        "trade_price": 100.0,
+        "trade_shares": 1.0,
+        "trade_note": "",
+        "nav_synced_today": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+init_session_state()
 
 
 # ===============================
@@ -202,28 +203,22 @@ def get_or_create_worksheet(spreadsheet, title: str, rows: int = 1000, cols: int
         return spreadsheet.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
 
-def init_sheets():
+@st.cache_resource
+def get_sheet_handles():
     ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
 
     ws_trades = get_or_create_worksheet(ss, "Trades", rows=5000, cols=10)
     ws_history = get_or_create_worksheet(ss, "History", rows=5000, cols=6)
     ws_alerts = get_or_create_worksheet(ss, "Alerts", rows=8000, cols=12)
 
-    trades_headers = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
-    history_headers = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
-    alerts_headers = [
-        "DateTime", "Ticker", "Action", "BaseKey",
-        "Price", "Score", "Session", "TargetPrice", "Message"
-    ]
-
     if not ws_trades.get_all_values():
-        ws_trades.append_row(trades_headers)
+        ws_trades.append_row(["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"])
 
     if not ws_history.get_all_values():
-        ws_history.append_row(history_headers)
+        ws_history.append_row(["Date", "Total Assets", "Cash", "Market Value", "Total P/L"])
 
     if not ws_alerts.get_all_values():
-        ws_alerts.append_row(alerts_headers)
+        ws_alerts.append_row(["DateTime", "Ticker", "Action", "BaseKey", "Price", "Score", "Session", "TargetPrice", "Message"])
 
     return ss, ws_trades, ws_history, ws_alerts
 
@@ -231,7 +226,7 @@ def init_sheets():
 @st.cache_data(ttl=600)
 def load_trades() -> pd.DataFrame:
     try:
-        _, ws_trades, _, _ = init_sheets()
+        _, ws_trades, _, _ = get_sheet_handles()
         expected_cols = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
         df = read_worksheet_as_df(ws_trades, expected_cols)
 
@@ -248,10 +243,34 @@ def load_trades() -> pd.DataFrame:
         df = df.dropna(subset=["Date"])
         df = df.sort_values("Date").reset_index(drop=True)
         return df
-
     except Exception as e:
         st.error(f"讀取交易紀錄失敗：{e}")
         return pd.DataFrame(columns=["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"])
+
+
+@st.cache_data(ttl=600)
+def load_alerts() -> pd.DataFrame:
+    try:
+        _, _, _, ws_alerts = get_sheet_handles()
+        expected_cols = ["DateTime", "Ticker", "Action", "BaseKey", "Price", "Score", "Session", "TargetPrice", "Message"]
+        df = read_worksheet_as_df(ws_alerts, expected_cols)
+
+        if df.empty:
+            return pd.DataFrame(columns=expected_cols)
+
+        df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+        df["Action"] = df["Action"].astype(str).str.upper().str.strip()
+        df["BaseKey"] = df["BaseKey"].astype(str).str.strip()
+        df["Session"] = df["Session"].astype(str).str.strip()
+        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+        df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
+        df["TargetPrice"] = pd.to_numeric(df["TargetPrice"], errors="coerce")
+        df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
+
+        return df.sort_values("DateTime").reset_index(drop=True)
+    except Exception as e:
+        st.warning(f"讀取 Alerts 失敗：{e}")
+        return pd.DataFrame(columns=["DateTime", "Ticker", "Action", "BaseKey", "Price", "Score", "Session", "TargetPrice", "Message"])
 
 
 def get_current_holding_shares(trades_df: pd.DataFrame, ticker: str) -> float:
@@ -288,7 +307,7 @@ def save_trade(trade_date: date, ticker: str, trade_type: str, price: float, sha
         return False, f"賣出股數超過持有股數，目前僅持有 {holding_shares:.4f} 股。"
 
     try:
-        _, ws_trades, _, _ = init_sheets()
+        _, ws_trades, _, _ = get_sheet_handles()
         total = round(price * shares, 4)
         ws_trades.append_row([
             str(trade_date),
@@ -307,15 +326,13 @@ def save_trade(trade_date: date, ticker: str, trade_type: str, price: float, sha
 
 def sync_nav_history(total_assets: float, cash: float, market_value: float, total_pl: float) -> Optional[pd.DataFrame]:
     try:
-        _, _, ws_history, _ = init_sheets()
+        _, _, ws_history, _ = get_sheet_handles()
         expected_cols = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
-
-        if "nav_synced_today" not in st.session_state:
-            st.session_state["nav_synced_today"] = None
 
         today_str = date.today().strftime("%Y-%m-%d")
 
-        if st.session_state["nav_synced_today"] != today_str:
+        # 當次 session 當天只同步一次
+        if st.session_state.get("nav_synced_today") != today_str:
             values = ws_history.get_all_values()
             last_date = None
             if len(values) > 1:
@@ -338,47 +355,40 @@ def sync_nav_history(total_assets: float, cash: float, market_value: float, tota
                 history_df[c] = pd.to_numeric(history_df[c], errors="coerce")
 
         return history_df
-
     except Exception as e:
         st.warning(f"歷史 NAV 同步失敗：{e}")
         return None
 
 
-@st.cache_data(ttl=600)
-def load_alerts() -> pd.DataFrame:
+def log_sent_alert(ticker: str, action: str, price: float, score: float, session: str, target_price: Optional[float], message: str) -> bool:
     try:
-        _, _, _, ws_alerts = init_sheets()
-        expected_cols = [
-            "DateTime", "Ticker", "Action", "BaseKey",
-            "Price", "Score", "Session", "TargetPrice", "Message"
-        ]
-        df = read_worksheet_as_df(ws_alerts, expected_cols)
+        _, _, _, ws_alerts = get_sheet_handles()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        base_key = f"{ticker}_{action}"
 
-        if df.empty:
-            return pd.DataFrame(columns=expected_cols)
-
-        df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
-        df["Action"] = df["Action"].astype(str).str.upper().str.strip()
-        df["BaseKey"] = df["BaseKey"].astype(str).str.strip()
-        df["Session"] = df["Session"].astype(str).str.strip()
-        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
-        df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
-        df["TargetPrice"] = pd.to_numeric(df["TargetPrice"], errors="coerce")
-        df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
-
-        return df.sort_values("DateTime").reset_index(drop=True)
-
-    except Exception as e:
-        st.warning(f"讀取 Alerts 失敗：{e}")
-        return pd.DataFrame(columns=[
-            "DateTime", "Ticker", "Action", "BaseKey",
-            "Price", "Score", "Session", "TargetPrice", "Message"
+        ws_alerts.append_row([
+            now_str,
+            ticker.upper().strip(),
+            action.upper().strip(),
+            base_key,
+            float(price),
+            float(score),
+            session,
+            float(target_price) if target_price else "",
+            message
         ])
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.warning(f"寫入 Alerts 失敗：{e}")
+        return False
 
 
-def get_last_sent_alert(ticker: str, action: str) -> Optional[dict]:
-    alerts_df = load_alerts()
-    if alerts_df.empty:
+# ===============================
+# 4. Alert Dedup Logic
+# ===============================
+def get_last_sent_alert(alerts_df: pd.DataFrame, ticker: str, action: str) -> Optional[dict]:
+    if alerts_df is None or alerts_df.empty:
         return None
 
     base_key = f"{ticker}_{action}"
@@ -401,6 +411,7 @@ def get_last_sent_alert(ticker: str, action: str) -> Optional[dict]:
 
 
 def should_send_alert(
+    alerts_df: pd.DataFrame,
     ticker: str,
     action: str,
     current_price: float,
@@ -411,7 +422,7 @@ def should_send_alert(
     min_price_change_pct: float = ALERT_MIN_PRICE_CHANGE,
     min_score_change: float = ALERT_MIN_SCORE_CHANGE,
 ) -> bool:
-    last_alert = get_last_sent_alert(ticker, action)
+    last_alert = get_last_sent_alert(alerts_df, ticker, action)
     if last_alert is None:
         return True
 
@@ -424,7 +435,6 @@ def should_send_alert(
     if pd.isna(last_dt):
         return True
 
-    # 市場時段改變，允許再發
     if current_session != last_session:
         return True
 
@@ -450,32 +460,8 @@ def should_send_alert(
     return False
 
 
-def log_sent_alert(ticker: str, action: str, price: float, score: float, session: str, target_price: Optional[float], message: str) -> bool:
-    try:
-        _, _, _, ws_alerts = init_sheets()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        base_key = f"{ticker}_{action}"
-
-        ws_alerts.append_row([
-            now_str,
-            ticker.upper().strip(),
-            action.upper().strip(),
-            base_key,
-            float(price),
-            float(score),
-            session,
-            float(target_price) if target_price else "",
-            message
-        ])
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.warning(f"寫入 Alerts 失敗：{e}")
-        return False
-
-
 # ===============================
-# 4. Market Data / Indicators
+# 5. Market Data / Indicator Layer
 # ===============================
 @st.cache_data(ttl=86400)
 def get_sp500_tickers() -> List[str]:
@@ -536,11 +522,9 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
         df["VOL_SMA20"] = df["Volume"].rolling(20).mean()
         df["VOL_SMA50"] = df["Volume"].rolling(50).mean()
 
-        # 動態移動止損基礎
         df["RollingHigh20"] = df["High"].rolling(20).max()
         df["TrailingStop"] = df["RollingHigh20"] - 3 * df["ATR"]
 
-        # OBV
         obv = [0]
         closes = df["Close"].tolist()
         vols = df["Volume"].tolist()
@@ -635,11 +619,9 @@ def detect_volume_price_divergence(hist: pd.DataFrame) -> str:
     recent_vol_avg = recent["Volume"].mean()
     prev_vol_avg = prev["Volume"].mean()
 
-    # Bearish divergence: 價格創更高，但 OBV / 平均量無跟上
     if recent_price_high > prev_price_high and (recent_obv < prev_obv or recent_vol_avg < prev_vol_avg):
         return "BEARISH"
 
-    # Bullish divergence: 價格創更低，但 OBV / 平均量改善
     if recent_price_low < prev_price_low and (recent_obv > prev_obv or recent_vol_avg > prev_vol_avg):
         return "BULLISH"
 
@@ -647,7 +629,7 @@ def detect_volume_price_divergence(hist: pd.DataFrame) -> str:
 
 
 # ===============================
-# 5. Portfolio Calculation
+# 6. Portfolio Calculation
 # ===============================
 def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[List[Dict], float, float]:
     if trades_df.empty:
@@ -710,7 +692,7 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
 
 
 # ===============================
-# 6. Strategy Engine
+# 7. Strategy Engine
 # ===============================
 def evaluate_strategy(
     ticker: str,
@@ -740,37 +722,28 @@ def evaluate_strategy(
     score = 0.0
     reasons = []
 
-    # Trend
     if close > sma200:
         score += 1.5
         reasons.append("Price > SMA200")
     if sma20 > sma50 > sma200:
         score += 1.5
         reasons.append("SMA20 > SMA50 > SMA200")
-
-    # Momentum
     if macd_hist > 0:
         score += 1.0
         reasons.append("MACD Hist > 0")
-
     if 45 <= rsi <= 65:
         score += 1.0
         reasons.append("RSI healthy zone")
     elif rsi < 35:
         score += 0.5
         reasons.append("RSI oversold")
-
-    # Mean reversion
     if close < bb_lower:
         score += 0.8
         reasons.append("Below lower BB")
-
-    # Volume confirmation
     if volume > vol_sma20:
         score += 0.7
         reasons.append("Volume > 20D Avg")
 
-    # Divergence
     if divergence == "BULLISH":
         score += 0.7
         reasons.append("Bullish volume divergence")
@@ -778,7 +751,6 @@ def evaluate_strategy(
         score -= 0.8
         reasons.append("Bearish volume divergence")
 
-    # Market Regime Filter
     regime_name = "UNKNOWN"
     regime_allow_buy = True
     if market_regime:
@@ -796,11 +768,9 @@ def evaluate_strategy(
     stop_loss = close - 2 * atr if atr > 0 else None
     take_profit = close + 3 * atr if atr > 0 else None
 
-    # Suggested target prices
     target_buy_price = (bb_lower + sma20) / 2 if bb_lower > 0 and sma20 > 0 else close
     target_sell_price = bb_upper if bb_upper > 0 else close
 
-    # Sizing
     risk_budget = total_assets * RISK_PER_TRADE_PCT
     risk_per_share = max(0.01, 2 * atr) if atr > 0 else max(0.01, close * 0.05)
     qty_by_risk = math.floor(risk_budget / risk_per_share)
@@ -817,13 +787,11 @@ def evaluate_strategy(
 
     action = "WATCH"
 
-    # BUY / SELL decision
     if score >= 4.0 and suggested_buy_qty >= 1 and current_weight < MAX_POSITION_WEIGHT and regime_allow_buy:
         action = "BUY"
     elif ((score <= 1.5) or (rsi >= 75) or (close > bb_upper) or (held_shares > 0 and trailing_stop > 0 and close < trailing_stop)) and held_shares > 0:
         action = "SELL"
     else:
-        # 預警邏輯
         if regime_allow_buy and suggested_buy_qty >= 1 and calc_target_zone_hit(close, target_buy_price):
             action = "BUY_READY"
         elif held_shares > 0 and calc_target_zone_hit(close, target_sell_price):
@@ -908,13 +876,14 @@ def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: f
 
 
 # ===============================
-# 7. Auto Scanner
+# 8. Auto Scanner
 # ===============================
 def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float, total_assets: float, market_regime: Dict):
     if not portfolio:
         return
 
     current_session = get_market_session()
+    alerts_df = load_alerts()  # 一次讀取，避免每檔都 hit Google Sheets
 
     for item in portfolio:
         ticker = item["Ticker"]
@@ -1001,6 +970,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             continue
 
         allow_send = should_send_alert(
+            alerts_df=alerts_df,
             ticker=ticker,
             action=action,
             current_price=details["close"],
@@ -1015,7 +985,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         if allow_send:
             ok = send_telegram_msg(send_msg)
             if ok:
-                log_sent_alert(
+                success = log_sent_alert(
                     ticker=ticker,
                     action=action,
                     price=details["close"],
@@ -1024,10 +994,23 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
                     target_price=target_price,
                     message=send_msg
                 )
+                if success:
+                    new_row = pd.DataFrame([{
+                        "DateTime": pd.to_datetime(datetime.now()),
+                        "Ticker": ticker,
+                        "Action": action,
+                        "BaseKey": f"{ticker}_{action}",
+                        "Price": details["close"],
+                        "Score": score,
+                        "Session": current_session,
+                        "TargetPrice": target_price,
+                        "Message": send_msg
+                    }])
+                    alerts_df = pd.concat([alerts_df, new_row], ignore_index=True)
 
 
 # ===============================
-# 8. Sidebar
+# 9. Sidebar
 # ===============================
 st.sidebar.title("🎮 Control Center")
 
@@ -1054,7 +1037,7 @@ enable_auto_scan = st.sidebar.toggle("🤖 啟用自動掃描", value=True)
 
 
 # ===============================
-# 9. Load Core Data
+# 10. Load Core Data
 # ===============================
 trades_df = load_trades()
 portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
@@ -1077,7 +1060,7 @@ if enable_auto_scan and portfolio:
 
 
 # ===============================
-# 10. Main UI
+# 11. Main UI
 # ===============================
 st.title(APP_TITLE)
 st.caption(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -1544,18 +1527,18 @@ with tab4:
         st.write(f"- Alert 最短重發間隔：`{ALERT_MIN_MINUTES}` 分鐘")
 
     st.divider()
-    st.markdown("### Alerts Log")
-    alerts_df = load_alerts()
-    if not alerts_df.empty:
-        st.dataframe(alerts_df.sort_values("DateTime", ascending=False), use_container_width=True)
-    else:
-        st.info("目前沒有 Alerts 紀錄。")
 
-    st.divider()
-    with st.expander("Debug - Trades Data"):
+    with st.expander("Alerts Log", expanded=False):
+        alerts_df = load_alerts()
+        if not alerts_df.empty:
+            st.dataframe(alerts_df.sort_values("DateTime", ascending=False), use_container_width=True)
+        else:
+            st.info("目前沒有 Alerts 紀錄。")
+
+    with st.expander("Debug - Trades Data", expanded=False):
         st.write("Trades rows:", len(trades_df))
         st.dataframe(trades_df, use_container_width=True)
 
-    if st.button("清除快取與 Alert 狀態"):
+    if st.button("清除快取"):
         st.cache_data.clear()
         st.success("已清除完成，請重新整理。")
