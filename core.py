@@ -716,18 +716,23 @@ def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: f
         result.append(row)
 
     return result
-
 def get_recent_trade_status(ticker: str, trades_df: pd.DataFrame) -> Tuple[bool, bool]:
     if trades_df.empty:
         return False, False
+
     cutoff_date = date.today() - timedelta(days=COOLDOWN_DAYS)
     temp_df = trades_df.copy()
     temp_df["Date"] = pd.to_datetime(temp_df["Date"], errors="coerce").dt.date
-    recent = temp_df[(temp_df["Ticker"] == ticker) & (temp_df["Date"] >= cutoff_date)]
+
+    recent = temp_df[
+        (temp_df["Ticker"] == ticker) &
+        (temp_df["Date"] >= cutoff_date)
+    ]
+
     recent_buy = not recent[recent["Type"] == "BUY"].empty
     recent_sell = not recent[recent["Type"] == "SELL"].empty
     return recent_buy, recent_sell
-
+    
 # ===============================
 # Scanner
 # ===============================
