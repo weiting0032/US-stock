@@ -137,9 +137,22 @@ def calc_target_zone_hit(current_price: float, target_price: Optional[float], to
 # Google Sheets
 # ===============================
 def get_gsheet_client():
-    raw = st.secrets["gcp_service_account"]
+    raw = os.getenv("GCP_SERVICE_ACCOUNT", "").strip()
+
+    if not raw:
+        try:
+            import streamlit as st
+            secret_val = st.secrets.get("GCP_SERVICE_ACCOUNT", "")
+            if isinstance(secret_val, dict):
+                import json
+                return gspread.service_account_from_dict(secret_val)
+            raw = str(secret_val).strip()
+        except Exception:
+            raw = ""
+
     if not raw:
         raise ValueError("GCP_SERVICE_ACCOUNT 未設定")
+
     import json
     creds = json.loads(raw)
     return gspread.service_account_from_dict(creds)
