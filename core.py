@@ -138,20 +138,29 @@ def calc_target_zone_hit(current_price: float, target_price: Optional[float], to
 # ===============================
 def get_gsheet_client():
     raw = os.getenv("GCP_SERVICE_ACCOUNT", "").strip()
+    if raw:
+        import json
+        creds = json.loads(raw)
+        return gspread.service_account_from_dict(creds)
 
-    if not raw:
-        try:
-            import streamlit as st
-            secret_val = st.secrets.get("GCP_SERVICE_ACCOUNT", "")
+    try:
+        import streamlit as st
+
+        if "GCP_SERVICE_ACCOUNT" in st.secrets:
+            secret_val = st.secrets["GCP_SERVICE_ACCOUNT"]
+
             if isinstance(secret_val, dict):
-                import json
-                return gspread.service_account_from_dict(secret_val)
-            raw = str(secret_val).strip()
-        except Exception:
-            raw = ""
+                return gspread.service_account_from_dict(dict(secret_val))
 
-    if not raw:
-        raise ValueError("GCP_SERVICE_ACCOUNT 未設定")
+            raw = str(secret_val).strip()
+            if raw:
+                import json
+                creds = json.loads(raw)
+                return gspread.service_account_from_dict(creds)
+    except Exception:
+        pass
+
+    raise ValueError("GCP_SERVICE_ACCOUNT 未設定")
 
     import json
     creds = json.loads(raw)
