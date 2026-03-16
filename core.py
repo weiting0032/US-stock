@@ -819,7 +819,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             target_price = details["target_buy_price"]
             if qty >= 1:
                 send_msg = (
-                    f"?? *BUY Signal* `{ticker}`\n"
+                    f"🔥 *BUY Signal* `{ticker}`\n"
                     f"Session: `{current_session}`\n"
                     f"Regime: `{details['market_regime']}`\n"
                     f"Score: `{score:.1f}`\n"
@@ -837,7 +837,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             target_price = details["target_sell_price"]
             if qty >= 1:
                 send_msg = (
-                    f"?? *SELL Signal* `{ticker}`\n"
+                    f"️⚠️ *SELL Signal* `{ticker}`\n"
                     f"Session: `{current_session}`\n"
                     f"Regime: `{details['market_regime']}`\n"
                     f"Score: `{score:.1f}`\n"
@@ -852,7 +852,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         elif action == "BUY_READY" and not recent_buy:
             target_price = details["target_buy_price"]
             send_msg = (
-                f"?? *BUY READY* `{ticker}`\n"
+                f"🟡 *BUY READY* `{ticker}`\n"
                 f"Session: `{current_session}`\n"
                 f"Regime: `{details['market_regime']}`\n"
                 f"Current: `${details['close']:.2f}`\n"
@@ -865,7 +865,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         elif action == "SELL_READY" and not recent_sell:
             target_price = details["target_sell_price"]
             send_msg = (
-                f"?? *SELL READY* `{ticker}`\n"
+                f"🟠 *SELL READY* `{ticker}`\n"
                 f"Session: `{current_session}`\n"
                 f"Current: `${details['close']:.2f}`\n"
                 f"Target Zone: `${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
