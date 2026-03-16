@@ -165,10 +165,6 @@ def get_gsheet_client():
 
     raise ValueError("GCP_SERVICE_ACCOUNT 未設定")
 
-    import json
-    creds = json.loads(raw)
-    return gspread.service_account_from_dict(creds)
-
 
 def get_or_create_worksheet(spreadsheet, title: str, rows: int = 1000, cols: int = 12):
     try:
