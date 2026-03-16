@@ -121,6 +121,14 @@ if manual_scan and portfolio:
     except Exception as e:
         st.sidebar.error(f"掃描失敗：{str(e)}")
 
+def display_market_regime(regime: str) -> str:
+    mapping = {
+        "RISK_ON": "偏多",
+        "RISK_OFF": "偏空",
+        "NEUTRAL": "中性",
+        "UNKNOWN": "未知",
+    }
+    return mapping.get(str(regime).upper(), regime)
 
 # ===============================
 # Main UI
@@ -136,7 +144,7 @@ m4.metric("已實現損益", f"${total_realized_pl:,.2f}")
 m5.metric("未實現損益", f"${sum(p['Unrealized'] for p in portfolio):,.2f}")
 m6.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
 
-st.info(f"📡 市場狀態: {market_regime['regime']} | 分數: {market_regime['score']}")
+st.info(f"📡 市場狀態：{display_market_regime(market_regime['regime'])} ｜ 分數：{market_regime['score']}")
 
 tab1, tab2, tab3, tab4 = st.tabs(["📊 儀表板"", "📝 交易中心", "🎯 策略中心", "⚙️ 系統監控"])
 
