@@ -243,27 +243,10 @@ def has_alert_been_sent(signal_key: str) -> bool:
         return False
     return signal_key in alerts_df["SignalKey"].values
 
-def log_sent_alert(ticker: str, action: str, price: float, score: float, session: str, message: str) -> bool:
-    try:
-        _, _, _, ws_alerts = init_sheets()
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        base_key = f"{ticker}_{action}"
-
-        ws_alerts.append_row([
-            now_str,
-            ticker.upper().strip(),
-            action.upper().strip(),
-            base_key,
-            float(price),
-            float(score),
-            session,
-            message
-        ])
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.warning(f"寫入 Alerts 失敗：{e}")
-        return False
+def log_sent_alert(ticker: str, action: str, price: float, score: float, message: str):
+    _, _, _, ws = init_sheets()
+    ws.append_row([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ticker, action, price, score, message])
+    st.cache_data.clear()
 
 # ===============================
 # 1. Utility Functions
