@@ -133,7 +133,7 @@ def display_market_regime(regime: str) -> str:
 # ===============================
 # Main UI
 # ===============================
-st.title("🏛️ US Stock Portfolio Pro")
+st.title("🏛️ 美股投資組合專業版")
 st.caption(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 m1, m2, m3, m4, m5, m6 = st.columns(6)
