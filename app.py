@@ -17,7 +17,7 @@ from streamlit_autorefresh import st_autorefresh
 # 0. App Config
 # ===============================
 st.set_page_config(page_title="US Stock Portfolio Pro", layout="wide")
-st_autorefresh(interval=60000, limit=None, key="heartbeat_60s")
+st_autorefresh(interval=120000, limit=None, key="heartbeat_120s")
 
 st.markdown(
     """
@@ -228,7 +228,7 @@ def init_sheets():
     return ss, ws_trades, ws_history, ws_alerts
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def load_trades() -> pd.DataFrame:
     try:
         _, ws_trades, _, _ = init_sheets()
@@ -309,37 +309,42 @@ def sync_nav_history(total_assets: float, cash: float, market_value: float, tota
     try:
         _, _, ws_history, _ = init_sheets()
         expected_cols = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
-        history_df = read_worksheet_as_df(ws_history, expected_cols)
+
+        if "nav_synced_today" not in st.session_state:
+            st.session_state["nav_synced_today"] = None
 
         today_str = date.today().strftime("%Y-%m-%d")
-        should_append = True
 
-        if not history_df.empty and "Date" in history_df.columns:
-            last_date = str(history_df.iloc[-1]["Date"]).strip()
-            if last_date == today_str:
-                should_append = False
+        if st.session_state["nav_synced_today"] != today_str:
+            values = ws_history.get_all_values()
+            last_date = None
+            if len(values) > 1:
+                last_date = str(values[-1][0]).strip()
 
-        if should_append:
-            ws_history.append_row([
-                today_str,
-                float(total_assets),
-                float(cash),
-                float(market_value),
-                float(total_pl),
-            ])
-            history_df = read_worksheet_as_df(ws_history, expected_cols)
+            if last_date != today_str:
+                ws_history.append_row([
+                    today_str,
+                    float(total_assets),
+                    float(cash),
+                    float(market_value),
+                    float(total_pl),
+                ])
 
+            st.session_state["nav_synced_today"] = today_str
+
+        history_df = read_worksheet_as_df(ws_history, expected_cols)
         if not history_df.empty:
             for c in ["Total Assets", "Cash", "Market Value", "Total P/L"]:
                 history_df[c] = pd.to_numeric(history_df[c], errors="coerce")
 
         return history_df
+
     except Exception as e:
         st.warning(f"歷史 NAV 同步失敗：{e}")
         return None
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600)
 def load_alerts() -> pd.DataFrame:
     try:
         _, _, _, ws_alerts = init_sheets()
