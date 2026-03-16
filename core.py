@@ -792,7 +792,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         ticker = item["Ticker"]
         hist = get_unified_analysis(ticker)
         if hist is None or hist.empty:
-            logs.append(f"{ticker}: no hist")
+            logs.append(f"{ticker}: 無法取得歷史資料")
             continue
 
         recent_buy, recent_sell = get_recent_trade_status(ticker, trades_df)
@@ -811,7 +811,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         target_price = None
 
         if current_session == "CLOSED" and action in ["BUY", "SELL"]:
-            logs.append(f"{ticker}: skip BUY/SELL in CLOSED")
+            logs.append(f"{ticker}: 休市期間，略過 BUY/SELL 訊號")
             continue
 
         if action == "BUY" and not recent_buy:
@@ -819,17 +819,17 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             target_price = details["target_buy_price"]
             if qty >= 1:
                 send_msg = (
-                    f"🔥 *BUY Signal* `{ticker}`\n"
-                    f"Session: `{current_session}`\n"
-                    f"Regime: `{details['market_regime']}`\n"
-                    f"Score: `{score:.1f}`\n"
-                    f"Price: `${details['close']:.2f}`\n"
-                    f"Target: `${target_price:.2f}`\n"
-                    f"Qty: `{qty}`\n"
-                    f"Stop: `${details['stop_loss']:.2f}`\n"
-                    f"Trail: `${details['trailing_stop']:.2f}`\n"
-                    f"TP: `${details['take_profit']:.2f}`\n"
-                    f"{note}"
+                    f"🟢 *買入訊號* `{ticker}`\n"
+                    f"市場時段：`{current_session}`\n"
+                    f"市場狀態：`{details['market_regime']}`\n"
+                    f"策略分數：`{score:.1f}`\n"
+                    f"現價：`${details['close']:.2f}`\n"
+                    f"建議買入價：`${target_price:.2f}`\n"
+                    f"建議股數：`{qty}`\n"
+                    f"停損價：`${details['stop_loss']:.2f}`\n"
+                    f"移動停損：`${details['trailing_stop']:.2f}`\n"
+                    f"停利價：`${details['take_profit']:.2f}`\n"
+                    f"依據：{note}"
                 )
 
         elif action == "SELL" and not recent_sell:
@@ -837,45 +837,45 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             target_price = details["target_sell_price"]
             if qty >= 1:
                 send_msg = (
-                    f"️⚠️ *SELL Signal* `{ticker}`\n"
-                    f"Session: `{current_session}`\n"
-                    f"Regime: `{details['market_regime']}`\n"
-                    f"Score: `{score:.1f}`\n"
-                    f"Price: `${details['close']:.2f}`\n"
-                    f"Target: `${target_price:.2f}`\n"
-                    f"Qty: `{qty}`\n"
-                    f"RSI: `{details['rsi']:.1f}`\n"
-                    f"Trail: `${details['trailing_stop']:.2f}`\n"
-                    f"{note}"
+                    f"🔴 *賣出訊號* `{ticker}`\n"
+                    f"市場時段：`{current_session}`\n"
+                    f"市場狀態：`{details['market_regime']}`\n"
+                    f"策略分數：`{score:.1f}`\n"
+                    f"現價：`${details['close']:.2f}`\n"
+                    f"建議賣出價：`${target_price:.2f}`\n"
+                    f"建議股數：`{qty}`\n"
+                    f"RSI：`{details['rsi']:.1f}`\n"
+                    f"移動停損：`${details['trailing_stop']:.2f}`\n"
+                    f"依據：{note}"
                 )
 
         elif action == "BUY_READY" and not recent_buy:
             target_price = details["target_buy_price"]
             send_msg = (
-                f"🟡 *BUY READY* `{ticker}`\n"
-                f"Session: `{current_session}`\n"
-                f"Regime: `{details['market_regime']}`\n"
-                f"Current: `${details['close']:.2f}`\n"
-                f"Target Zone: `${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
-                f"Target: `${target_price:.2f}`\n"
-                f"Qty Plan: `{details['suggested_buy_qty']}`\n"
-                f"{note}"
+                f"🟡 *買入準備訊號* `{ticker}`\n"
+                f"市場時段：`{current_session}`\n"
+                f"市場狀態：`{details['market_regime']}`\n"
+                f"現價：`${details['close']:.2f}`\n"
+                f"目標區間：`${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
+                f"目標價格：`${target_price:.2f}`\n"
+                f"預計股數：`{details['suggested_buy_qty']}`\n"
+                f"依據：{note}"
             )
 
         elif action == "SELL_READY" and not recent_sell:
             target_price = details["target_sell_price"]
             send_msg = (
-                f"🟠 *SELL READY* `{ticker}`\n"
-                f"Session: `{current_session}`\n"
-                f"Current: `${details['close']:.2f}`\n"
-                f"Target Zone: `${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
-                f"Target: `${target_price:.2f}`\n"
-                f"Qty Plan: `{details['suggested_sell_qty']}`\n"
-                f"{note}"
+                f"🟠 *賣出準備訊號* `{ticker}`\n"
+                f"市場時段：`{current_session}`\n"
+                f"現價：`${details['close']:.2f}`\n"
+                f"目標區間：`${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
+                f"目標價格：`${target_price:.2f}`\n"
+                f"預計股數：`{details['suggested_sell_qty']}`\n"
+                f"依據：{note}"
             )
 
         if not send_msg:
-            logs.append(f"{ticker}: no message")
+            logs.append(f"{ticker}: 本輪無需發送訊息")
             continue
 
         fingerprint = build_alert_fingerprint(
@@ -888,7 +888,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         )
 
         if fingerprint in sent_fingerprints_in_run:
-            logs.append(f"{ticker}: duplicated in current run")
+            logs.append(f"{ticker}: 本輪掃描內重複訊號，略過")
             continue
 
         allow_send = should_send_alert(
@@ -902,7 +902,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
         )
 
         if not allow_send:
-            logs.append(f"{ticker}: dedup blocked")
+            logs.append(f"{ticker}: 被去重規則擋下")
             continue
 
         ok = send_telegram_msg(send_msg)
@@ -931,10 +931,10 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
                     "Fingerprint": fingerprint
                 }])
                 alerts_df = pd.concat([alerts_df, new_row], ignore_index=True)
-                logs.append(f"{ticker}: alert sent -> {action}")
+                logs.append(f"{ticker}: 提醒已發送 -> {action}")
             else:
-                logs.append(f"{ticker}: tg sent but log failed")
+                logs.append(f"{ticker}: Telegram 已送出，但寫入提醒紀錄失敗")
         else:
-            logs.append(f"{ticker}: tg failed")
+            logs.append(f"{ticker}: Telegram 發送失敗")
 
     return logs
