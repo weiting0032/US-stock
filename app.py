@@ -555,7 +555,7 @@ def get_sp500_tickers() -> List[str]:
 def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
     try:
         symbol = normalize_ticker(symbol)
-        df = yf.Ticker(symbol).history(period="2y", auto_adjust=False)
+        df = yf.Ticker(symbol).history(period="2y", auto_adjust=True)
         if df.empty:
             return None
 
