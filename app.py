@@ -1,7 +1,7 @@
 import math
 from datetime import date, timedelta, datetime
 from typing import Dict, List, Optional, Tuple
-
+import pytz
 import gspread
 import pandas as pd
 import plotly.graph_objects as go
@@ -66,41 +66,177 @@ RISK_PER_TRADE_PCT = 0.01
 CASH_RESERVE_PCT = 0.10
 COOLDOWN_DAYS = 3
 
+def get_market_session() -> str:
+    """
+    依美東時間判斷市場時段
+    PREMARKET: 04:00 - 09:30
+    REGULAR:   09:30 - 16:00
+    AFTERMARKET: 16:00 - 20:00
+    CLOSED: 其他時間 / 週末
+    """
+    eastern = pytz.timezone("US/Eastern")
+    now_et = datetime.now(eastern)
 
+    if now_et.weekday() >= 5:
+        return "CLOSED"
+
+    current_time = now_et.time()
+
+    if current_time >= datetime.strptime("04:00", "%H:%M").time() and current_time < datetime.strptime("09:30", "%H:%M").time():
+        return "PREMARKET"
+    elif current_time >= datetime.strptime("09:30", "%H:%M").time() and current_time < datetime.strptime("16:00", "%H:%M").time():
+        return "REGULAR"
+    elif current_time >= datetime.strptime("16:00", "%H:%M").time() and current_time < datetime.strptime("20:00", "%H:%M").time():
+        return "AFTERMARKET"
+    else:
+        return "CLOSED"
+        
 def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
     try:
         values = ws.get_all_values()
         if not values:
             return pd.DataFrame(columns=expected_headers)
 
-        header = values[0]
         data_rows = values[1:] if len(values) > 1 else []
-
-        # 去除尾端空白欄
-        while header and str(header[-1]).strip() == "":
-            header.pop()
-
-        # 若表頭不符，直接用 expected_headers 重建 dataframe
         cleaned_rows = []
+
         for row in data_rows:
             row = row[:len(expected_headers)] + [""] * max(0, len(expected_headers) - len(row))
             cleaned_rows.append(row[:len(expected_headers)])
 
-        # 檢查 header 是否有效
-        header_valid = (
-            len(header) >= len(expected_headers)
-            and [str(h).strip() for h in header[:len(expected_headers)]] == expected_headers
-        )
-
-        if header_valid:
-            return pd.DataFrame(cleaned_rows, columns=expected_headers)
-
-        # 若 header 異常，嘗試直接以 expected_headers 套用
         return pd.DataFrame(cleaned_rows, columns=expected_headers)
-
     except Exception:
         return pd.DataFrame(columns=expected_headers)
-        
+
+@st.cache_data(ttl=120)
+def load_alerts() -> pd.DataFrame:
+    try:
+        _, _, _, ws_alerts = init_sheets()
+        expected_cols = [
+            "DateTime", "Ticker", "Action", "BaseKey",
+            "Price", "Score", "Session", "Message"
+        ]
+        df = read_worksheet_as_df(ws_alerts, expected_cols)
+
+        if df.empty:
+            return pd.DataFrame(columns=expected_cols)
+
+        df["Ticker"] = df["Ticker"].astype(str).str.upper().str.strip()
+        df["Action"] = df["Action"].astype(str).str.upper().str.strip()
+        df["BaseKey"] = df["BaseKey"].astype(str).str.strip()
+        df["Session"] = df["Session"].astype(str).str.strip()
+        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+        df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
+        df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
+
+        return df.sort_values("DateTime").reset_index(drop=True)
+
+    except Exception as e:
+        st.warning(f"讀取 Alerts 失敗：{e}")
+        return pd.DataFrame(columns=[
+            "DateTime", "Ticker", "Action", "BaseKey",
+            "Price", "Score", "Session", "Message"
+        ])
+
+def get_last_sent_alert(ticker: str, action: str) -> Optional[dict]:
+    alerts_df = load_alerts()
+    if alerts_df.empty:
+        return None
+
+    base_key = f"{ticker}_{action}"
+    temp = alerts_df[alerts_df["BaseKey"] == base_key]
+
+    if temp.empty:
+        return None
+
+    last_row = temp.sort_values("DateTime").iloc[-1]
+    return {
+        "DateTime": last_row["DateTime"],
+        "Ticker": last_row["Ticker"],
+        "Action": last_row["Action"],
+        "BaseKey": last_row["BaseKey"],
+        "Price": safe_float(last_row["Price"]),
+        "Score": safe_float(last_row["Score"]),
+        "Session": str(last_row["Session"]),
+        "Message": str(last_row["Message"]),
+    }
+
+def should_send_alert(
+    ticker: str,
+    action: str,
+    current_price: float,
+    current_score: float,
+    current_session: str,
+    min_minutes: int = 30,
+    min_price_change_pct: float = 1.0,
+    min_score_change: float = 0.8,
+) -> bool:
+    """
+    規則：
+    1) 沒發過 -> 發
+    2) 同 ticker/action，但市場時段改變 -> 發
+    3) 距離上次發送超過 min_minutes 且
+       價格變動 >= min_price_change_pct 或 score 變動 >= min_score_change -> 發
+    4) 否則不發
+    """
+    last_alert = get_last_sent_alert(ticker, action)
+    if last_alert is None:
+        return True
+
+    last_dt = last_alert["DateTime"]
+    last_price = safe_float(last_alert["Price"])
+    last_score = safe_float(last_alert["Score"])
+    last_session = last_alert["Session"]
+
+    if pd.isna(last_dt):
+        return True
+
+    if current_session != last_session:
+        return True
+
+    minutes_diff = (datetime.now() - last_dt.to_pydatetime()).total_seconds() / 60.0
+
+    price_change_pct = 0.0
+    if last_price > 0:
+        price_change_pct = abs((current_price - last_price) / last_price) * 100
+
+    score_change = abs(current_score - last_score)
+
+    if minutes_diff >= min_minutes and (
+        price_change_pct >= min_price_change_pct or score_change >= min_score_change
+    ):
+        return True
+
+    return False
+
+def has_alert_been_sent(signal_key: str) -> bool:
+    alerts_df = load_alerts()
+    if alerts_df.empty:
+        return False
+    return signal_key in alerts_df["SignalKey"].values
+
+def log_sent_alert(ticker: str, action: str, price: float, score: float, session: str, message: str) -> bool:
+    try:
+        _, _, _, ws_alerts = init_sheets()
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        base_key = f"{ticker}_{action}"
+
+        ws_alerts.append_row([
+            now_str,
+            ticker.upper().strip(),
+            action.upper().strip(),
+            base_key,
+            float(price),
+            float(score),
+            session,
+            message
+        ])
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.warning(f"寫入 Alerts 失敗：{e}")
+        return False
+
 # ===============================
 # 1. Utility Functions
 # ===============================
@@ -185,31 +321,22 @@ def init_sheets():
 
     ws_trades = get_or_create_worksheet(ss, "Trades", rows=3000, cols=10)
     ws_history = get_or_create_worksheet(ss, "History", rows=3000, cols=5)
+    ws_alerts = get_or_create_worksheet(ss, "Alerts", rows=5000, cols=10)
 
     trades_headers = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
     history_headers = ["Date", "Total Assets", "Cash", "Market Value", "Total P/L"]
+    alerts_headers = ["DateTime", "Date", "Ticker", "Action", "SignalKey", "Price", "Score", "Message"]
 
-    # 初始化 Trades
-    trades_values = ws_trades.get_all_values()
-    if not trades_values:
+    if not ws_trades.get_all_values():
         ws_trades.append_row(trades_headers)
-    else:
-        first_row = [str(x).strip() for x in trades_values[0][:len(trades_headers)]]
-        if first_row != trades_headers:
-            ws_trades.clear()
-            ws_trades.append_row(trades_headers)
 
-    # 初始化 History
-    history_values = ws_history.get_all_values()
-    if not history_values:
+    if not ws_history.get_all_values():
         ws_history.append_row(history_headers)
-    else:
-        first_row = [str(x).strip() for x in history_values[0][:len(history_headers)]]
-        if first_row != history_headers:
-            ws_history.clear()
-            ws_history.append_row(history_headers)
 
-    return ss, ws_trades, ws_history
+    if not ws_alerts.get_all_values():
+        ws_alerts.append_row(alerts_headers)
+
+    return ss, ws_trades, ws_history, ws_alerts
 
 
 @st.cache_data(ttl=300)
@@ -618,10 +745,7 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
     if not portfolio:
         return
 
-    if "alert_sent" not in st.session_state:
-        st.session_state["alert_sent"] = {}
-
-    today_key = date.today().strftime("%Y-%m-%d")
+    current_session = get_market_session()
 
     for item in portfolio:
         ticker = item["Ticker"]
@@ -640,12 +764,17 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
             cash=cash,
         )
 
+        if action not in ["BUY", "SELL"]:
+            continue
+
         send_msg = None
+
         if action == "BUY" and not recent_buy:
             qty = details["suggested_buy_qty"]
             if qty >= 1:
                 send_msg = (
                     f"🔥 *BUY Signal* `{ticker}`\n"
+                    f"Session: `{current_session}`\n"
                     f"Score: `{score:.1f}`\n"
                     f"Price: `${details['close']:.2f}`\n"
                     f"Qty: `{qty}`\n"
@@ -653,11 +782,13 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
                     f"TP: `${details['take_profit']:.2f}`\n"
                     f"{note}"
                 )
+
         elif action == "SELL" and not recent_sell:
             qty = details["suggested_sell_qty"]
             if qty >= 1:
                 send_msg = (
                     f"⚠️ *SELL Signal* `{ticker}`\n"
+                    f"Session: `{current_session}`\n"
                     f"Score: `{score:.1f}`\n"
                     f"Price: `${details['close']:.2f}`\n"
                     f"Qty: `{qty}`\n"
@@ -665,11 +796,31 @@ def run_auto_scanner(portfolio: List[Dict], trades_df: pd.DataFrame, cash: float
                     f"{note}"
                 )
 
-        dedup_key = f"{today_key}_{ticker}_{action}"
-        if send_msg and not st.session_state["alert_sent"].get(dedup_key, False):
+        if not send_msg:
+            continue
+
+        allow_send = should_send_alert(
+            ticker=ticker,
+            action=action,
+            current_price=details["close"],
+            current_score=score,
+            current_session=current_session,
+            min_minutes=30,
+            min_price_change_pct=1.0,
+            min_score_change=0.8,
+        )
+
+        if allow_send:
             ok = send_telegram_msg(send_msg)
             if ok:
-                st.session_state["alert_sent"][dedup_key] = True
+                log_sent_alert(
+                    ticker=ticker,
+                    action=action,
+                    price=details["close"],
+                    score=score,
+                    session=current_session,
+                    message=send_msg
+                )
 
 
 # ===============================
