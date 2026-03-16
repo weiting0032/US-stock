@@ -474,7 +474,6 @@ def get_last_price(symbol: str) -> Optional[float]:
         pass
     return None
 
-
 def get_market_regime() -> Dict:
     spy = get_unified_analysis("SPY")
     if spy is None or spy.empty:
