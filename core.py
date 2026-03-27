@@ -33,7 +33,7 @@ MIN_AVG_DOLLAR_VOLUME = float(os.getenv("MIN_AVG_DOLLAR_VOLUME", "20000000"))
 MIN_PRICE = float(os.getenv("MIN_PRICE", "10"))
 EARNINGS_BLOCK_DAYS = int(os.getenv("EARNINGS_BLOCK_DAYS", "2"))
 DEFAULT_COMMISSION = float(os.getenv("DEFAULT_COMMISSION", "0"))
-DEFAULT_SLIPPAGE_PCT = float(os.getenv("DEFAULT_SLIPPAGE_PCT", "0.0005"))
+DEFAULT_SLIPPAGE_PCT = float(os.getenv("DEFAULT_SLIPPAGE_PCT", "0.001"))
 
 
 # ===============================
@@ -513,7 +513,7 @@ def save_trade(
     shares: float,
     note: str = "",
     fee: float = DEFAULT_COMMISSION,
-    slippage: float = 0.0,
+    slippage: Optional[float] = None,
     order_id: str = "",
 ) -> Tuple[bool, str]:
     ticker = normalize_ticker(ticker)
@@ -532,8 +532,23 @@ def save_trade(
         return False, f"賣出超過持股，目前持有 {holding_shares:.4f}"
 
     _, ws_trades, _, _, _ = get_sheet_handles()
+
     gross_total = round(price * shares, 4)
-    net_total = round(gross_total + fee + slippage if trade_type == "BUY" else gross_total - fee - slippage, 4)
+
+    # 自動計算滑價：總價金 0.1%
+    if slippage is None:
+        slippage = round(gross_total * DEFAULT_SLIPPAGE_PCT, 4)
+    else:
+        slippage = round(float(slippage), 4)
+
+    fee = round(float(fee), 4)
+
+    # BUY: 成本增加；SELL: 收入減少
+    net_total = round(
+        gross_total + fee + slippage if trade_type == "BUY"
+        else gross_total - fee - slippage,
+        4
+    )
 
     ws_trades.append_row([
         trade_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -549,8 +564,9 @@ def save_trade(
         note,
         order_id,
     ])
+
     clear_market_cache()
-    return True, "交易已寫入"
+    return True, f"交易已寫入（滑價自動套用 0.1% = ${slippage:,.4f}）"
 
 
 def maybe_log_daily_history(
@@ -1607,7 +1623,6 @@ def build_trade_preview(
     price: float,
     shares: float,
     fee: float,
-    slippage: float,
 ) -> Dict:
     portfolio_raw, cash, _ = build_portfolio(trades_df, initial_capital)
     current_holding = next((x for x in portfolio_raw if x["Ticker"] == normalize_ticker(ticker)), None)
@@ -1616,6 +1631,7 @@ def build_trade_preview(
     total_assets = cash + sum(x["MarketValue"] for x in portfolio_raw)
 
     gross = price * shares
+    slippage = gross * DEFAULT_SLIPPAGE_PCT
     net = gross + fee + slippage if normalize_trade_type(trade_type) == "BUY" else gross - fee - slippage
     after_cash = cash - net if normalize_trade_type(trade_type) == "BUY" else cash + net
 
@@ -1629,6 +1645,8 @@ def build_trade_preview(
         "current_shares": round(current_shares, 4),
         "after_shares": round(after_shares, 4),
         "gross_total": round(gross, 2),
+        "fee": round(fee, 2),
+        "slippage": round(slippage, 2),
         "net_total": round(net, 2),
         "current_weight_pct": round((current_mkt_value / total_assets * 100) if total_assets > 0 else 0.0, 2),
         "after_weight_pct": round(after_weight_pct, 2),
