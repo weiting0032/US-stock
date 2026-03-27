@@ -1635,7 +1635,11 @@ def build_trade_preview(
     net = gross + fee + slippage if normalize_trade_type(trade_type) == "BUY" else gross - fee - slippage
     after_cash = cash - net if normalize_trade_type(trade_type) == "BUY" else cash + net
 
-    after_shares = current_shares + shares if normalize_trade_type(trade_type) == "BUY" else max(0.0, current_shares - shares)
+    after_shares = (
+        current_shares + shares
+        if normalize_trade_type(trade_type) == "BUY"
+        else max(0.0, current_shares - shares)
+    )
     after_position_value = after_shares * price
     after_weight_pct = (after_position_value / total_assets * 100) if total_assets > 0 else 0.0
 
