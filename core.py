@@ -12,6 +12,11 @@ import pytz
 import requests
 import yfinance as yf
 
+try:
+    import streamlit as st
+except Exception:
+    st = None
+
 
 PORTFOLIO_SHEET_TITLE = os.getenv("PORTFOLIO_SHEET_TITLE", "US Stock").strip()
 
@@ -367,77 +372,59 @@ def ensure_headers(ws, headers: List[str]):
     except Exception:
         gsheet_retry(lambda: ws.append_row(headers))
 
-def get_trades_worksheet():
+def get_trades_worksheet(readonly: bool = True):
     ss = get_spreadsheet()
     ws = get_or_create_worksheet(ss, "Trades", rows=10000, cols=14)
-    ensure_headers(ws, [
-        "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
-        "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
-    ])
+    if not readonly:
+        ensure_headers(ws, [
+            "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
+            "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
+        ])
     return ws
 
-def get_history_worksheet():
+def get_history_worksheet(readonly: bool = True):
     ss = get_spreadsheet()
     ws = get_or_create_worksheet(ss, "History", rows=8000, cols=12)
-    ensure_headers(ws, [
-        "Date", "TotalAssets", "Cash", "MarketValue", "RealizedPL",
-        "UnrealizedPL", "TotalPL", "DailyReturnPct", "DrawdownPct",
-        "BenchmarkSPY", "BenchmarkReturnPct"
-    ])
+    if not readonly:
+        ensure_headers(ws, [
+            "Date", "TotalAssets", "Cash", "MarketValue", "RealizedPL",
+            "UnrealizedPL", "TotalPL", "DailyReturnPct", "DrawdownPct",
+            "BenchmarkSPY", "BenchmarkReturnPct"
+        ])
     return ws
 
 
-def get_alerts_worksheet():
+def get_alerts_worksheet(readonly: bool = True):
     ss = get_spreadsheet()
     ws = get_or_create_worksheet(ss, "Alerts", rows=12000, cols=12)
-    ensure_headers(ws, [
-        "DateTime", "Ticker", "Action", "BaseKey", "Price",
-        "Score", "Session", "TargetPrice", "Message", "Fingerprint"
-    ])
+    if not readonly:
+        ensure_headers(ws, [
+            "DateTime", "Ticker", "Action", "BaseKey", "Price",
+            "Score", "Session", "TargetPrice", "Message", "Fingerprint"
+        ])
     return ws
 
 
-def get_watchlist_worksheet():
+def get_watchlist_worksheet(readonly: bool = True):
     ss = get_spreadsheet()
     ws = get_or_create_worksheet(ss, "Watchlist", rows=2000, cols=4)
-    ensure_headers(ws, ["Ticker", "Enabled", "Category", "Note"])
+    if not readonly:
+        ensure_headers(ws, ["Ticker", "Enabled", "Category", "Note"])
     return ws
     
-def get_sheet_handles():
-    ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
-    ws_trades = get_or_create_worksheet(ss, "Trades", rows=10000, cols=14)
-    ws_history = get_or_create_worksheet(ss, "History", rows=8000, cols=12)
-    ws_alerts = get_or_create_worksheet(ss, "Alerts", rows=12000, cols=12)
-    ws_watchlist = get_or_create_worksheet(ss, "Watchlist", rows=2000, cols=4)
-
-    ensure_headers(ws_trades, [
-        "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
-        "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
-    ])
-
-    ensure_headers(ws_history, [
-        "Date", "TotalAssets", "Cash", "MarketValue", "RealizedPL",
-        "UnrealizedPL", "TotalPL", "DailyReturnPct", "DrawdownPct",
-        "BenchmarkSPY", "BenchmarkReturnPct"
-    ])
-
-    ensure_headers(ws_alerts, [
-        "DateTime", "Ticker", "Action", "BaseKey", "Price",
-        "Score", "Session", "TargetPrice", "Message", "Fingerprint"
-    ])
-
-    ensure_headers(ws_watchlist, ["Ticker", "Enabled", "Category", "Note"])
-
-    return ss, ws_trades, ws_history, ws_alerts, ws_watchlist
-
-
 def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
     try:
         values = gsheet_retry(lambda: ws.get_all_values())
         if not values:
             return pd.DataFrame(columns=expected_headers)
 
+        headers = values[0]
         rows = values[1:] if len(values) > 1 else []
+
+        # 若表頭不存在，直接視為空表
+        if not headers:
+            return pd.DataFrame(columns=expected_headers)
+
         clean = []
         for row in rows:
             row = row[:len(expected_headers)] + [""] * max(0, len(expected_headers) - len(row))
@@ -461,7 +448,7 @@ def clear_app_caches():
 # Trades / Watchlist / History
 # ===============================
 def _load_trades_raw() -> pd.DataFrame:
-    ws_trades = get_trades_worksheet()
+    ws_trades = get_trades_worksheet(readonly=True)
 
     values = gsheet_retry(lambda: ws_trades.get_all_values())
     if not values:
@@ -482,6 +469,7 @@ def _load_trades_raw() -> pd.DataFrame:
         df["Slippage"] = 0.0
         df["NetTotal"] = df["GrossTotal"]
         df["OrderID"] = ""
+        df["Note"] = df.get("Note", "")
         df = df[[
             "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
             "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
@@ -491,7 +479,11 @@ def _load_trades_raw() -> pd.DataFrame:
             "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
             "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
         ]
-        df = read_worksheet_as_df(ws_trades, cols)
+        clean = []
+        for row in rows:
+            row = row[:len(cols)] + [""] * max(0, len(cols) - len(row))
+            clean.append(row[:len(cols)])
+        df = pd.DataFrame(clean, columns=cols)
 
     if df.empty:
         return df
@@ -515,15 +507,8 @@ else:
     def load_trades() -> pd.DataFrame:
         return _load_trades_raw()
 
-
-try:
-    import streamlit as st
-except Exception:
-    st = None
-
-
 def _load_watchlist_raw() -> pd.DataFrame:
-    ws_watchlist = get_watchlist_worksheet()
+    ws_watchlist = get_watchlist_worksheet(readonly=True)
     cols = ["Ticker", "Enabled", "Category", "Note"]
     df = read_worksheet_as_df(ws_watchlist, cols)
     if df.empty:
@@ -531,7 +516,7 @@ def _load_watchlist_raw() -> pd.DataFrame:
 
     df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
     df["Enabled"] = df["Enabled"].astype(str).str.upper().isin(["TRUE", "1", "YES", "Y", "ON"])
-    return df[df["Ticker"] != ""].reset_index(drop=True)
+    return df[df["Ticker"] != ""].drop_duplicates(subset=["Ticker"], keep="last").reset_index(drop=True)
 
 
 if st:
@@ -554,16 +539,8 @@ def save_watchlist(
         return False, "Ticker 不可為空"
 
     try:
-        ws_watchlist = get_watchlist_worksheet()
-
-        # 這裡故意不先讀整張 watchlist，避免 read quota 爆掉
-        gsheet_retry(lambda: ws_watchlist.append_row([
-            ticker,
-            str(enabled),
-            category,
-            note
-        ]))
-
+        ws_watchlist = get_watchlist_worksheet(readonly=False)
+        gsheet_retry(lambda: ws_watchlist.append_row([ticker, str(enabled), category, note]))
         clear_app_caches()
         return True, "已加入 Watchlist"
     except Exception as e:
@@ -571,7 +548,7 @@ def save_watchlist(
 
 
 def _load_alerts_raw() -> pd.DataFrame:
-    ws_alerts = get_alerts_worksheet()
+    ws_alerts = get_alerts_worksheet(readonly=True)
     cols = [
         "DateTime", "Ticker", "Action", "BaseKey", "Price",
         "Score", "Session", "TargetPrice", "Message", "Fingerprint"
@@ -588,8 +565,7 @@ def _load_alerts_raw() -> pd.DataFrame:
     df["Score"] = pd.to_numeric(df["Score"], errors="coerce")
     df["TargetPrice"] = pd.to_numeric(df["TargetPrice"], errors="coerce")
     df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
-    if "Fingerprint" not in df.columns:
-        df["Fingerprint"] = ""
+    df["Fingerprint"] = df["Fingerprint"].astype(str) if "Fingerprint" in df.columns else ""
     return df.sort_values("DateTime").reset_index(drop=True)
 
 
@@ -603,7 +579,7 @@ else:
 
 
 def _load_history_raw() -> pd.DataFrame:
-    ws_history = get_history_worksheet()
+    ws_history = get_history_worksheet(readonly=True)
     cols = [
         "Date", "TotalAssets", "Cash", "MarketValue", "RealizedPL",
         "UnrealizedPL", "TotalPL", "DailyReturnPct", "DrawdownPct",
@@ -655,26 +631,22 @@ def save_trade(
     if trade_type == "SELL" and shares > holding_shares + 1e-9:
         return False, f"賣出超過持股，目前持有 {holding_shares:.4f}"
 
-    _, ws_trades, _, _, _ = get_sheet_handles()
+    ws_trades = get_trades_worksheet(readonly=False)
 
     gross_total = round(price * shares, 4)
-
-    # 自動計算滑價：總價金 0.1%
     if slippage is None:
         slippage = round(gross_total * DEFAULT_SLIPPAGE_PCT, 4)
     else:
         slippage = round(float(slippage), 4)
 
     fee = round(float(fee), 4)
-
-    # BUY: 成本增加；SELL: 收入減少
     net_total = round(
         gross_total + fee + slippage if trade_type == "BUY"
         else gross_total - fee - slippage,
         4
     )
 
-    ws_trades.append_row([
+    gsheet_retry(lambda: ws_trades.append_row([
         trade_dt.strftime("%Y-%m-%d %H:%M:%S"),
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ticker,
@@ -687,9 +659,9 @@ def save_trade(
         float(net_total),
         note,
         order_id,
-    ])
+    ]))
 
-    clear_market_cache()
+    clear_app_caches()
     return True, f"交易已寫入（滑價自動套用 0.1% = ${slippage:,.4f}）"
 
 
@@ -701,7 +673,7 @@ def maybe_log_daily_history(
     unrealized_pl: float,
 ) -> Tuple[bool, str]:
     try:
-        _, _, ws_history, _, _ = get_sheet_handles()
+        ws_history = get_history_worksheet(readonly=False)
         hist_df = load_history()
 
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -719,9 +691,9 @@ def maybe_log_daily_history(
                 daily_return_pct = (total_assets / prev_assets - 1) * 100
 
             nav_series = pd.concat([hist_df["TotalAssets"], pd.Series([total_assets])], ignore_index=True)
-            peak = nav_series.cummax().iloc[-1]
-            if peak > 0:
-                drawdown_pct = (total_assets / peak - 1) * 100
+            running_peak = nav_series.cummax()
+            current_dd = nav_series.iloc[-1] / running_peak.iloc[-1] - 1 if running_peak.iloc[-1] > 0 else 0.0
+            drawdown_pct = current_dd * 100
 
         benchmark_return_pct = None
         if not hist_df.empty and pd.notna(hist_df["BenchmarkSPY"].iloc[-1]) and benchmark_spy:
@@ -729,7 +701,7 @@ def maybe_log_daily_history(
             if prev_spy > 0:
                 benchmark_return_pct = (benchmark_spy / prev_spy - 1) * 100
 
-        ws_history.append_row([
+        gsheet_retry(lambda: ws_history.append_row([
             today_str,
             float(total_assets),
             float(cash),
@@ -741,7 +713,9 @@ def maybe_log_daily_history(
             float(drawdown_pct),
             "" if benchmark_spy is None else float(benchmark_spy),
             "" if benchmark_return_pct is None else float(benchmark_return_pct),
-        ])
+        ]))
+
+        clear_app_caches()
         return True, "已寫入每日 NAV"
     except Exception as e:
         return False, f"寫入 NAV 失敗：{e}"
@@ -848,12 +822,12 @@ def log_sent_alert(
     message: str
 ) -> bool:
     try:
-        _, _, _, ws_alerts, _ = get_sheet_handles()
+        ws_alerts = get_alerts_worksheet(readonly=False)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         base_key = f"{ticker}_{action}"
         fingerprint = build_alert_fingerprint(ticker, action, session, price, score, target_price)
 
-        ws_alerts.append_row([
+        gsheet_retry(lambda: ws_alerts.append_row([
             now_str,
             ticker.upper().strip(),
             action.upper().strip(),
@@ -864,7 +838,8 @@ def log_sent_alert(
             float(target_price) if target_price else "",
             message,
             fingerprint
-        ])
+        ]))
+        clear_app_caches()
         return True
     except Exception:
         return False
@@ -1441,7 +1416,7 @@ def enrich_portfolio_with_weight_and_risk(
         row["DistanceToStopPct"] = round(distance_to_stop_pct, 2) if distance_to_stop_pct is not None else None
         row["DistanceToTP1Pct"] = round(distance_to_tp1_pct, 2) if distance_to_tp1_pct is not None else None
         row["DistanceToTrendStopPct"] = round(distance_to_trend_stop_pct, 2) if distance_to_trend_stop_pct is not None else None
-        row["CanAdd"] = weight < MAX_POSITION_WEIGHT * 100
+        row["CanAdd"] = weight < MAX_POSITION_WEIGHT
         result.append(row)
 
     return result
