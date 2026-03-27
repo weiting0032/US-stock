@@ -2,12 +2,19 @@ name: US Stock Scanner
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    # 交易時段附近每 15 分鐘掃描一次（UTC）
+    # 美股盤前/盤中/盤後都可涵蓋，實際是否發送由程式內 market session 控制
+    - cron: "*/15 * * * 1-5"
   workflow_dispatch:
+
+concurrency:
+  group: us-stock-scanner
+  cancel-in-progress: true
 
 jobs:
   run-scanner:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
@@ -17,6 +24,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
@@ -29,14 +37,22 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GCP_SERVICE_ACCOUNT: ${{ secrets.GCP_SERVICE_ACCOUNT }}
           PORTFOLIO_SHEET_TITLE: ${{ secrets.PORTFOLIO_SHEET_TITLE }}
+
           INITIAL_CAPITAL: ${{ secrets.INITIAL_CAPITAL }}
           MAX_POSITION_WEIGHT: ${{ secrets.MAX_POSITION_WEIGHT }}
           RISK_PER_TRADE_PCT: ${{ secrets.RISK_PER_TRADE_PCT }}
           CASH_RESERVE_PCT: ${{ secrets.CASH_RESERVE_PCT }}
           COOLDOWN_DAYS: ${{ secrets.COOLDOWN_DAYS }}
+
           PRE_ALERT_PCT: ${{ secrets.PRE_ALERT_PCT }}
           ALERT_MIN_MINUTES: ${{ secrets.ALERT_MIN_MINUTES }}
           ALERT_MIN_PRICE_CHANGE: ${{ secrets.ALERT_MIN_PRICE_CHANGE }}
           ALERT_MIN_SCORE_CHANGE: ${{ secrets.ALERT_MIN_SCORE_CHANGE }}
+
+          MIN_AVG_DOLLAR_VOLUME: ${{ secrets.MIN_AVG_DOLLAR_VOLUME }}
+          MIN_PRICE: ${{ secrets.MIN_PRICE }}
+          EARNINGS_BLOCK_DAYS: ${{ secrets.EARNINGS_BLOCK_DAYS }}
+          DEFAULT_COMMISSION: ${{ secrets.DEFAULT_COMMISSION }}
+          DEFAULT_SLIPPAGE_PCT: ${{ secrets.DEFAULT_SLIPPAGE_PCT }}
         run: |
           python scanner.py
