@@ -724,10 +724,9 @@ with tab4:
             )
             if ok:
                 st.success(msg)
-                st.rerun()
+                st.info("Watchlist 已寫入，請稍後手動重新整理頁面。")
             else:
                 st.error(msg)
-
     with col2:
         st.markdown("#### 📋 Watchlist 清單")
         if not watchlist_df.empty:
