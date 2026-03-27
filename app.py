@@ -73,7 +73,6 @@ defaults = {
     "trade_shares": 1.0,
     "trade_note": "",
     "trade_fee": DEFAULT_COMMISSION,
-    "trade_slippage": 0.0,
 }
 for k, v in defaults.items():
     if k not in st.session_state:
@@ -388,13 +387,8 @@ with tab2:
                 value=float(st.session_state.get("trade_fee", DEFAULT_COMMISSION)),
                 format="%.4f"
             )
-            est_slippage = trade_price * trade_shares * DEFAULT_SLIPPAGE_PCT
-            trade_slippage = st.number_input(
-                "滑價成本",
-                min_value=0.0,
-                value=float(st.session_state.get("trade_slippage", est_slippage)),
-                format="%.4f"
-            )
+            auto_slippage = trade_price * trade_shares * DEFAULT_SLIPPAGE_PCT
+            st.metric("自動滑價成本 (0.1%)", f"${auto_slippage:,.4f}")
 
         note = st.text_input("備註", value=st.session_state.get("trade_note", ""))
         order_id = st.text_input("Order ID（可空白）", value="")
@@ -408,7 +402,6 @@ with tab2:
             price=trade_price,
             shares=trade_shares,
             fee=trade_fee,
-            slippage=trade_slippage,
         )
 
         st.markdown("#### 🔍 交易影響預覽")
@@ -417,6 +410,10 @@ with tab2:
         p2.metric("交易後現金", f"${preview['after_cash']:,.2f}")
         p3.metric("目前權重", f"{preview['current_weight_pct']:.2f}%")
         p4.metric("交易後權重", f"{preview['after_weight_pct']:.2f}%")
+        q1, q2, q3 = st.columns(3)
+        q1.metric("毛金額", f"${preview['gross_total']:,.2f}")
+        q2.metric("手續費", f"${preview['fee']:,.2f}")
+        q3.metric("滑價成本(0.1%)", f"${preview['slippage']:,.2f}")
 
         if preview["exceed_max_weight"]:
             st.warning(f"⚠️ 交易後持倉權重將超過上限 {MAX_POSITION_WEIGHT*100:.1f}%")
@@ -434,7 +431,6 @@ with tab2:
                 shares=trade_shares,
                 note=note,
                 fee=trade_fee,
-                slippage=trade_slippage,
                 order_id=order_id,
             )
             if ok:
@@ -445,7 +441,6 @@ with tab2:
                 st.session_state["trade_shares"] = trade_shares
                 st.session_state["trade_note"] = note
                 st.session_state["trade_fee"] = trade_fee
-                st.session_state["trade_slippage"] = trade_slippage
                 st.rerun()
             else:
                 st.error(msg)
