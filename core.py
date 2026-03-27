@@ -1586,25 +1586,52 @@ def run_auto_scanner(
 # Performance metrics
 # ===============================
 def calculate_performance_metrics(history_df: pd.DataFrame) -> Dict:
-    if history_df.empty or len(history_df) < 2:
+    if history_df.empty or "TotalAssets" not in history_df.columns:
         return {
             "max_drawdown_pct": None,
             "total_return_pct": None,
             "daily_vol_pct": None,
             "sharpe": None,
+            "history_points": 0,
         }
 
-    nav = history_df["TotalAssets"].dropna()
-    returns = nav.pct_change().dropna()
+    temp = history_df.copy()
+    temp["Date"] = pd.to_datetime(temp["Date"], errors="coerce")
+    temp["TotalAssets"] = pd.to_numeric(temp["TotalAssets"], errors="coerce")
+    temp = temp.dropna(subset=["Date", "TotalAssets"]).sort_values("Date").reset_index(drop=True)
+
+    if temp.empty:
+        return {
+            "max_drawdown_pct": None,
+            "total_return_pct": None,
+            "daily_vol_pct": None,
+            "sharpe": None,
+            "history_points": 0,
+        }
+
+    nav = temp["TotalAssets"]
+
+    if len(nav) < 2:
+        return {
+            "max_drawdown_pct": 0.0,
+            "total_return_pct": 0.0,
+            "daily_vol_pct": None,
+            "sharpe": None,
+            "history_points": len(nav),
+        }
+
+    returns = nav.pct_change().replace([float("inf"), float("-inf")], pd.NA).dropna()
 
     total_return_pct = (nav.iloc[-1] / nav.iloc[0] - 1) * 100 if nav.iloc[0] > 0 else None
+
     rolling_peak = nav.cummax()
     drawdown = nav / rolling_peak - 1
-    max_drawdown_pct = drawdown.min() * 100 if not drawdown.empty else None
+    max_drawdown_pct = drawdown.min() * 100 if not drawdown.empty else 0.0
+
     daily_vol_pct = returns.std() * 100 if not returns.empty else None
 
     sharpe = None
-    if returns.std() and returns.std() > 0:
+    if len(returns) >= 2 and returns.std() is not None and returns.std() > 0:
         sharpe = (returns.mean() / returns.std()) * (252 ** 0.5)
 
     return {
@@ -1612,6 +1639,7 @@ def calculate_performance_metrics(history_df: pd.DataFrame) -> Dict:
         "total_return_pct": round(total_return_pct, 2) if total_return_pct is not None else None,
         "daily_vol_pct": round(daily_vol_pct, 2) if daily_vol_pct is not None else None,
         "sharpe": round(sharpe, 2) if sharpe is not None else None,
+        "history_points": len(nav),
     }
 
 
