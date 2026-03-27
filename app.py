@@ -33,6 +33,8 @@ from core import (
     save_trade,
     save_watchlist,
     send_telegram_msg,
+    delete_watchlist_ticker,
+    set_watchlist_enabled,
 )
 
 st.set_page_config(page_title="美股投資組合專業版", layout="wide")
@@ -733,13 +735,43 @@ with tab4:
             )
             if ok:
                 st.success(msg)
-                st.info("Watchlist 已寫入，請稍後手動重新整理頁面。")
+                st.info("已寫入 Watchlist，請稍後手動重新整理。")
             else:
                 st.error(msg)
+
     with col2:
         st.markdown("#### 📋 Watchlist 清單")
         if not watchlist_df.empty:
             st.dataframe(watchlist_df, use_container_width=True)
+
+            st.markdown("#### 🛠️ 管理 Watchlist")
+            manage_ticker = st.selectbox(
+                "選擇要管理的 Ticker",
+                options=watchlist_df["Ticker"].tolist(),
+                key="manage_watchlist_ticker"
+            )
+
+            a1, a2 = st.columns(2)
+
+            with a1:
+                if st.button("停用 / 啟用切換"):
+                    current_row = watchlist_df[watchlist_df["Ticker"] == manage_ticker].iloc[0]
+                    current_enabled = bool(current_row["Enabled"])
+                    ok, msg = set_watchlist_enabled(manage_ticker, not current_enabled)
+                    if ok:
+                        st.success(msg)
+                        st.info("請稍後手動重新整理頁面。")
+                    else:
+                        st.error(msg)
+
+            with a2:
+                if st.button("刪除 Watchlist Ticker"):
+                    ok, msg = delete_watchlist_ticker(manage_ticker)
+                    if ok:
+                        st.success(msg)
+                        st.info("請稍後手動重新整理頁面。")
+                    else:
+                        st.error(msg)
         else:
             st.info("目前 Watchlist 為空。")
 
@@ -748,37 +780,40 @@ with tab4:
 
     if not watchlist_df.empty:
         enabled_watch = watchlist_df[watchlist_df["Enabled"]]["Ticker"].tolist()
-        selected_watch_ticker = st.selectbox("選擇 Watchlist 標的", options=enabled_watch)
-        w_hist = get_unified_analysis(selected_watch_ticker)
+        if enabled_watch:
+            selected_watch_ticker = st.selectbox("選擇 Watchlist 標的", options=enabled_watch)
+            w_hist = get_unified_analysis(selected_watch_ticker)
 
-        if w_hist is not None and not w_hist.empty:
-            held_shares = 0.0
-            current_mkt_value = 0.0
-            for p in portfolio:
-                if p["Ticker"] == selected_watch_ticker:
-                    held_shares = p["Shares"]
-                    current_mkt_value = p["MarketValue"]
-                    break
+            if w_hist is not None and not w_hist.empty:
+                held_shares = 0.0
+                current_mkt_value = 0.0
+                for p in portfolio:
+                    if p["Ticker"] == selected_watch_ticker:
+                        held_shares = p["Shares"]
+                        current_mkt_value = p["MarketValue"]
+                        break
 
-            w_score, w_action, w_details, w_note = evaluate_strategy(
-                ticker=selected_watch_ticker,
-                hist=w_hist,
-                held_shares=held_shares,
-                current_mkt_value=current_mkt_value,
-                total_assets=total_assets,
-                cash=cash,
-                market_regime=market_regime,
-            )
+                w_score, w_action, w_details, w_note = evaluate_strategy(
+                    ticker=selected_watch_ticker,
+                    hist=w_hist,
+                    held_shares=held_shares,
+                    current_mkt_value=current_mkt_value,
+                    total_assets=total_assets,
+                    cash=cash,
+                    market_regime=market_regime,
+                )
 
-            ww1, ww2, ww3, ww4 = st.columns(4)
-            ww1.metric("訊號", w_action)
-            ww2.metric("分數", f"{w_score:.2f}")
-            ww3.metric("現價", f"${w_details['close']:.2f}")
-            ww4.metric("建議股數", int(w_details["suggested_buy_qty"]))
+                ww1, ww2, ww3, ww4 = st.columns(4)
+                ww1.metric("訊號", w_action)
+                ww2.metric("分數", f"{w_score:.2f}")
+                ww3.metric("現價", f"${w_details['close']:.2f}")
+                ww4.metric("建議股數", int(w_details["suggested_buy_qty"]))
 
-            st.write("**依據：**", w_note)
+                st.write("**依據：**", w_note)
+            else:
+                st.warning("無法取得該標的資料。")
         else:
-            st.warning("無法取得該標的資料。")
+            st.info("目前沒有啟用中的 Watchlist 標的。")
 
 # ===============================
 # Tab 5 Monitor
