@@ -181,28 +181,59 @@ def get_last_price(symbol: str) -> Optional[float]:
 
 
 @lru_cache(maxsize=512)
-def get_next_earnings_date(symbol: str) -> Optional[datetime]:
+def get_next_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
     try:
         tk = yf.Ticker(normalize_ticker(symbol))
         cal = tk.calendar
-        if cal is None or len(cal) == 0:
+
+        if cal is None:
             return None
 
+        # DataFrame
         if isinstance(cal, pd.DataFrame):
-            vals = cal.values.flatten().tolist()
-            for x in vals:
-                dt = pd.to_datetime(x, errors="coerce")
+            for val in cal.to_numpy().flatten().tolist():
+                dt = pd.to_datetime(val, errors="coerce")
                 if pd.notna(dt):
-                    return dt.to_pydatetime()
+                    return dt
 
+        # dict
         if isinstance(cal, dict):
-            for _, v in cal.items():
-                dt = pd.to_datetime(v, errors="coerce")
-                if pd.notna(dt):
-                    return dt.to_pydatetime()
+            for _, val in cal.items():
+                if isinstance(val, (list, tuple)):
+                    for x in val:
+                        dt = pd.to_datetime(x, errors="coerce")
+                        if pd.notna(dt):
+                            return dt
+                else:
+                    dt = pd.to_datetime(val, errors="coerce")
+                    if pd.notna(dt):
+                        return dt
+
+        # 其他型別直接嘗試轉
+        dt = pd.to_datetime(cal, errors="coerce")
+        if pd.notna(dt):
+            return dt
+
     except Exception:
         pass
+
     return None
+
+
+def is_earnings_blocked(symbol: str) -> bool:
+    next_dt = get_next_earnings_date(symbol)
+    if next_dt is None or pd.isna(next_dt):
+        return False
+
+    try:
+        next_date = pd.to_datetime(next_dt, errors="coerce")
+        if pd.isna(next_date):
+            return False
+
+        days = (next_date.date() - datetime.now().date()).days
+        return abs(days) <= EARNINGS_BLOCK_DAYS
+    except Exception:
+        return False
 
 
 @lru_cache(maxsize=512)
@@ -783,13 +814,6 @@ def passes_liquidity_filter(hist: pd.DataFrame) -> bool:
     dv20 = safe_float(last["DollarVolume20"])
     return close >= MIN_PRICE and dv20 >= MIN_AVG_DOLLAR_VOLUME
 
-
-def is_earnings_blocked(symbol: str) -> bool:
-    next_dt = get_next_earnings_date(symbol)
-    if not next_dt:
-        return False
-    days = (next_dt.date() - datetime.now().date()).days
-    return abs(days) <= EARNINGS_BLOCK_DAYS
 
 
 # ===============================
