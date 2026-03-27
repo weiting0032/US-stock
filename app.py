@@ -188,6 +188,8 @@ x1.metric("市場狀態", display_market_regime(market_regime["regime"]))
 x2.metric("Regime Score", market_regime["score"])
 x3.metric("最大回撤", "-" if perf["max_drawdown_pct"] is None else f"{perf['max_drawdown_pct']:.2f}%")
 x4.metric("Sharpe", "-" if perf["sharpe"] is None else f"{perf['sharpe']:.2f}")
+if perf.get("history_points", 0) < 2:
+    st.warning("NAV 歷史資料不足 2 筆，Sharpe 與最大回撤暫時不具參考性。請先累積每日 NAV。")
 
 st.info(
     f"📡 市場狀態：{display_market_regime(market_regime['regime'])} ｜ "
