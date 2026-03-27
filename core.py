@@ -447,6 +447,89 @@ def clear_app_caches():
 # ===============================
 # Trades / Watchlist / History
 # ===============================
+def delete_watchlist_ticker(ticker: str) -> Tuple[bool, str]:
+    ticker = normalize_ticker(ticker)
+    if not ticker:
+        return False, "Ticker 不可為空"
+
+    try:
+        ws_watchlist = get_watchlist_worksheet(readonly=True)
+        values = gsheet_retry(lambda: ws_watchlist.get_all_values())
+
+        if not values or len(values) <= 1:
+            return False, "Watchlist 目前為空"
+
+        headers = values[0]
+        rows = values[1:]
+
+        ticker_idx = None
+        for i, h in enumerate(headers):
+            if str(h).strip().upper() == "TICKER":
+                ticker_idx = i
+                break
+
+        if ticker_idx is None:
+            return False, "Watchlist 表頭缺少 Ticker 欄位"
+
+        target_row_number = None
+        for idx, row in enumerate(rows, start=2):  # Google Sheet row starts at 1, data rows start at 2
+            val = row[ticker_idx] if ticker_idx < len(row) else ""
+            if normalize_ticker(val) == ticker:
+                target_row_number = idx
+                break
+
+        if target_row_number is None:
+            return False, f"{ticker} 不在 Watchlist 中"
+
+        gsheet_retry(lambda: ws_watchlist.delete_rows(target_row_number))
+        clear_app_caches()
+        return True, f"已刪除 Watchlist：{ticker}"
+
+    except Exception as e:
+        return False, f"刪除 Watchlist 失敗：{e}"
+
+def set_watchlist_enabled(ticker: str, enabled: bool) -> Tuple[bool, str]:
+    ticker = normalize_ticker(ticker)
+    if not ticker:
+        return False, "Ticker 不可為空"
+
+    try:
+        ws_watchlist = get_watchlist_worksheet(readonly=True)
+        values = gsheet_retry(lambda: ws_watchlist.get_all_values())
+
+        if not values or len(values) <= 1:
+            return False, "Watchlist 目前為空"
+
+        headers = values[0]
+        rows = values[1:]
+
+        ticker_idx = None
+        enabled_idx = None
+
+        for i, h in enumerate(headers):
+            hh = str(h).strip().upper()
+            if hh == "TICKER":
+                ticker_idx = i
+            elif hh == "ENABLED":
+                enabled_idx = i
+
+        if ticker_idx is None or enabled_idx is None:
+            return False, "Watchlist 缺少必要欄位"
+
+        for idx, row in enumerate(rows, start=2):
+            val = row[ticker_idx] if ticker_idx < len(row) else ""
+            if normalize_ticker(val) == ticker:
+                cell_row = idx
+                cell_col = enabled_idx + 1
+                gsheet_retry(lambda: ws_watchlist.update_cell(cell_row, cell_col, str(enabled)))
+                clear_app_caches()
+                return True, f"{ticker} 已{'啟用' if enabled else '停用'}"
+
+        return False, f"{ticker} 不在 Watchlist 中"
+
+    except Exception as e:
+        return False, f"更新 Watchlist 狀態失敗：{e}"
+        
 def _load_trades_raw() -> pd.DataFrame:
     ws_trades = get_trades_worksheet(readonly=True)
 
