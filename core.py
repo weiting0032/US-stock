@@ -35,7 +35,22 @@ EARNINGS_BLOCK_DAYS = int(os.getenv("EARNINGS_BLOCK_DAYS", "2"))
 DEFAULT_COMMISSION = float(os.getenv("DEFAULT_COMMISSION", "0"))
 DEFAULT_SLIPPAGE_PCT = float(os.getenv("DEFAULT_SLIPPAGE_PCT", "0.001"))
 
+import time
 
+def gsheet_retry(func, max_retries: int = 5, base_sleep: float = 1.0):
+    last_error = None
+    for i in range(max_retries):
+        try:
+            return func()
+        except Exception as e:
+            last_error = e
+            msg = str(e)
+            if "429" in msg or "Quota exceeded" in msg or "Read requests" in msg:
+                sleep_sec = base_sleep * (2 ** i)
+                time.sleep(sleep_sec)
+                continue
+            raise
+    raise last_error
 # ===============================
 # Utility
 # ===============================
@@ -341,6 +356,15 @@ def get_or_create_worksheet(spreadsheet, title: str, rows: int = 1000, cols: int
         return spreadsheet.add_worksheet(title=title, rows=str(rows), cols=str(cols))
 
 
+def ensure_headers(ws, headers: List[str]):
+    try:
+        first_row = ws.row_values(1)
+        if not first_row:
+            ws.append_row(headers)
+    except Exception:
+        ws.append_row(headers)
+
+
 def get_sheet_handles():
     ss = get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
     ws_trades = get_or_create_worksheet(ss, "Trades", rows=10000, cols=14)
@@ -348,36 +372,33 @@ def get_sheet_handles():
     ws_alerts = get_or_create_worksheet(ss, "Alerts", rows=12000, cols=12)
     ws_watchlist = get_or_create_worksheet(ss, "Watchlist", rows=2000, cols=4)
 
-    if not ws_trades.get_all_values():
-        ws_trades.append_row([
-            "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
-            "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
-        ])
+    ensure_headers(ws_trades, [
+        "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
+        "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
+    ])
 
-    if not ws_history.get_all_values():
-        ws_history.append_row([
-            "Date", "TotalAssets", "Cash", "MarketValue", "RealizedPL",
-            "UnrealizedPL", "TotalPL", "DailyReturnPct", "DrawdownPct",
-            "BenchmarkSPY", "BenchmarkReturnPct"
-        ])
+    ensure_headers(ws_history, [
+        "Date", "TotalAssets", "Cash", "MarketValue", "RealizedPL",
+        "UnrealizedPL", "TotalPL", "DailyReturnPct", "DrawdownPct",
+        "BenchmarkSPY", "BenchmarkReturnPct"
+    ])
 
-    if not ws_alerts.get_all_values():
-        ws_alerts.append_row([
-            "DateTime", "Ticker", "Action", "BaseKey", "Price",
-            "Score", "Session", "TargetPrice", "Message", "Fingerprint"
-        ])
+    ensure_headers(ws_alerts, [
+        "DateTime", "Ticker", "Action", "BaseKey", "Price",
+        "Score", "Session", "TargetPrice", "Message", "Fingerprint"
+    ])
 
-    if not ws_watchlist.get_all_values():
-        ws_watchlist.append_row(["Ticker", "Enabled", "Category", "Note"])
+    ensure_headers(ws_watchlist, ["Ticker", "Enabled", "Category", "Note"])
 
     return ss, ws_trades, ws_history, ws_alerts, ws_watchlist
 
 
 def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
     try:
-        values = ws.get_all_values()
+        values = gsheet_retry(lambda: ws.get_all_values())
         if not values:
             return pd.DataFrame(columns=expected_headers)
+
         rows = values[1:] if len(values) > 1 else []
         clean = []
         for row in rows:
@@ -387,6 +408,28 @@ def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=expected_headers)
 
+def clear_app_caches():
+    clear_market_cache()
+
+    try:
+        load_watchlist.clear()
+    except Exception:
+        pass
+
+    try:
+        load_trades.clear()
+    except Exception:
+        pass
+
+    try:
+        load_alerts.clear()
+    except Exception:
+        pass
+
+    try:
+        load_history.clear()
+    except Exception:
+        pass
 
 # ===============================
 # Trades / Watchlist / History
@@ -439,7 +482,13 @@ def load_trades() -> pd.DataFrame:
     return df
 
 
-def load_watchlist() -> pd.DataFrame:
+try:
+    import streamlit as st
+except Exception:
+    st = None
+
+
+def _load_watchlist_raw() -> pd.DataFrame:
     _, _, _, _, ws_watchlist = get_sheet_handles()
     cols = ["Ticker", "Enabled", "Category", "Note"]
     df = read_worksheet_as_df(ws_watchlist, cols)
@@ -448,7 +497,16 @@ def load_watchlist() -> pd.DataFrame:
 
     df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
     df["Enabled"] = df["Enabled"].astype(str).str.upper().isin(["TRUE", "1", "YES", "Y", "ON"])
-    return df[df["Ticker"] != ""].reset_index(drop=True)
+    return df[df["Ticker"] != ""].drop_duplicates(subset=["Ticker"], keep="last").reset_index(drop=True)
+
+
+if st:
+    @st.cache_data(ttl=60, show_spinner=False)
+    def load_watchlist() -> pd.DataFrame:
+        return _load_watchlist_raw()
+else:
+    def load_watchlist() -> pd.DataFrame:
+        return _load_watchlist_raw()
 
 
 def save_watchlist(ticker: str, enabled: bool = True, category: str = "General", note: str = "") -> Tuple[bool, str]:
@@ -458,7 +516,14 @@ def save_watchlist(ticker: str, enabled: bool = True, category: str = "General",
 
     try:
         _, _, _, _, ws_watchlist = get_sheet_handles()
-        ws_watchlist.append_row([ticker, str(enabled), category, note])
+
+        # 先檢查是否已存在，避免重複寫入
+        current_df = load_watchlist(use_cache=False)
+        if not current_df.empty and ticker in current_df["Ticker"].astype(str).tolist():
+            return False, f"{ticker} 已存在於 Watchlist"
+
+        gsheet_retry(lambda: ws_watchlist.append_row([ticker, str(enabled), category, note]))
+        clear_app_caches()
         return True, "已加入 Watchlist"
     except Exception as e:
         return False, f"加入 Watchlist 失敗：{e}"
