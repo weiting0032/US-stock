@@ -110,8 +110,6 @@ log_nav_now = st.sidebar.button("🧾 寫入今日 NAV")
 try:
     trades_df = load_trades()
     watchlist_df = load_watchlist()
-    history_df = load_history()
-    alerts_df = load_alerts()
 except Exception as e:
     st.error(f"資料讀取失敗：{str(e)}")
     trades_df = pd.DataFrame(columns=[
@@ -119,8 +117,9 @@ except Exception as e:
         "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
     ])
     watchlist_df = pd.DataFrame(columns=["Ticker", "Enabled", "Category", "Note"])
-    history_df = pd.DataFrame()
-    alerts_df = pd.DataFrame()
+
+history_df = pd.DataFrame()
+alerts_df = pd.DataFrame()
 
 portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
 market_value = sum(x["MarketValue"] for x in portfolio_raw)
@@ -257,6 +256,11 @@ with tab1:
             st.plotly_chart(pie_fig, use_container_width=True)
 
     st.subheader("🧾 淨值與基準表現")
+    if history_df.empty:
+        try:
+            history_df = load_history()
+        except Exception:
+            history_df = pd.DataFrame()
     if not history_df.empty:
         nav_fig = go.Figure()
         nav_fig.add_trace(go.Scatter(
@@ -276,6 +280,11 @@ with tab1:
         st.info("尚無 NAV 歷史資料，可按側欄『寫入今日 NAV』。")
 
     st.subheader("🔔 最近提醒")
+    if alerts_df.empty:
+        try:
+            alerts_df = load_alerts()
+        except Exception:
+            alerts_df = pd.DataFrame()
     if not alerts_df.empty:
         recent_alerts = alerts_df.sort_values("DateTime", ascending=False).head(10).copy()
         st.dataframe(recent_alerts, use_container_width=True)
