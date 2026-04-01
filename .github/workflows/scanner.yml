@@ -2,9 +2,8 @@ name: US Stock Scanner
 
 on:
   schedule:
-    # 交易時段附近每 15 分鐘掃描一次（UTC）
-    # 美股盤前/盤中/盤後都可涵蓋，實際是否發送由程式內 market session 控制
-    - cron: "*/15 * * * 1-5"
+    - cron: "0 13 * * 1-5"   # 美東盤前附近
+    - cron: "30 21 * * 1-5"  # 收盤後附近
   workflow_dispatch:
 
 concurrency:
