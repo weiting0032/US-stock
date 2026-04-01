@@ -2,7 +2,7 @@ import json
 import math
 import os
 import time
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
@@ -17,6 +17,10 @@ try:
 except Exception:
     st = None
 
+
+# ===============================
+# Env helpers
+# ===============================
 def get_env_str(name: str, default: str = "") -> str:
     val = os.getenv(name)
     if val is None:
@@ -50,6 +54,7 @@ def get_env_int(name: str, default: int) -> int:
     except Exception:
         return int(default)
 
+
 PORTFOLIO_SHEET_TITLE = get_env_str("PORTFOLIO_SHEET_TITLE", "US Stock")
 
 TG_TOKEN = get_env_str("TG_TOKEN", "")
@@ -72,14 +77,28 @@ EARNINGS_BLOCK_DAYS = get_env_int("EARNINGS_BLOCK_DAYS", 2)
 DEFAULT_COMMISSION = get_env_float("DEFAULT_COMMISSION", 0)
 DEFAULT_SLIPPAGE_PCT = get_env_float("DEFAULT_SLIPPAGE_PCT", 0.001)
 
-TRADE_HEADERS_V1 = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
+BREAKOUT_ADX_MIN = get_env_float("BREAKOUT_ADX_MIN", 18)
+RS_LOOKBACK_DAYS = get_env_int("RS_LOOKBACK_DAYS", 20)
+NEAR_52W_HIGH_PCT = get_env_float("NEAR_52W_HIGH_PCT", 0.10)
+PORTFOLIO_HEAT_LIMIT_PCT = get_env_float("PORTFOLIO_HEAT_LIMIT_PCT", 0.05)
 
+LARGE_CAP_MAX_WEIGHT = get_env_float("LARGE_CAP_MAX_WEIGHT", 0.25)
+SMALL_CAP_MAX_WEIGHT = get_env_float("SMALL_CAP_MAX_WEIGHT", 0.12)
+LARGE_CAP_RISK_PER_TRADE_PCT = get_env_float("LARGE_CAP_RISK_PER_TRADE_PCT", 0.01)
+SMALL_CAP_RISK_PER_TRADE_PCT = get_env_float("SMALL_CAP_RISK_PER_TRADE_PCT", 0.005)
+
+SIGNAL_LOG_LOOKAHEAD_DAYS = get_env_int("SIGNAL_LOG_LOOKAHEAD_DAYS", 20)
+
+TRADE_HEADERS_V1 = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
 TRADE_HEADERS_V2 = [
     "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
     "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
 ]
 
-import time
+
+# ===============================
+# Retry
+# ===============================
 def gsheet_retry(func, max_retries: int = 6, base_sleep: float = 1.5):
     last_error = None
     for i in range(max_retries):
@@ -89,11 +108,12 @@ def gsheet_retry(func, max_retries: int = 6, base_sleep: float = 1.5):
             last_error = e
             msg = str(e)
             if "429" in msg or "Quota exceeded" in msg or "Read requests" in msg:
-                sleep_sec = base_sleep * (2 ** i)
-                time.sleep(sleep_sec)
+                time.sleep(base_sleep * (2 ** i))
                 continue
             raise
     raise last_error
+
+
 # ===============================
 # Utility
 # ===============================
@@ -109,6 +129,13 @@ def color_pl(val):
 def safe_float(x, default=0.0) -> float:
     try:
         return float(x)
+    except Exception:
+        return default
+
+
+def safe_int(x, default=0) -> int:
+    try:
+        return int(float(x))
     except Exception:
         return default
 
@@ -227,7 +254,7 @@ def get_sp500_tickers() -> List[str]:
         ]
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=1024)
 def get_last_price(symbol: str) -> Optional[float]:
     try:
         hist = yf.Ticker(normalize_ticker(symbol)).history(period="5d", auto_adjust=True)
@@ -247,14 +274,12 @@ def get_next_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
         if cal is None:
             return None
 
-        # DataFrame
         if isinstance(cal, pd.DataFrame):
             for val in cal.to_numpy().flatten().tolist():
                 dt = pd.to_datetime(val, errors="coerce")
                 if pd.notna(dt):
                     return dt
 
-        # dict
         if isinstance(cal, dict):
             for _, val in cal.items():
                 if isinstance(val, (list, tuple)):
@@ -267,34 +292,78 @@ def get_next_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
                     if pd.notna(dt):
                         return dt
 
-        # 其他型別直接嘗試轉
         dt = pd.to_datetime(cal, errors="coerce")
         if pd.notna(dt):
             return dt
-
     except Exception:
         pass
-
     return None
+
+
+@lru_cache(maxsize=512)
+def get_symbol_profile(symbol: str) -> Dict:
+    symbol = normalize_ticker(symbol)
+    try:
+        tk = yf.Ticker(symbol)
+        info = tk.fast_info if hasattr(tk, "fast_info") else {}
+        long_info = {}
+        try:
+            long_info = tk.info or {}
+        except Exception:
+            long_info = {}
+
+        market_cap = safe_float(
+            long_info.get("marketCap") or info.get("marketCap") or 0.0
+        )
+        sector = str(long_info.get("sector") or "").strip()
+        industry = str(long_info.get("industry") or "").strip()
+
+        return {
+            "market_cap": market_cap,
+            "sector": sector,
+            "industry": industry,
+        }
+    except Exception:
+        return {"market_cap": 0.0, "sector": "", "industry": ""}
+
+
+def classify_symbol_bucket(symbol: str, hist: Optional[pd.DataFrame] = None) -> str:
+    prof = get_symbol_profile(symbol)
+    market_cap = safe_float(prof.get("market_cap"))
+    last_price = None
+    dv20 = 0.0
+
+    if hist is not None and not hist.empty:
+        last_price = safe_float(hist.iloc[-1]["Close"])
+        dv20 = safe_float(hist.iloc[-1].get("DollarVolume20", 0.0))
+    else:
+        last_price = get_last_price(symbol)
+
+    if market_cap >= 10_000_000_000:
+        return "LARGE_CAP"
+    if market_cap > 0 and market_cap < 2_000_000_000:
+        return "SMALL_CAP"
+
+    if safe_float(last_price) < 20 or dv20 < 50_000_000:
+        return "SMALL_CAP"
+    return "LARGE_CAP"
 
 
 def is_earnings_blocked(symbol: str) -> bool:
     next_dt = get_next_earnings_date(symbol)
     if next_dt is None or pd.isna(next_dt):
         return False
-
     try:
         next_date = pd.to_datetime(next_dt, errors="coerce")
         if pd.isna(next_date):
             return False
-
         days = (next_date.date() - datetime.now().date()).days
         return abs(days) <= EARNINGS_BLOCK_DAYS
     except Exception:
         return False
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=1024)
 def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
     try:
         symbol = normalize_ticker(symbol)
@@ -303,6 +372,7 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
             return None
 
         df = df.copy()
+
         df["SMA20"] = df["Close"].rolling(20).mean()
         df["SMA50"] = df["Close"].rolling(50).mean()
         df["SMA200"] = df["Close"].rolling(200).mean()
@@ -315,7 +385,22 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
         hc = (df["High"] - df["Close"].shift(1)).abs()
         lc = (df["Low"] - df["Close"].shift(1)).abs()
         tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+        df["TR"] = tr
         df["ATR"] = tr.rolling(14).mean()
+
+        up_move = df["High"].diff()
+        down_move = -df["Low"].diff()
+
+        plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
+        minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
+
+        atr14 = df["TR"].rolling(14).mean()
+        plus_di = 100 * (plus_dm.rolling(14).mean() / (atr14 + 1e-9))
+        minus_di = 100 * (minus_dm.rolling(14).mean() / (atr14 + 1e-9))
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)) * 100
+        df["ADX"] = dx.rolling(14).mean()
+        df["PLUS_DI"] = plus_di
+        df["MINUS_DI"] = minus_di
 
         delta = df["Close"].diff()
         gain = delta.clip(lower=0)
@@ -335,6 +420,8 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
         df["RollingHigh20"] = df["High"].rolling(20).max()
         df["RollingHigh55"] = df["High"].rolling(55).max()
         df["RollingLow20"] = df["Low"].rolling(20).min()
+        df["RollingLow50"] = df["Low"].rolling(50).min()
+        df["RollingHigh252"] = df["High"].rolling(252).max()
         df["TrailingStop"] = df["RollingHigh20"] - 3 * df["ATR"]
         df["DollarVolume"] = df["Close"] * df["Volume"]
         df["DollarVolume20"] = df["DollarVolume"].rolling(20).mean()
@@ -351,6 +438,21 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
                 obv.append(obv[-1])
         df["OBV"] = obv
 
+        spy = yf.Ticker("SPY").history(period="2y", auto_adjust=True)
+        if spy is not None and not spy.empty:
+            spy_close = spy["Close"].reindex(df.index).ffill()
+            df["RS_Line_SPY"] = df["Close"] / (spy_close + 1e-9)
+            df["Ret20"] = df["Close"].pct_change(RS_LOOKBACK_DAYS)
+            df["SPY_Ret20"] = spy_close.pct_change(RS_LOOKBACK_DAYS)
+            df["RS20_vs_SPY"] = (df["Ret20"] - df["SPY_Ret20"]) * 100
+            df["RS_Line_Slope20"] = df["RS_Line_SPY"].pct_change(RS_LOOKBACK_DAYS) * 100
+        else:
+            df["RS_Line_SPY"] = pd.NA
+            df["Ret20"] = pd.NA
+            df["SPY_Ret20"] = pd.NA
+            df["RS20_vs_SPY"] = pd.NA
+            df["RS_Line_Slope20"] = pd.NA
+
         return df.dropna().copy()
     except Exception:
         return None
@@ -360,13 +462,14 @@ def clear_market_cache():
     get_last_price.cache_clear()
     get_unified_analysis.cache_clear()
     get_next_earnings_date.cache_clear()
+    get_symbol_profile.cache_clear()
 
 
 # ===============================
 # Google Sheets
 # ===============================
 def get_gsheet_client():
-    raw = os.getenv("GCP_SERVICE_ACCOUNT", "").strip()
+    raw = get_env_str("GCP_SERVICE_ACCOUNT", "")
     if raw:
         creds = json.loads(raw)
         return gspread.service_account_from_dict(creds)
@@ -411,10 +514,10 @@ def ensure_headers(ws, headers: List[str]):
     except Exception:
         gsheet_retry(lambda: ws.append_row(headers))
 
+
 def get_trades_worksheet(readonly: bool = True):
     ss = get_spreadsheet()
     ws = get_or_create_worksheet(ss, "Trades", rows=10000, cols=14)
-
     if not readonly:
         try:
             first_row = gsheet_retry(lambda: ws.row_values(1))
@@ -422,8 +525,8 @@ def get_trades_worksheet(readonly: bool = True):
                 gsheet_retry(lambda: ws.append_row(TRADE_HEADERS_V2))
         except Exception:
             gsheet_retry(lambda: ws.append_row(TRADE_HEADERS_V2))
-
     return ws
+
 
 def get_history_worksheet(readonly: bool = True):
     ss = get_spreadsheet()
@@ -454,7 +557,21 @@ def get_watchlist_worksheet(readonly: bool = True):
     if not readonly:
         ensure_headers(ws, ["Ticker", "Enabled", "Category", "Note"])
     return ws
-    
+
+
+def get_signals_worksheet(readonly: bool = True):
+    ss = get_spreadsheet()
+    ws = get_or_create_worksheet(ss, "Signals", rows=20000, cols=20)
+    if not readonly:
+        ensure_headers(ws, [
+            "DateTime", "Ticker", "Action", "StrategyMode", "Score", "Close",
+            "TargetBuyPrice", "TargetSellPrice", "StopLoss", "TrendStop",
+            "TakeProfit1", "TakeProfit2", "RS20vsSPY", "ADX", "Regime",
+            "Bucket", "SignalState", "Reason", "Fingerprint", "Session"
+        ])
+    return ws
+
+
 def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
     try:
         values = gsheet_retry(lambda: ws.get_all_values())
@@ -463,8 +580,6 @@ def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
 
         headers = values[0]
         rows = values[1:] if len(values) > 1 else []
-
-        # 若表頭不存在，直接視為空表
         if not headers:
             return pd.DataFrame(columns=expected_headers)
 
@@ -476,16 +591,17 @@ def read_worksheet_as_df(ws, expected_headers: List[str]) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=expected_headers)
 
+
 def clear_app_caches():
     clear_market_cache()
-
-    for fn_name in ["load_watchlist", "load_trades", "load_alerts", "load_history"]:
+    for fn_name in ["load_watchlist", "load_trades", "load_alerts", "load_history", "load_signals"]:
         try:
             fn = globals().get(fn_name)
             if fn and hasattr(fn, "clear"):
                 fn.clear()
         except Exception:
             pass
+
 
 # ===============================
 # Trades / Watchlist / History
@@ -515,7 +631,7 @@ def delete_watchlist_ticker(ticker: str) -> Tuple[bool, str]:
             return False, "Watchlist 表頭缺少 Ticker 欄位"
 
         target_row_number = None
-        for idx, row in enumerate(rows, start=2):  # Google Sheet row starts at 1, data rows start at 2
+        for idx, row in enumerate(rows, start=2):
             val = row[ticker_idx] if ticker_idx < len(row) else ""
             if normalize_ticker(val) == ticker:
                 target_row_number = idx
@@ -530,6 +646,7 @@ def delete_watchlist_ticker(ticker: str) -> Tuple[bool, str]:
 
     except Exception as e:
         return False, f"刪除 Watchlist 失敗：{e}"
+
 
 def set_watchlist_enabled(ticker: str, enabled: bool) -> Tuple[bool, str]:
     ticker = normalize_ticker(ticker)
@@ -572,10 +689,10 @@ def set_watchlist_enabled(ticker: str, enabled: bool) -> Tuple[bool, str]:
 
     except Exception as e:
         return False, f"更新 Watchlist 狀態失敗：{e}"
-        
+
+
 def _load_trades_raw() -> pd.DataFrame:
     ws_trades = get_trades_worksheet(readonly=True)
-
     values = gsheet_retry(lambda: ws_trades.get_all_values())
     if not values:
         return pd.DataFrame(columns=TRADE_HEADERS_V2)
@@ -594,13 +711,10 @@ def _load_trades_raw() -> pd.DataFrame:
     for row in rows:
         row = list(row)
 
-        # 舊格式資料列：7 欄
         if is_legacy:
             row7 = row[:7] + [""] * max(0, 7 - len(row[:7]))
             row7 = row7[:7]
-
             date_val, ticker, trade_type, price, shares, total, note = row7
-
             normalized_rows.append({
                 "TradeDateTime": pd.to_datetime(date_val, errors="coerce"),
                 "CreatedAt": pd.to_datetime(date_val, errors="coerce"),
@@ -615,12 +729,9 @@ def _load_trades_raw() -> pd.DataFrame:
                 "Note": note,
                 "OrderID": "",
             })
-
-        # 新格式資料列：12 欄
         elif is_v2:
-            row12 = row[:12] + [""] * max(0, 12 - len(row[:12]))
+            row12 = row[:12] + [""] * max(0, 12 - len(row))
             row12 = row12[:12]
-
             normalized_rows.append({
                 "TradeDateTime": row12[0],
                 "CreatedAt": row12[1],
@@ -635,8 +746,6 @@ def _load_trades_raw() -> pd.DataFrame:
                 "Note": row12[10],
                 "OrderID": row12[11],
             })
-
-        # 其他異常格式：盡量容錯
         else:
             if len(row) >= 12:
                 row12 = row[:12]
@@ -672,7 +781,6 @@ def _load_trades_raw() -> pd.DataFrame:
                 })
 
     df = pd.DataFrame(normalized_rows, columns=TRADE_HEADERS_V2)
-
     if df.empty:
         return df
 
@@ -695,6 +803,7 @@ if st:
 else:
     def load_trades() -> pd.DataFrame:
         return _load_trades_raw()
+
 
 def _load_watchlist_raw() -> pd.DataFrame:
     ws_watchlist = get_watchlist_worksheet(readonly=True)
@@ -794,6 +903,33 @@ else:
         return _load_history_raw()
 
 
+def _load_signals_raw() -> pd.DataFrame:
+    ws = get_signals_worksheet(readonly=True)
+    cols = [
+        "DateTime", "Ticker", "Action", "StrategyMode", "Score", "Close",
+        "TargetBuyPrice", "TargetSellPrice", "StopLoss", "TrendStop",
+        "TakeProfit1", "TakeProfit2", "RS20vsSPY", "ADX", "Regime",
+        "Bucket", "SignalState", "Reason", "Fingerprint", "Session"
+    ]
+    df = read_worksheet_as_df(ws, cols)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
+    for col in ["Score", "Close", "TargetBuyPrice", "TargetSellPrice", "StopLoss", "TrendStop", "TakeProfit1", "TakeProfit2", "RS20vsSPY", "ADX"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df.sort_values("DateTime").reset_index(drop=True)
+
+
+if st:
+    @st.cache_data(ttl=120, show_spinner=False)
+    def load_signals() -> pd.DataFrame:
+        return _load_signals_raw()
+else:
+    def load_signals() -> pd.DataFrame:
+        return _load_signals_raw()
+
+
 def save_trade(
     trade_dt: datetime,
     ticker: str,
@@ -845,7 +981,6 @@ def save_trade(
     is_v2 = headers[:len(TRADE_HEADERS_V2)] == TRADE_HEADERS_V2
 
     if is_legacy:
-        # 舊格式：Date, Ticker, Type, Price, Shares, Total, Note
         total_col = round(price * shares, 4)
         gsheet_retry(lambda: ws_trades.append_row([
             trade_dt.strftime("%Y-%m-%d"),
@@ -859,7 +994,6 @@ def save_trade(
         clear_app_caches()
         return True, "交易已寫入（舊版 Trades 格式）"
 
-    # 預設寫入新版格式
     if not is_v2 and not headers:
         gsheet_retry(lambda: ws_trades.append_row(TRADE_HEADERS_V2))
 
@@ -937,9 +1071,8 @@ def maybe_log_daily_history(
     except Exception as e:
         return False, f"寫入 NAV 失敗：{e}"
 
-
 # ===============================
-# Alert Dedup
+# Alert / Signal dedup
 # ===============================
 def build_alert_fingerprint(
     ticker: str,
@@ -950,7 +1083,11 @@ def build_alert_fingerprint(
     target_price: Optional[float]
 ) -> str:
     tp = round(float(target_price), 2) if target_price is not None and not pd.isna(target_price) else 0.0
-    return f"{ticker}|{action}|{session}|{round(float(price), 2)}|{round(float(score), 1)}|{tp}"
+    return f"{normalize_ticker(ticker)}|{action}|{session}|{round(float(price), 2)}|{round(float(score), 1)}|{tp}"
+
+
+def build_signal_state(action: str, strategy_mode: str) -> str:
+    return f"{str(action).upper()}::{str(strategy_mode).upper()}"
 
 
 def has_same_fingerprint(alerts_df: pd.DataFrame, fingerprint: str) -> bool:
@@ -962,10 +1099,14 @@ def has_same_fingerprint(alerts_df: pd.DataFrame, fingerprint: str) -> bool:
 def get_last_sent_alert(alerts_df: pd.DataFrame, ticker: str, action: str) -> Optional[dict]:
     if alerts_df.empty:
         return None
-    base_key = f"{ticker}_{action}"
-    temp = alerts_df[alerts_df["BaseKey"] == base_key]
+
+    temp = alerts_df[
+        (alerts_df["Ticker"].astype(str).str.upper() == normalize_ticker(ticker)) &
+        (alerts_df["Action"].astype(str).str.upper() == str(action).upper())
+    ]
     if temp.empty:
         return None
+
     last = temp.sort_values("DateTime").iloc[-1]
     return {
         "DateTime": last["DateTime"],
@@ -977,6 +1118,16 @@ def get_last_sent_alert(alerts_df: pd.DataFrame, ticker: str, action: str) -> Op
     }
 
 
+def get_last_signal_state(signals_df: pd.DataFrame, ticker: str) -> Optional[str]:
+    if signals_df.empty:
+        return None
+    temp = signals_df[signals_df["Ticker"].astype(str).str.upper() == normalize_ticker(ticker)]
+    if temp.empty:
+        return None
+    last = temp.sort_values("DateTime").iloc[-1]
+    return str(last.get("SignalState", "")).strip() or None
+
+
 def should_send_alert(
     alerts_df: pd.DataFrame,
     ticker: str,
@@ -985,6 +1136,7 @@ def should_send_alert(
     current_score: float,
     current_session: str,
     target_price: Optional[float] = None,
+    state_changed: bool = False,
 ) -> bool:
     fingerprint = build_alert_fingerprint(
         ticker=ticker,
@@ -1004,6 +1156,10 @@ def should_send_alert(
 
     last_dt = last_alert["DateTime"]
     if pd.isna(last_dt):
+        return True
+
+    # 若訊號狀態有切換，優先允許發送
+    if state_changed:
         return True
 
     if current_session != last_alert["Session"]:
@@ -1041,13 +1197,13 @@ def log_sent_alert(
     try:
         ws_alerts = get_alerts_worksheet(readonly=False)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        base_key = f"{ticker}_{action}"
+        base_key = f"{normalize_ticker(ticker)}_{str(action).upper()}"
         fingerprint = build_alert_fingerprint(ticker, action, session, price, score, target_price)
 
         gsheet_retry(lambda: ws_alerts.append_row([
             now_str,
-            ticker.upper().strip(),
-            action.upper().strip(),
+            normalize_ticker(ticker),
+            str(action).upper().strip(),
             base_key,
             float(price),
             float(score),
@@ -1062,18 +1218,78 @@ def log_sent_alert(
         return False
 
 
+def log_signal_snapshot(
+    ticker: str,
+    action: str,
+    strategy_mode: str,
+    score: float,
+    details: Dict,
+    reason: str,
+    session: str,
+) -> bool:
+    try:
+        ws = get_signals_worksheet(readonly=False)
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        signal_state = build_signal_state(action, strategy_mode)
+        fingerprint = build_alert_fingerprint(
+            ticker=ticker,
+            action=action,
+            session=session,
+            price=safe_float(details.get("close", 0.0)),
+            score=score,
+            target_price=details.get("target_buy_price") or details.get("target_sell_price"),
+        )
+
+        gsheet_retry(lambda: ws.append_row([
+            now_str,
+            normalize_ticker(ticker),
+            str(action).upper(),
+            str(strategy_mode).upper(),
+            float(score),
+            float(safe_float(details.get("close"))),
+            "" if details.get("target_buy_price") is None else float(details.get("target_buy_price")),
+            "" if details.get("target_sell_price") is None else float(details.get("target_sell_price")),
+            "" if details.get("stop_loss") is None else float(details.get("stop_loss")),
+            "" if details.get("trend_stop") is None else float(details.get("trend_stop")),
+            "" if details.get("take_profit_1") is None else float(details.get("take_profit_1")),
+            "" if details.get("take_profit_2") is None else float(details.get("take_profit_2")),
+            "" if details.get("rs20_vs_spy") is None else float(details.get("rs20_vs_spy")),
+            "" if details.get("adx") is None else float(details.get("adx")),
+            str(details.get("market_regime", "")),
+            str(details.get("bucket", "")),
+            signal_state,
+            str(reason),
+            fingerprint,
+            str(session),
+        ]))
+        clear_app_caches()
+        return True
+    except Exception:
+        return False
+
+
 # ===============================
 # Market regime / filters
 # ===============================
 def get_market_regime() -> Dict:
     spy = get_unified_analysis("SPY")
     qqq = get_unified_analysis("QQQ")
+    iwm = get_unified_analysis("IWM")
+    smh = get_unified_analysis("SMH")
     vix = get_unified_analysis("^VIX")
 
     if spy is None or spy.empty or qqq is None or qqq.empty:
-        return {"regime": "UNKNOWN", "score": 0, "allow_buy": True, "risk_multiplier": 0.5}
+        return {
+            "regime": "UNKNOWN",
+            "score": 0,
+            "allow_new_position": True,
+            "allow_add_position": True,
+            "risk_multiplier": 0.5,
+            "vix": None,
+        }
 
     score = 0
+    breadth_score = 0
 
     spy_last = spy.iloc[-1]
     qqq_last = qqq.iloc[-1]
@@ -1087,20 +1303,31 @@ def get_market_regime() -> Dict:
     if safe_float(spy_last["MACD_Hist"]) > 0:
         score += 1
 
+    if iwm is not None and not iwm.empty:
+        if safe_float(iwm.iloc[-1]["Close"]) > safe_float(iwm.iloc[-1]["SMA200"]):
+            breadth_score += 1
+
+    if smh is not None and not smh.empty:
+        if safe_float(smh.iloc[-1]["Close"]) > safe_float(smh.iloc[-1]["SMA200"]):
+            breadth_score += 1
+
+    score += breadth_score
+
     vix_ok = True
     vix_level = None
     if vix is not None and not vix.empty:
         vix_level = safe_float(vix.iloc[-1]["Close"])
-        if vix_level >= 22:
+        if vix_level >= 25:
             vix_ok = False
-        else:
+        elif vix_level < 20:
             score += 1
 
-    if score >= 4 and vix_ok:
+    if score >= 5 and vix_ok:
         return {
             "regime": "RISK_ON",
             "score": score,
-            "allow_buy": True,
+            "allow_new_position": True,
+            "allow_add_position": True,
             "risk_multiplier": 1.0,
             "vix": vix_level,
         }
@@ -1109,7 +1336,8 @@ def get_market_regime() -> Dict:
         return {
             "regime": "RISK_OFF",
             "score": score,
-            "allow_buy": False,
+            "allow_new_position": False,
+            "allow_add_position": False,
             "risk_multiplier": 0.0,
             "vix": vix_level,
         }
@@ -1117,7 +1345,8 @@ def get_market_regime() -> Dict:
     return {
         "regime": "NEUTRAL",
         "score": score,
-        "allow_buy": True,
+        "allow_new_position": False,
+        "allow_add_position": True,
         "risk_multiplier": 0.5,
         "vix": vix_level,
     }
@@ -1134,18 +1363,205 @@ def detect_volume_price_divergence(hist: pd.DataFrame) -> str:
         return "BEARISH"
     if recent["Close"].min() < prev["Close"].min() and recent["OBV"].iloc[-1] > prev["OBV"].iloc[-1]:
         return "BULLISH"
-
     return "NONE"
 
 
-def passes_liquidity_filter(hist: pd.DataFrame) -> bool:
+def passes_liquidity_filter(hist: pd.DataFrame, bucket: str = "LARGE_CAP") -> bool:
     if hist is None or hist.empty:
         return False
+
     last = hist.iloc[-1]
     close = safe_float(last["Close"])
     dv20 = safe_float(last["DollarVolume20"])
+
+    if bucket == "SMALL_CAP":
+        return close >= 5 and dv20 >= max(5_000_000, MIN_AVG_DOLLAR_VOLUME * 0.25)
+
     return close >= MIN_PRICE and dv20 >= MIN_AVG_DOLLAR_VOLUME
 
+
+def calc_relative_strength_score(hist: pd.DataFrame) -> Tuple[float, Dict]:
+    if hist is None or hist.empty:
+        return 0.0, {"rs20_vs_spy": None, "rs_line_slope20": None}
+
+    last = hist.iloc[-1]
+    rs20 = safe_float(last.get("RS20_vs_SPY", 0.0), 0.0)
+    rs_slope = safe_float(last.get("RS_Line_Slope20", 0.0), 0.0)
+
+    score = 0.0
+    if rs20 > 0:
+        score += 0.8
+    if rs20 > 5:
+        score += 0.6
+    if rs_slope > 0:
+        score += 0.4
+
+    return score, {
+        "rs20_vs_spy": rs20,
+        "rs_line_slope20": rs_slope,
+    }
+
+
+def calc_52w_high_score(hist: pd.DataFrame) -> Tuple[float, Dict]:
+    if hist is None or hist.empty:
+        return 0.0, {"distance_to_52w_high_pct": None}
+
+    last = hist.iloc[-1]
+    close = safe_float(last["Close"])
+    high_252 = safe_float(last.get("RollingHigh252", 0.0))
+    if close <= 0 or high_252 <= 0:
+        return 0.0, {"distance_to_52w_high_pct": None}
+
+    dist = (high_252 - close) / high_252
+    score = 0.0
+    if dist <= NEAR_52W_HIGH_PCT:
+        score += 0.8
+    if dist <= 0.05:
+        score += 0.6
+
+    return score, {"distance_to_52w_high_pct": dist * 100}
+
+
+def rank_symbol_strength(
+    ticker: str,
+    hist: pd.DataFrame,
+    market_regime: Optional[Dict] = None,
+) -> Tuple[float, Dict]:
+    if hist is None or hist.empty:
+        return 0.0, {}
+
+    last = hist.iloc[-1]
+    prev = hist.iloc[-2] if len(hist) >= 2 else last
+
+    close = safe_float(last["Close"])
+    sma20 = safe_float(last["SMA20"])
+    sma50 = safe_float(last["SMA50"])
+    sma200 = safe_float(last["SMA200"])
+    rsi = safe_float(last["RSI"])
+    macd_hist = safe_float(last["MACD_Hist"])
+    prev_macd_hist = safe_float(prev["MACD_Hist"])
+    volume = safe_float(last["Volume"])
+    vol_sma20 = safe_float(last["VOL_SMA20"])
+    adx = safe_float(last.get("ADX", 0.0))
+    plus_di = safe_float(last.get("PLUS_DI", 0.0))
+    minus_di = safe_float(last.get("MINUS_DI", 0.0))
+
+    bucket = classify_symbol_bucket(ticker, hist)
+    divergence = detect_volume_price_divergence(hist)
+    liquid_ok = passes_liquidity_filter(hist, bucket=bucket)
+    earnings_blocked = is_earnings_blocked(ticker)
+
+    reasons = []
+
+    trend_score = 0.0
+    momentum_score = 0.0
+    volume_score = 0.0
+    regime_score = 0.0
+    risk_score = 0.0
+
+    trend_ok = close > sma200 and sma50 > sma200
+    strong_trend = trend_ok and sma20 > sma50
+    breakout_20 = close > safe_float(hist["RollingHigh20"].shift(1).iloc[-1], 0)
+    breakout_55 = close > safe_float(hist["RollingHigh55"].shift(1).iloc[-1], 0)
+    breakout_volume = volume > vol_sma20 * 1.5 if vol_sma20 > 0 else False
+
+    if trend_ok:
+        trend_score += 1.4
+        reasons.append("長線趨勢成立")
+    if strong_trend:
+        trend_score += 1.0
+        reasons.append("SMA20 > SMA50 > SMA200")
+    if close > sma20:
+        trend_score += 0.5
+
+    if macd_hist > 0:
+        momentum_score += 0.8
+        reasons.append("MACD Hist > 0")
+    if macd_hist >= prev_macd_hist:
+        momentum_score += 0.4
+    if 45 <= rsi <= 70:
+        momentum_score += 0.8
+        reasons.append("RSI 健康區")
+    elif 40 <= rsi < 45:
+        momentum_score += 0.4
+
+    if breakout_20:
+        volume_score += 0.5
+        reasons.append("突破 20 日高點")
+    if breakout_55:
+        volume_score += 1.0
+        reasons.append("突破 55 日高點")
+    if breakout_volume:
+        volume_score += 1.0
+        reasons.append("放量突破")
+    elif volume > vol_sma20:
+        volume_score += 0.4
+
+    if adx >= BREAKOUT_ADX_MIN:
+        volume_score += 0.8
+        reasons.append("ADX 趨勢強")
+    if plus_di > minus_di:
+        volume_score += 0.3
+
+    rs_score, rs_meta = calc_relative_strength_score(hist)
+    high52_score, high52_meta = calc_52w_high_score(hist)
+
+    if rs_score > 0:
+        reasons.append("相對 SPY 強勢")
+    if high52_score > 0:
+        reasons.append("接近 52 週高點")
+
+    regime_name = market_regime.get("regime", "UNKNOWN") if market_regime else "UNKNOWN"
+    if regime_name == "RISK_ON":
+        regime_score += 0.8
+        reasons.append("市場偏多")
+    elif regime_name == "NEUTRAL":
+        regime_score += 0.2
+    elif regime_name == "RISK_OFF":
+        regime_score -= 1.2
+        reasons.append("市場偏空")
+
+    if divergence == "BULLISH":
+        volume_score += 0.4
+        reasons.append("多方量價背離")
+    elif divergence == "BEARISH":
+        risk_score -= 0.8
+        reasons.append("空方量價背離")
+
+    if not liquid_ok:
+        risk_score -= 2.0
+        reasons.append("流動性不足")
+    if earnings_blocked:
+        risk_score -= 1.2
+        reasons.append("財報事件風險")
+
+    score = trend_score + momentum_score + volume_score + regime_score + risk_score + rs_score + high52_score
+
+    meta = {
+        "bucket": bucket,
+        "trend_ok": trend_ok,
+        "strong_trend": strong_trend,
+        "breakout_20": breakout_20,
+        "breakout_55": breakout_55,
+        "breakout_volume": breakout_volume,
+        "adx": adx,
+        "plus_di": plus_di,
+        "minus_di": minus_di,
+        "divergence": divergence,
+        "liquid_ok": liquid_ok,
+        "earnings_blocked": earnings_blocked,
+        "trend_score": trend_score,
+        "momentum_score": momentum_score,
+        "volume_score": volume_score,
+        "regime_score": regime_score,
+        "risk_score": risk_score,
+        "rs_score": rs_score,
+        "high52_score": high52_score,
+        "reasons": reasons,
+        **rs_meta,
+        **high52_meta,
+    }
+    return score, meta
 
 
 # ===============================
@@ -1188,7 +1604,11 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
 
             if trade_type == "BUY":
                 actual_cost = gross_total + fee + slippage
-                lots.append({"shares": shares, "price": actual_cost / shares, "datetime": row["TradeDateTime"]})
+                lots.append({
+                    "shares": shares,
+                    "price": actual_cost / shares,
+                    "datetime": row["TradeDateTime"]
+                })
                 cash -= actual_cost
 
             elif trade_type == "SELL":
@@ -1224,6 +1644,8 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
             unrealized = market_value - fifo_cost_basis
             pl_pct = ((last_price / avg_cost_val) - 1) * 100 if avg_cost_val > 0 else 0.0
 
+            profile = get_symbol_profile(ticker)
+
             portfolio.append({
                 "Ticker": ticker,
                 "Shares": round(remaining_shares, 4),
@@ -1234,9 +1656,82 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
                 "Unrealized": round(unrealized, 4),
                 "PL_Pct": round(pl_pct, 2),
                 "RealizedPL": round(realized_pl, 4),
+                "Sector": profile.get("sector", ""),
+                "Industry": profile.get("industry", ""),
             })
 
     return portfolio, cash, total_realized_pl
+
+
+# ===============================
+# Portfolio risk / heat / caps
+# ===============================
+def get_bucket_limits(bucket: str) -> Dict:
+    if bucket == "SMALL_CAP":
+        return {
+            "max_weight": SMALL_CAP_MAX_WEIGHT,
+            "risk_per_trade_pct": SMALL_CAP_RISK_PER_TRADE_PCT,
+        }
+    return {
+        "max_weight": LARGE_CAP_MAX_WEIGHT,
+        "risk_per_trade_pct": LARGE_CAP_RISK_PER_TRADE_PCT,
+    }
+
+
+def calc_portfolio_heat(portfolio: List[Dict], total_assets: float) -> Dict:
+    if not portfolio or total_assets <= 0:
+        return {
+            "heat_amount": 0.0,
+            "heat_pct": 0.0,
+            "sector_exposure": {},
+        }
+
+    heat_amount = 0.0
+    sector_exposure = {}
+
+    for item in portfolio:
+        shares = safe_float(item.get("Shares", 0.0))
+        last_price = safe_float(item.get("LastPrice", 0.0))
+        stop_loss = safe_float(item.get("StopLoss", 0.0))
+        sector = str(item.get("Sector", "")).strip() or "UNKNOWN"
+
+        if shares > 0 and last_price > 0 and stop_loss > 0 and last_price > stop_loss:
+            heat_amount += (last_price - stop_loss) * shares
+
+        sector_exposure[sector] = sector_exposure.get(sector, 0.0) + safe_float(item.get("MarketValue", 0.0))
+
+    heat_pct = heat_amount / total_assets if total_assets > 0 else 0.0
+
+    sector_exposure_pct = {
+        k: (v / total_assets * 100 if total_assets > 0 else 0.0)
+        for k, v in sector_exposure.items()
+    }
+
+    return {
+        "heat_amount": round(heat_amount, 2),
+        "heat_pct": round(heat_pct * 100, 2),
+        "sector_exposure": sector_exposure_pct,
+    }
+
+
+def sector_position_limit_ok(
+    portfolio: List[Dict],
+    ticker: str,
+    additional_value: float,
+    total_assets: float,
+    sector_cap_pct: float = 35.0,
+) -> bool:
+    profile = get_symbol_profile(ticker)
+    target_sector = str(profile.get("sector", "")).strip() or "UNKNOWN"
+
+    current_sector_value = 0.0
+    for item in portfolio:
+        sector = str(item.get("Sector", "")).strip() or "UNKNOWN"
+        if sector == target_sector:
+            current_sector_value += safe_float(item.get("MarketValue", 0.0))
+
+    after_pct = ((current_sector_value + additional_value) / total_assets * 100) if total_assets > 0 else 0.0
+    return after_pct <= sector_cap_pct
 
 
 # ===============================
@@ -1249,30 +1744,43 @@ def calc_position_size(
     entry_price: float,
     stop_price: float,
     market_regime: Optional[Dict] = None,
+    bucket: str = "LARGE_CAP",
+    current_heat_pct: float = 0.0,
 ) -> Dict:
     if entry_price <= 0 or stop_price <= 0 or entry_price <= stop_price:
-        return {"qty_by_risk": 0, "qty_by_weight": 0, "qty_by_cash": 0, "final_qty": 0}
+        return {"qty_by_risk": 0, "qty_by_weight": 0, "qty_by_cash": 0, "qty_by_heat": 0, "final_qty": 0}
 
     regime_mult = 1.0
     if market_regime:
         regime_mult = safe_float(market_regime.get("risk_multiplier", 1.0), 1.0)
 
-    risk_budget = total_assets * RISK_PER_TRADE_PCT * regime_mult
+    limits = get_bucket_limits(bucket)
+    risk_per_trade_pct = safe_float(limits["risk_per_trade_pct"], RISK_PER_TRADE_PCT)
+    max_weight = safe_float(limits["max_weight"], MAX_POSITION_WEIGHT)
+
+    risk_budget = total_assets * risk_per_trade_pct * regime_mult
     risk_per_share = max(0.01, entry_price - stop_price)
     qty_by_risk = math.floor(risk_budget / risk_per_share)
 
-    max_position_value = total_assets * MAX_POSITION_WEIGHT
+    max_position_value = total_assets * max_weight
     remaining_position_value = max(0.0, max_position_value - current_mkt_value)
     qty_by_weight = math.floor(remaining_position_value / entry_price)
 
     usable_cash = max(0.0, cash - total_assets * CASH_RESERVE_PCT)
     qty_by_cash = math.floor(usable_cash / entry_price)
 
-    final_qty = max(0, min(qty_by_risk, qty_by_weight, qty_by_cash))
+    # portfolio heat 控制
+    heat_limit_amount = max(0.0, total_assets * PORTFOLIO_HEAT_LIMIT_PCT - total_assets * (current_heat_pct / 100.0))
+    qty_by_heat = math.floor(heat_limit_amount / risk_per_share) if risk_per_share > 0 else 0
+    if heat_limit_amount <= 0:
+        qty_by_heat = 0
+
+    final_qty = max(0, min(qty_by_risk, qty_by_weight, qty_by_cash, qty_by_heat))
     return {
         "qty_by_risk": qty_by_risk,
         "qty_by_weight": qty_by_weight,
         "qty_by_cash": qty_by_cash,
+        "qty_by_heat": qty_by_heat,
         "final_qty": final_qty,
     }
 
@@ -1284,7 +1792,9 @@ def evaluate_strategy(
     current_mkt_value: float,
     total_assets: float,
     cash: float,
-    market_regime: Optional[Dict] = None
+    market_regime: Optional[Dict] = None,
+    portfolio_heat_pct: float = 0.0,
+    portfolio: Optional[List[Dict]] = None,
 ) -> Tuple[float, str, Dict, str]:
     last = hist.iloc[-1]
     prev = hist.iloc[-2] if len(hist) >= 2 else last
@@ -1302,112 +1812,55 @@ def evaluate_strategy(
     volume = safe_float(last["Volume"])
     vol_sma20 = safe_float(last["VOL_SMA20"])
     trailing_stop = safe_float(last["TrailingStop"])
-    rolling_high20 = safe_float(last["RollingHigh20"])
-    rolling_high55_prev = safe_float(hist["RollingHigh55"].shift(1).iloc[-1])
+    rolling_high20_prev = safe_float(hist["RollingHigh20"].shift(1).iloc[-1], 0)
+    rolling_high55_prev = safe_float(hist["RollingHigh55"].shift(1).iloc[-1], 0)
+    adx = safe_float(last.get("ADX", 0.0))
+    rs20_vs_spy = safe_float(last.get("RS20_vs_SPY", 0.0), 0.0)
     dollar_volume20 = safe_float(last["DollarVolume20"])
 
-    divergence = detect_volume_price_divergence(hist)
+    strength_score, strength_meta = rank_symbol_strength(
+        ticker=ticker,
+        hist=hist,
+        market_regime=market_regime,
+    )
+
+    bucket = strength_meta.get("bucket", "LARGE_CAP")
+    limits = get_bucket_limits(bucket)
+    max_weight_for_bucket = safe_float(limits["max_weight"], MAX_POSITION_WEIGHT)
+
+    divergence = strength_meta.get("divergence", "NONE")
     regime_name = market_regime.get("regime", "UNKNOWN") if market_regime else "UNKNOWN"
-    regime_allow_buy = market_regime.get("allow_buy", True) if market_regime else True
+    allow_new_position = market_regime.get("allow_new_position", True) if market_regime else True
+    allow_add_position = market_regime.get("allow_add_position", True) if market_regime else True
 
-    reasons = []
-    trend_score = 0.0
-    momentum_score = 0.0
-    pullback_score = 0.0
-    volume_score = 0.0
-    regime_score = 0.0
-    risk_score = 0.0
+    reasons = list(strength_meta.get("reasons", []))
 
-    trend_ok = close > sma200 and sma50 > sma200
-    strong_trend = trend_ok and sma20 > sma50
-    near_sma20 = abs(close - sma20) / close <= 0.03 if close > 0 and sma20 > 0 else False
-    pullback_zone = close <= sma20 and close >= (sma20 - atr) if atr > 0 and sma20 > 0 else False
-    breakout_20 = close > safe_float(hist["RollingHigh20"].shift(1).iloc[-1], 0)
-    breakout_55 = close > rolling_high55_prev if rolling_high55_prev > 0 else False
-    breakout_volume = volume > vol_sma20 * 1.5 if vol_sma20 > 0 else False
-
-    if trend_ok:
-        trend_score += 1.5
-        reasons.append("長線趨勢成立")
-    if strong_trend:
-        trend_score += 1.0
-        reasons.append("SMA20 > SMA50 > SMA200")
-    if close > sma20:
-        trend_score += 0.5
-
-    if macd_hist > 0:
-        momentum_score += 0.8
-        reasons.append("MACD Hist > 0")
-    if macd_hist >= prev_macd_hist:
-        momentum_score += 0.4
-    if 45 <= rsi <= 65:
-        momentum_score += 0.8
-        reasons.append("RSI 健康區")
-    elif 40 <= rsi < 45:
-        momentum_score += 0.4
-
-    if near_sma20:
-        pullback_score += 0.6
-        reasons.append("接近 SMA20")
-    if pullback_zone:
-        pullback_score += 1.0
-        reasons.append("趨勢回檔區")
-    if close < bb_lower:
-        pullback_score += 0.6
-        reasons.append("接近下布林")
-
-    if breakout_20:
-        volume_score += 0.5
-        reasons.append("突破 20 日高點")
-    if breakout_55:
-        volume_score += 1.0
-        reasons.append("突破 55 日高點")
-    if breakout_volume:
-        volume_score += 1.0
-        reasons.append("放量突破")
-    elif volume > vol_sma20:
-        volume_score += 0.4
-
-    if divergence == "BULLISH":
-        volume_score += 0.4
-        reasons.append("多方量價背離")
-    elif divergence == "BEARISH":
-        risk_score -= 0.8
-        reasons.append("空方量價背離")
-
-    if regime_name == "RISK_ON":
-        regime_score += 0.8
-        reasons.append("市場偏多")
-    elif regime_name == "NEUTRAL":
-        regime_score += 0.2
-    elif regime_name == "RISK_OFF":
-        regime_score -= 1.2
-        reasons.append("市場偏空")
-
-    liquid_ok = passes_liquidity_filter(hist)
-    earnings_blocked = is_earnings_blocked(ticker)
-
-    if not liquid_ok:
-        risk_score -= 2.0
-        reasons.append("流動性不足")
-    if earnings_blocked:
-        risk_score -= 1.2
-        reasons.append("財報事件風險")
-
-    total_score = trend_score + momentum_score + pullback_score + volume_score + regime_score + risk_score
     current_weight = current_mkt_value / total_assets if total_assets > 0 else 0.0
+    strong_trend = bool(strength_meta.get("strong_trend"))
+    trend_ok = bool(strength_meta.get("trend_ok"))
+    breakout_20 = bool(strength_meta.get("breakout_20"))
+    breakout_55 = bool(strength_meta.get("breakout_55"))
+    breakout_volume = bool(strength_meta.get("breakout_volume"))
+    liquid_ok = bool(strength_meta.get("liquid_ok"))
+    earnings_blocked = bool(strength_meta.get("earnings_blocked"))
 
-    # 交易區間與風控
-    pullback_entry = sma20 if sma20 > 0 else close
-    deep_pullback_entry = max(sma50, sma20 - atr) if sma50 > 0 and atr > 0 else pullback_entry
-    breakout_entry = max(safe_float(hist["RollingHigh20"].shift(1).iloc[-1], close), close)
+    near_sma20 = abs(close - sma20) / close <= 0.03 if close > 0 and sma20 > 0 else False
+    shallow_pullback = close <= sma20 and close >= (sma20 - atr) if atr > 0 and sma20 > 0 else False
+    deep_pullback = close <= sma50 and close >= (sma50 - 1.2 * atr) if atr > 0 and sma50 > 0 else False
+    adx_ok_for_breakout = adx >= BREAKOUT_ADX_MIN
+
+    # 初始 / 趨勢停損
     stop_loss = max(0.01, close - 2 * atr) if atr > 0 else max(0.01, close * 0.93)
     trend_stop = trailing_stop if trailing_stop > 0 else stop_loss
+
+    pullback_entry = sma20 if sma20 > 0 else close
+    deep_pullback_entry = max(sma50, sma20 - atr) if sma50 > 0 and atr > 0 else pullback_entry
+    breakout_entry = max(rolling_high20_prev, close)
+    donchian_entry = max(rolling_high55_prev, close)
 
     take_profit_1 = close + 2 * atr if atr > 0 else close * 1.08
     take_profit_2 = close + 4 * atr if atr > 0 else close * 1.15
 
-    # 分策略 sizing
     pullback_sizing = calc_position_size(
         total_assets=total_assets,
         cash=cash,
@@ -1415,6 +1868,19 @@ def evaluate_strategy(
         entry_price=pullback_entry,
         stop_price=max(0.01, pullback_entry - 2 * atr) if atr > 0 else stop_loss,
         market_regime=market_regime,
+        bucket=bucket,
+        current_heat_pct=portfolio_heat_pct,
+    )
+
+    deep_pullback_sizing = calc_position_size(
+        total_assets=total_assets,
+        cash=cash,
+        current_mkt_value=current_mkt_value,
+        entry_price=deep_pullback_entry,
+        stop_price=max(0.01, deep_pullback_entry - 1.8 * atr) if atr > 0 else stop_loss,
+        market_regime=market_regime,
+        bucket=bucket,
+        current_heat_pct=portfolio_heat_pct,
     )
 
     breakout_sizing = calc_position_size(
@@ -1424,6 +1890,8 @@ def evaluate_strategy(
         entry_price=max(close, breakout_entry),
         stop_price=max(0.01, close - 1.5 * atr) if atr > 0 else stop_loss,
         market_regime=market_regime,
+        bucket=bucket,
+        current_heat_pct=portfolio_heat_pct,
     )
 
     action = "WATCH"
@@ -1431,7 +1899,28 @@ def evaluate_strategy(
     target_buy_price = None
     target_sell_price = None
 
-    # 賣出邏輯分級
+    can_open_new = allow_new_position and held_shares <= 0
+    can_add = allow_add_position and held_shares > 0 and current_weight < max_weight_for_bucket
+
+    sector_ok = True
+    if portfolio is not None:
+        estimated_buy_value = max(
+            pullback_sizing["final_qty"] * max(pullback_entry, 0),
+            breakout_sizing["final_qty"] * max(close, 0),
+            deep_pullback_sizing["final_qty"] * max(deep_pullback_entry, 0),
+        )
+        sector_ok = sector_position_limit_ok(
+            portfolio=portfolio,
+            ticker=ticker,
+            additional_value=estimated_buy_value,
+            total_assets=total_assets,
+            sector_cap_pct=35.0,
+        )
+
+    if not sector_ok:
+        reasons.append("產業曝險過高")
+
+    # ===== 出場邏輯 =====
     hard_stop_trigger = held_shares > 0 and close < stop_loss
     trail_exit_trigger = held_shares > 0 and trend_stop > 0 and close < trend_stop
     trend_weaken_trigger = held_shares > 0 and close < sma50 and macd_hist < 0
@@ -1457,41 +1946,92 @@ def evaluate_strategy(
         strategy_mode = "TAKE_PROFIT"
         target_sell_price = max(close, bb_upper) if bb_upper > 0 else close
     else:
-        # 買入邏輯拆分
+        # ===== 買入邏輯 =====
         if (
-            regime_allow_buy and
+            can_open_new and
             liquid_ok and
             not earnings_blocked and
+            sector_ok and
             strong_trend and
-            pullback_zone and
-            40 <= rsi <= 60 and
-            pullback_sizing["final_qty"] >= 1 and
-            current_weight < MAX_POSITION_WEIGHT
+            shallow_pullback and
+            42 <= rsi <= 60 and
+            rs20_vs_spy >= 0 and
+            pullback_sizing["final_qty"] >= 1
         ):
             action = "BUY_NOW"
             strategy_mode = "TREND_PULLBACK"
             target_buy_price = pullback_entry
 
         elif (
-            regime_allow_buy and
+            can_add and
             liquid_ok and
             not earnings_blocked and
+            sector_ok and
+            strong_trend and
+            shallow_pullback and
+            42 <= rsi <= 60 and
+            rs20_vs_spy >= 0 and
+            pullback_sizing["final_qty"] >= 1
+        ):
+            action = "BUY_NOW"
+            strategy_mode = "ADD_PULLBACK"
+            target_buy_price = pullback_entry
+
+        elif (
+            (can_open_new or can_add) and
+            liquid_ok and
+            not earnings_blocked and
+            sector_ok and
             trend_ok and
             breakout_20 and
             breakout_volume and
+            adx_ok_for_breakout and
+            rs20_vs_spy > 0 and
             rsi < 75 and
-            breakout_sizing["final_qty"] >= 1 and
-            current_weight < MAX_POSITION_WEIGHT
+            breakout_sizing["final_qty"] >= 1
         ):
             action = "BUY_NOW"
-            strategy_mode = "BREAKOUT"
+            strategy_mode = "BREAKOUT_20"
             target_buy_price = close
 
         elif (
-            regime_allow_buy and
+            (can_open_new or can_add) and
+            liquid_ok and
+            not earnings_blocked and
+            sector_ok and
+            trend_ok and
+            breakout_55 and
+            breakout_volume and
+            adx_ok_for_breakout and
+            rs20_vs_spy > 0 and
+            rsi < 78 and
+            breakout_sizing["final_qty"] >= 1
+        ):
+            action = "BUY_NOW"
+            strategy_mode = "BREAKOUT_55"
+            target_buy_price = max(close, donchian_entry)
+
+        elif (
+            can_open_new and
+            bucket == "SMALL_CAP" and
+            liquid_ok and
+            not earnings_blocked and
+            sector_ok and
+            trend_ok and
+            deep_pullback and
+            rs20_vs_spy >= 0 and
+            deep_pullback_sizing["final_qty"] >= 1
+        ):
+            action = "BUY_NOW"
+            strategy_mode = "SMALLCAP_DEEP_PULLBACK"
+            target_buy_price = deep_pullback_entry
+
+        elif (
+            (can_open_new or can_add) and
             liquid_ok and
             not earnings_blocked and
             strong_trend and
+            near_sma20 and
             calc_target_zone_hit(close, pullback_entry)
         ):
             action = "BUY_PULLBACK"
@@ -1505,7 +2045,7 @@ def evaluate_strategy(
                 strategy_mode = "REDUCE_READY"
                 target_sell_price = sell_ready_zone
 
-    # 分級賣出數量
+    # 建議數量
     if action == "SELL_EXIT":
         suggested_sell_qty = math.ceil(held_shares)
     elif action == "SELL_PARTIAL":
@@ -1521,17 +2061,20 @@ def evaluate_strategy(
         suggested_sell_qty = 0
 
     suggested_buy_qty = 0
-    if strategy_mode == "TREND_PULLBACK":
+    if strategy_mode in ["TREND_PULLBACK", "ADD_PULLBACK", "PULLBACK_READY"]:
         suggested_buy_qty = pullback_sizing["final_qty"]
-    elif strategy_mode == "BREAKOUT":
+    elif strategy_mode in ["BREAKOUT_20", "BREAKOUT_55"]:
         suggested_buy_qty = breakout_sizing["final_qty"]
-    elif strategy_mode == "PULLBACK_READY":
-        suggested_buy_qty = pullback_sizing["final_qty"]
+    elif strategy_mode == "SMALLCAP_DEEP_PULLBACK":
+        suggested_buy_qty = deep_pullback_sizing["final_qty"]
+
+    total_score = strength_score
 
     details = {
         "close": close,
         "rsi": rsi,
         "atr": atr,
+        "adx": adx,
         "current_weight": current_weight,
         "stop_loss": stop_loss,
         "trend_stop": trend_stop,
@@ -1544,25 +2087,41 @@ def evaluate_strategy(
         "pullback_entry": pullback_entry,
         "deep_pullback_entry": deep_pullback_entry,
         "breakout_entry": breakout_entry,
+        "donchian_entry": donchian_entry,
         "divergence": divergence,
         "market_regime": regime_name,
         "strategy_mode": strategy_mode,
-        "trend_score": trend_score,
-        "momentum_score": momentum_score,
-        "pullback_score": pullback_score,
-        "volume_score": volume_score,
-        "regime_score": regime_score,
-        "risk_score": risk_score,
+        "trend_score": strength_meta.get("trend_score"),
+        "momentum_score": strength_meta.get("momentum_score"),
+        "pullback_score": 0.0,
+        "volume_score": strength_meta.get("volume_score"),
+        "regime_score": strength_meta.get("regime_score"),
+        "risk_score": strength_meta.get("risk_score"),
         "liquid_ok": liquid_ok,
         "earnings_blocked": earnings_blocked,
         "dollar_volume20": dollar_volume20,
+        "bucket": bucket,
+        "rs20_vs_spy": strength_meta.get("rs20_vs_spy"),
+        "rs_line_slope20": strength_meta.get("rs_line_slope20"),
+        "distance_to_52w_high_pct": strength_meta.get("distance_to_52w_high_pct"),
         "pullback_qty_by_risk": pullback_sizing["qty_by_risk"],
         "pullback_qty_by_weight": pullback_sizing["qty_by_weight"],
         "pullback_qty_by_cash": pullback_sizing["qty_by_cash"],
+        "pullback_qty_by_heat": pullback_sizing["qty_by_heat"],
         "breakout_qty_by_risk": breakout_sizing["qty_by_risk"],
         "breakout_qty_by_weight": breakout_sizing["qty_by_weight"],
         "breakout_qty_by_cash": breakout_sizing["qty_by_cash"],
+        "breakout_qty_by_heat": breakout_sizing["qty_by_heat"],
+        "deep_pullback_qty_by_risk": deep_pullback_sizing["qty_by_risk"],
+        "deep_pullback_qty_by_weight": deep_pullback_sizing["qty_by_weight"],
+        "deep_pullback_qty_by_cash": deep_pullback_sizing["qty_by_cash"],
+        "deep_pullback_qty_by_heat": deep_pullback_sizing["qty_by_heat"],
         "reasons": reasons,
+        "allow_new_position": allow_new_position,
+        "allow_add_position": allow_add_position,
+        "max_weight_for_bucket": max_weight_for_bucket,
+        "portfolio_heat_pct": portfolio_heat_pct,
+        "sector_ok": sector_ok,
     }
 
     note = " | ".join(reasons) if reasons else "No strong signal"
@@ -1576,6 +2135,17 @@ def enrich_portfolio_with_weight_and_risk(
     market_regime: Dict
 ) -> List[Dict]:
     result = []
+
+    temp_rows = []
+    for item in portfolio:
+        row = item.copy()
+        row["StopLoss"] = None
+        row["TrendStop"] = None
+        temp_rows.append(row)
+
+    temp_heat = calc_portfolio_heat(temp_rows, total_assets)
+    portfolio_heat_pct = safe_float(temp_heat.get("heat_pct", 0.0))
+
     for item in portfolio:
         ticker = item["Ticker"]
         hist = get_unified_analysis(ticker)
@@ -1588,6 +2158,9 @@ def enrich_portfolio_with_weight_and_risk(
         trend_stop = None
         signal_score = None
         strategy_mode = None
+        bucket = classify_symbol_bucket(ticker, hist) if hist is not None and not hist.empty else "LARGE_CAP"
+        rs20_vs_spy = None
+        adx = None
 
         if hist is not None and not hist.empty:
             signal_score, action, details, _ = evaluate_strategy(
@@ -1598,6 +2171,8 @@ def enrich_portfolio_with_weight_and_risk(
                 total_assets=total_assets,
                 cash=cash,
                 market_regime=market_regime,
+                portfolio_heat_pct=portfolio_heat_pct,
+                portfolio=portfolio,
             )
             signal = action
             divergence = details.get("divergence", "NONE")
@@ -1606,6 +2181,9 @@ def enrich_portfolio_with_weight_and_risk(
             take_profit_2 = details.get("take_profit_2")
             trend_stop = details.get("trend_stop")
             strategy_mode = details.get("strategy_mode")
+            bucket = details.get("bucket", bucket)
+            rs20_vs_spy = details.get("rs20_vs_spy")
+            adx = details.get("adx")
 
         weight = (item["MarketValue"] / total_assets) if total_assets > 0 else 0.0
         distance_to_stop_pct = None
@@ -1630,10 +2208,13 @@ def enrich_portfolio_with_weight_and_risk(
         row["SignalScore"] = round(signal_score, 2) if signal_score is not None else None
         row["StrategyMode"] = strategy_mode
         row["Divergence"] = divergence
+        row["Bucket"] = bucket
+        row["RS20vsSPY"] = round(rs20_vs_spy, 2) if rs20_vs_spy is not None else None
+        row["ADX"] = round(adx, 2) if adx is not None else None
         row["DistanceToStopPct"] = round(distance_to_stop_pct, 2) if distance_to_stop_pct is not None else None
         row["DistanceToTP1Pct"] = round(distance_to_tp1_pct, 2) if distance_to_tp1_pct is not None else None
         row["DistanceToTrendStopPct"] = round(distance_to_trend_stop_pct, 2) if distance_to_trend_stop_pct is not None else None
-        row["CanAdd"] = weight < MAX_POSITION_WEIGHT
+        row["CanAdd"] = weight < get_bucket_limits(bucket)["max_weight"]
         result.append(row)
 
     return result
@@ -1677,14 +2258,19 @@ def run_auto_scanner(
     failed_count = 0
     fetch_failed = 0
     dedup_blocked = 0
+    state_change_count = 0
+    signal_logged_count = 0
 
     current_session = get_market_session()
     alerts_df = load_alerts()
+    signals_df = load_signals()
     sent_fingerprints_in_run = set()
     watchlist_df = watchlist_df if watchlist_df is not None else pd.DataFrame(columns=["Ticker", "Enabled", "Category", "Note"])
 
     universe = get_scan_universe(portfolio, watchlist_df)
     holdings_map = {p["Ticker"]: p for p in portfolio}
+    heat_info = calc_portfolio_heat(portfolio, total_assets)
+    portfolio_heat_pct = safe_float(heat_info.get("heat_pct", 0.0))
 
     if not universe:
         return {
@@ -1697,6 +2283,9 @@ def run_auto_scanner(
                 "failed_count": 0,
                 "fetch_failed": 0,
                 "dedup_blocked": 0,
+                "state_change_count": 0,
+                "signal_logged_count": 0,
+                "portfolio_heat_pct": portfolio_heat_pct,
             }
         }
 
@@ -1721,7 +2310,32 @@ def run_auto_scanner(
             total_assets=total_assets,
             cash=cash,
             market_regime=market_regime,
+            portfolio_heat_pct=portfolio_heat_pct,
+            portfolio=portfolio,
         )
+
+        strategy_mode = details.get("strategy_mode", "NONE")
+        current_signal_state = build_signal_state(action, strategy_mode)
+        prev_signal_state = get_last_signal_state(signals_df, ticker)
+        state_changed = prev_signal_state is not None and prev_signal_state != current_signal_state
+
+        # 記錄所有非純 WATCH 訊號，方便後續回測
+        if action != "WATCH":
+            signal_ok = log_signal_snapshot(
+                ticker=ticker,
+                action=action,
+                strategy_mode=strategy_mode,
+                score=score,
+                details=details,
+                reason=note,
+                session=current_session,
+            )
+            if signal_ok:
+                signal_logged_count += 1
+
+        if state_changed:
+            state_change_count += 1
+            logs.append(f"{ticker}: 訊號狀態切換 {prev_signal_state} -> {current_signal_state}")
 
         send_msg = None
         target_price = None
@@ -1738,6 +2352,7 @@ def run_auto_scanner(
                 send_msg = (
                     f"🟢 *買入訊號* `{ticker}`\n"
                     f"策略：`{details['strategy_mode']}`\n"
+                    f"分組：`{details['bucket']}`\n"
                     f"市場時段：`{display_market_session(current_session)}`\n"
                     f"市場狀態：`{display_market_regime(details['market_regime'])}`\n"
                     f"策略分數：`{score:.1f}`\n"
@@ -1748,6 +2363,9 @@ def run_auto_scanner(
                     f"趨勢停損：`${details['trend_stop']:.2f}`\n"
                     f"目標 1：`${details['take_profit_1']:.2f}`\n"
                     f"目標 2：`${details['take_profit_2']:.2f}`\n"
+                    f"RS vs SPY：`{safe_float(details.get('rs20_vs_spy')):.2f}`\n"
+                    f"ADX：`{safe_float(details.get('adx')):.1f}`\n"
+                    f"組合 Heat：`{portfolio_heat_pct:.2f}%`\n"
                     f"依據：{note}"
                 )
 
@@ -1756,12 +2374,15 @@ def run_auto_scanner(
             send_msg = (
                 f"🟡 *回檔準備訊號* `{ticker}`\n"
                 f"策略：`{details['strategy_mode']}`\n"
+                f"分組：`{details['bucket']}`\n"
                 f"市場時段：`{display_market_session(current_session)}`\n"
                 f"市場狀態：`{display_market_regime(details['market_regime'])}`\n"
                 f"現價：`${details['close']:.2f}`\n"
                 f"回檔目標區：`${target_price*(1-PRE_ALERT_PCT):.2f}` ~ `${target_price*(1+PRE_ALERT_PCT):.2f}`\n"
                 f"目標價：`${target_price:.2f}`\n"
                 f"預估股數：`{details['suggested_buy_qty']}`\n"
+                f"RS vs SPY：`{safe_float(details.get('rs20_vs_spy')):.2f}`\n"
+                f"ADX：`{safe_float(details.get('adx')):.1f}`\n"
                 f"依據：{note}"
             )
 
@@ -1840,6 +2461,7 @@ def run_auto_scanner(
             current_score=score,
             current_session=current_session,
             target_price=target_price,
+            state_changed=state_changed,
         )
 
         if not allow_send:
@@ -1894,6 +2516,9 @@ def run_auto_scanner(
             "failed_count": failed_count,
             "fetch_failed": fetch_failed,
             "dedup_blocked": dedup_blocked,
+            "state_change_count": state_change_count,
+            "signal_logged_count": signal_logged_count,
+            "portfolio_heat_pct": portfolio_heat_pct,
         }
     }
 
@@ -1987,6 +2612,10 @@ def build_trade_preview(
     after_position_value = after_shares * price
     after_weight_pct = (after_position_value / total_assets * 100) if total_assets > 0 else 0.0
 
+    hist = get_unified_analysis(ticker)
+    bucket = classify_symbol_bucket(ticker, hist) if hist is not None and not hist.empty else "LARGE_CAP"
+    bucket_limit = get_bucket_limits(bucket)["max_weight"] * 100
+
     return {
         "current_cash": round(cash, 2),
         "after_cash": round(after_cash, 2),
@@ -1998,6 +2627,8 @@ def build_trade_preview(
         "net_total": round(net, 2),
         "current_weight_pct": round((current_mkt_value / total_assets * 100) if total_assets > 0 else 0.0, 2),
         "after_weight_pct": round(after_weight_pct, 2),
-        "exceed_max_weight": after_weight_pct > MAX_POSITION_WEIGHT * 100,
+        "bucket": bucket,
+        "bucket_max_weight_pct": round(bucket_limit, 2),
+        "exceed_max_weight": after_weight_pct > bucket_limit,
         "sell_exceeds_position": normalize_trade_type(trade_type) == "SELL" and shares > current_shares + 1e-9,
     }
