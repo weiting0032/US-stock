@@ -13,6 +13,7 @@ from core import (
     build_portfolio,
     build_trade_preview,
     calculate_performance_metrics,
+    calc_portfolio_heat,
     clear_market_cache,
     color_pl,
     display_divergence,
@@ -25,6 +26,7 @@ from core import (
     get_unified_analysis,
     load_alerts,
     load_history,
+    load_signals,
     load_trades,
     load_watchlist,
     maybe_log_daily_history,
@@ -130,6 +132,11 @@ try:
 except Exception:
     alerts_df = pd.DataFrame()
 
+try:
+    signals_df = load_signals()
+except Exception:
+    signals_df = pd.DataFrame()
+
 portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
 market_value = sum(x["MarketValue"] for x in portfolio_raw)
 total_assets = cash + market_value
@@ -140,6 +147,8 @@ market_regime = get_market_regime()
 portfolio = enrich_portfolio_with_weight_and_risk(
     portfolio_raw, total_assets, cash, market_regime
 ) if portfolio_raw else []
+
+heat_info = calc_portfolio_heat(portfolio, total_assets)
 
 perf = calculate_performance_metrics(history_df)
 
@@ -191,11 +200,12 @@ m4.metric("已實現損益", f"${total_realized_pl:,.2f}")
 m5.metric("未實現損益", f"${total_unrealized_pl:,.2f}")
 m6.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
 
-x1, x2, x3, x4 = st.columns(4)
+x1, x2, x3, x4, x5 = st.columns(5)
 x1.metric("市場狀態", display_market_regime(market_regime["regime"]))
 x2.metric("Regime Score", market_regime["score"])
 x3.metric("最大回撤", "-" if perf["max_drawdown_pct"] is None else f"{perf['max_drawdown_pct']:.2f}%")
 x4.metric("Sharpe", "-" if perf["sharpe"] is None else f"{perf['sharpe']:.2f}")
+x5.metric("Portfolio Heat", f"{heat_info['heat_pct']:.2f}%")
 if perf.get("history_points", 0) < 2:
     st.warning("NAV 歷史資料不足 2 筆，Sharpe 與最大回撤暫時不具參考性。請先累積每日 NAV。")
 
@@ -305,7 +315,8 @@ with tab1:
         holdings_df = pd.DataFrame(portfolio)
         display_cols = [
             "Ticker", "Shares", "AvgCost", "FIFOCostBasis", "LastPrice", "MarketValue",
-            "Unrealized", "PL_Pct", "WeightPct", "SignalScore", "Signal", "StrategyMode",
+            "Unrealized", "PL_Pct", "WeightPct", "Bucket", "RS20vsSPY", "ADX",
+            "SignalScore", "Signal", "StrategyMode",
             "StopLoss", "TakeProfit1", "TakeProfit2", "TrendStop",
             "DistanceToStopPct", "DistanceToTP1Pct", "DistanceToTrendStopPct", "Divergence"
         ]
@@ -331,6 +342,9 @@ with tab1:
             "DistanceToTP1Pct": "距目標1%",
             "DistanceToTrendStopPct": "距趨勢停損%",
             "Divergence": "量價背離",
+            "Bucket": "分組",
+            "RS20vsSPY": "相對SPY強弱",
+            "ADX": "ADX",
         })
         styled = holdings_df.style.applymap(color_pl, subset=["未實現損益", "報酬率"]).format({
             "平均成本": "${:,.2f}",
@@ -348,6 +362,8 @@ with tab1:
             "距停損%": "{:.2f}%",
             "距目標1%": "{:.2f}%",
             "距趨勢停損%": "{:.2f}%",
+            "相對SPY強弱": "{:.2f}",
+            "ADX": "{:.2f}",
         })
         st.dataframe(styled, use_container_width=True)
     else:
@@ -436,7 +452,9 @@ with tab2:
         q3.metric("滑價成本(0.1%)", f"${preview['slippage']:,.2f}")
 
         if preview["exceed_max_weight"]:
-            st.warning(f"⚠️ 交易後持倉權重將超過上限 {MAX_POSITION_WEIGHT*100:.1f}%")
+            st.warning(
+                f"⚠️ 交易後持倉權重將超過 {preview['bucket']} 上限 {preview['bucket_max_weight_pct']:.1f}%"
+            )
         if preview["sell_exceeds_position"]:
             st.error("❌ 賣出股數超過目前持股")
 
@@ -533,6 +551,8 @@ with tab3:
             total_assets=total_assets,
             cash=cash,
             market_regime=market_regime,
+            portfolio_heat_pct=heat_info["heat_pct"],
+            portfolio=portfolio,
         )
 
         left, right = st.columns([3, 7])
@@ -808,6 +828,8 @@ with tab4:
                     total_assets=total_assets,
                     cash=cash,
                     market_regime=market_regime,
+                    portfolio_heat_pct=heat_info["heat_pct"],
+                    portfolio=portfolio,
                 )
 
                 ww1, ww2, ww3, ww4 = st.columns(4)
@@ -850,6 +872,12 @@ with tab5:
             st.dataframe(alerts_df.sort_values("DateTime", ascending=False), use_container_width=True)
         else:
             st.info("目前沒有提醒紀錄。")
+
+    with st.expander("策略訊號紀錄 Signals"):
+        if not signals_df.empty:
+            st.dataframe(signals_df.sort_values("DateTime", ascending=False), use_container_width=True)
+        else:
+            st.info("目前沒有 Signals 紀錄。")
 
     with st.expander("NAV 歷史"):
         if not history_df.empty:
