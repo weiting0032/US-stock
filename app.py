@@ -120,8 +120,15 @@ except Exception as e:
     ])
     watchlist_df = pd.DataFrame(columns=["Ticker", "Enabled", "Category", "Note"])
 
-history_df = pd.DataFrame()
-alerts_df = pd.DataFrame()
+try:
+    history_df = load_history()
+except Exception:
+    history_df = pd.DataFrame()
+
+try:
+    alerts_df = load_alerts()
+except Exception:
+    alerts_df = pd.DataFrame()
 
 portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
 market_value = sum(x["MarketValue"] for x in portfolio_raw)
