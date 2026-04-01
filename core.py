@@ -17,28 +17,67 @@ try:
 except Exception:
     st = None
 
+def get_env_str(name: str, default: str = "") -> str:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    val = str(val).strip()
+    return val if val != "" else default
 
-PORTFOLIO_SHEET_TITLE = os.getenv("PORTFOLIO_SHEET_TITLE", "US Stock").strip()
 
-TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
-TG_CHAT_ID = str(os.getenv("TG_CHAT_ID", "")).strip()
+def get_env_float(name: str, default: float) -> float:
+    val = os.getenv(name)
+    if val is None:
+        return float(default)
+    val = str(val).strip()
+    if val == "":
+        return float(default)
+    try:
+        return float(val)
+    except Exception:
+        return float(default)
 
-DEFAULT_INITIAL_CAPITAL = float(os.getenv("INITIAL_CAPITAL", "32000"))
-MAX_POSITION_WEIGHT = float(os.getenv("MAX_POSITION_WEIGHT", "0.30"))
-RISK_PER_TRADE_PCT = float(os.getenv("RISK_PER_TRADE_PCT", "0.01"))
-CASH_RESERVE_PCT = float(os.getenv("CASH_RESERVE_PCT", "0.10"))
-COOLDOWN_DAYS = int(os.getenv("COOLDOWN_DAYS", "3"))
 
-PRE_ALERT_PCT = float(os.getenv("PRE_ALERT_PCT", "0.01"))
-ALERT_MIN_MINUTES = int(os.getenv("ALERT_MIN_MINUTES", "30"))
-ALERT_MIN_PRICE_CHANGE = float(os.getenv("ALERT_MIN_PRICE_CHANGE", "1.0"))
-ALERT_MIN_SCORE_CHANGE = float(os.getenv("ALERT_MIN_SCORE_CHANGE", "0.8"))
+def get_env_int(name: str, default: int) -> int:
+    val = os.getenv(name)
+    if val is None:
+        return int(default)
+    val = str(val).strip()
+    if val == "":
+        return int(default)
+    try:
+        return int(val)
+    except Exception:
+        return int(default)
 
-MIN_AVG_DOLLAR_VOLUME = float(os.getenv("MIN_AVG_DOLLAR_VOLUME", "20000000"))
-MIN_PRICE = float(os.getenv("MIN_PRICE", "10"))
-EARNINGS_BLOCK_DAYS = int(os.getenv("EARNINGS_BLOCK_DAYS", "2"))
-DEFAULT_COMMISSION = float(os.getenv("DEFAULT_COMMISSION", "0"))
-DEFAULT_SLIPPAGE_PCT = float(os.getenv("DEFAULT_SLIPPAGE_PCT", "0.001"))
+PORTFOLIO_SHEET_TITLE = get_env_str("PORTFOLIO_SHEET_TITLE", "US Stock")
+
+TG_TOKEN = get_env_str("TG_TOKEN", "")
+TG_CHAT_ID = get_env_str("TG_CHAT_ID", "")
+
+DEFAULT_INITIAL_CAPITAL = get_env_float("INITIAL_CAPITAL", 32000)
+MAX_POSITION_WEIGHT = get_env_float("MAX_POSITION_WEIGHT", 0.30)
+RISK_PER_TRADE_PCT = get_env_float("RISK_PER_TRADE_PCT", 0.01)
+CASH_RESERVE_PCT = get_env_float("CASH_RESERVE_PCT", 0.10)
+COOLDOWN_DAYS = get_env_int("COOLDOWN_DAYS", 3)
+
+PRE_ALERT_PCT = get_env_float("PRE_ALERT_PCT", 0.01)
+ALERT_MIN_MINUTES = get_env_int("ALERT_MIN_MINUTES", 30)
+ALERT_MIN_PRICE_CHANGE = get_env_float("ALERT_MIN_PRICE_CHANGE", 1.0)
+ALERT_MIN_SCORE_CHANGE = get_env_float("ALERT_MIN_SCORE_CHANGE", 0.8)
+
+MIN_AVG_DOLLAR_VOLUME = get_env_float("MIN_AVG_DOLLAR_VOLUME", 20000000)
+MIN_PRICE = get_env_float("MIN_PRICE", 10)
+EARNINGS_BLOCK_DAYS = get_env_int("EARNINGS_BLOCK_DAYS", 2)
+DEFAULT_COMMISSION = get_env_float("DEFAULT_COMMISSION", 0)
+DEFAULT_SLIPPAGE_PCT = get_env_float("DEFAULT_SLIPPAGE_PCT", 0.001)
+
+TRADE_HEADERS_V1 = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
+
+TRADE_HEADERS_V2 = [
+    "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
+    "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
+]
 
 import time
 def gsheet_retry(func, max_retries: int = 6, base_sleep: float = 1.5):
@@ -375,11 +414,15 @@ def ensure_headers(ws, headers: List[str]):
 def get_trades_worksheet(readonly: bool = True):
     ss = get_spreadsheet()
     ws = get_or_create_worksheet(ss, "Trades", rows=10000, cols=14)
+
     if not readonly:
-        ensure_headers(ws, [
-            "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
-            "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
-        ])
+        try:
+            first_row = gsheet_retry(lambda: ws.row_values(1))
+            if not first_row:
+                gsheet_retry(lambda: ws.append_row(TRADE_HEADERS_V2))
+        except Exception:
+            gsheet_retry(lambda: ws.append_row(TRADE_HEADERS_V2))
+
     return ws
 
 def get_history_worksheet(readonly: bool = True):
@@ -535,44 +578,107 @@ def _load_trades_raw() -> pd.DataFrame:
 
     values = gsheet_retry(lambda: ws_trades.get_all_values())
     if not values:
-        return pd.DataFrame(columns=[
-            "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
-            "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
-        ])
+        return pd.DataFrame(columns=TRADE_HEADERS_V2)
 
-    headers = values[0]
+    headers = [str(x).strip() for x in values[0]]
     rows = values[1:]
 
-    if headers == ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]:
-        df = pd.DataFrame(rows, columns=headers)
-        df["TradeDateTime"] = pd.to_datetime(df["Date"], errors="coerce")
-        df["CreatedAt"] = pd.to_datetime(df["Date"], errors="coerce")
-        df["GrossTotal"] = pd.to_numeric(df["Total"], errors="coerce").fillna(0.0)
-        df["Fee"] = 0.0
-        df["Slippage"] = 0.0
-        df["NetTotal"] = df["GrossTotal"]
-        df["OrderID"] = ""
-        df["Note"] = df.get("Note", "")
-        df = df[[
-            "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
-            "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
-        ]]
-    else:
-        cols = [
-            "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
-            "GrossTotal", "Fee", "Slippage", "NetTotal", "Note", "OrderID"
-        ]
-        clean = []
-        for row in rows:
-            row = row[:len(cols)] + [""] * max(0, len(cols) - len(row))
-            clean.append(row[:len(cols)])
-        df = pd.DataFrame(clean, columns=cols)
+    if not headers:
+        return pd.DataFrame(columns=TRADE_HEADERS_V2)
+
+    normalized_rows = []
+
+    is_legacy = headers[:len(TRADE_HEADERS_V1)] == TRADE_HEADERS_V1
+    is_v2 = headers[:len(TRADE_HEADERS_V2)] == TRADE_HEADERS_V2
+
+    for row in rows:
+        row = list(row)
+
+        # 舊格式資料列：7 欄
+        if is_legacy:
+            row7 = row[:7] + [""] * max(0, 7 - len(row[:7]))
+            row7 = row7[:7]
+
+            date_val, ticker, trade_type, price, shares, total, note = row7
+
+            normalized_rows.append({
+                "TradeDateTime": pd.to_datetime(date_val, errors="coerce"),
+                "CreatedAt": pd.to_datetime(date_val, errors="coerce"),
+                "Ticker": ticker,
+                "Type": trade_type,
+                "Price": price,
+                "Shares": shares,
+                "GrossTotal": total,
+                "Fee": 0.0,
+                "Slippage": 0.0,
+                "NetTotal": total,
+                "Note": note,
+                "OrderID": "",
+            })
+
+        # 新格式資料列：12 欄
+        elif is_v2:
+            row12 = row[:12] + [""] * max(0, 12 - len(row[:12]))
+            row12 = row12[:12]
+
+            normalized_rows.append({
+                "TradeDateTime": row12[0],
+                "CreatedAt": row12[1],
+                "Ticker": row12[2],
+                "Type": row12[3],
+                "Price": row12[4],
+                "Shares": row12[5],
+                "GrossTotal": row12[6],
+                "Fee": row12[7],
+                "Slippage": row12[8],
+                "NetTotal": row12[9],
+                "Note": row12[10],
+                "OrderID": row12[11],
+            })
+
+        # 其他異常格式：盡量容錯
+        else:
+            if len(row) >= 12:
+                row12 = row[:12]
+                normalized_rows.append({
+                    "TradeDateTime": row12[0],
+                    "CreatedAt": row12[1],
+                    "Ticker": row12[2],
+                    "Type": row12[3],
+                    "Price": row12[4],
+                    "Shares": row12[5],
+                    "GrossTotal": row12[6],
+                    "Fee": row12[7],
+                    "Slippage": row12[8],
+                    "NetTotal": row12[9],
+                    "Note": row12[10],
+                    "OrderID": row12[11],
+                })
+            elif len(row) >= 7:
+                row7 = row[:7]
+                normalized_rows.append({
+                    "TradeDateTime": pd.to_datetime(row7[0], errors="coerce"),
+                    "CreatedAt": pd.to_datetime(row7[0], errors="coerce"),
+                    "Ticker": row7[1],
+                    "Type": row7[2],
+                    "Price": row7[3],
+                    "Shares": row7[4],
+                    "GrossTotal": row7[5],
+                    "Fee": 0.0,
+                    "Slippage": 0.0,
+                    "NetTotal": row7[5],
+                    "Note": row7[6],
+                    "OrderID": "",
+                })
+
+    df = pd.DataFrame(normalized_rows, columns=TRADE_HEADERS_V2)
 
     if df.empty:
         return df
 
     df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
     df["Type"] = df["Type"].astype(str).apply(normalize_trade_type)
+
     for col in ["Price", "Shares", "GrossTotal", "Fee", "Slippage", "NetTotal"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
 
@@ -728,6 +834,34 @@ def save_trade(
         else gross_total - fee - slippage,
         4
     )
+
+    try:
+        headers = gsheet_retry(lambda: ws_trades.row_values(1))
+        headers = [str(x).strip() for x in headers]
+    except Exception:
+        headers = []
+
+    is_legacy = headers[:len(TRADE_HEADERS_V1)] == TRADE_HEADERS_V1
+    is_v2 = headers[:len(TRADE_HEADERS_V2)] == TRADE_HEADERS_V2
+
+    if is_legacy:
+        # 舊格式：Date, Ticker, Type, Price, Shares, Total, Note
+        total_col = round(price * shares, 4)
+        gsheet_retry(lambda: ws_trades.append_row([
+            trade_dt.strftime("%Y-%m-%d"),
+            ticker,
+            trade_type,
+            float(price),
+            float(shares),
+            float(total_col),
+            note,
+        ]))
+        clear_app_caches()
+        return True, "交易已寫入（舊版 Trades 格式）"
+
+    # 預設寫入新版格式
+    if not is_v2 and not headers:
+        gsheet_retry(lambda: ws_trades.append_row(TRADE_HEADERS_V2))
 
     gsheet_retry(lambda: ws_trades.append_row([
         trade_dt.strftime("%Y-%m-%d %H:%M:%S"),
