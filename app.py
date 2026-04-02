@@ -223,6 +223,18 @@ st.title("🏛️ 美股投資組合專業版")
 st.caption(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if mobile_mode:
+    top_signal = "無"
+    if portfolio:
+        top_item = sorted(portfolio, key=lambda x: x.get("SignalScore") or -999, reverse=True)[0]
+        top_signal = f"{top_item['Ticker']} / {top_item.get('Signal', 'WATCH')}"
+
+    st.success(
+        f"📌 今日摘要｜市場：{display_market_regime(market_regime['regime'])} ｜ "
+        f"Heat：{heat_info['heat_pct']:.2f}% ｜ "
+        f"最強持股訊號：{top_signal}"
+    )
+
+if mobile_mode:
     r1c1, r1c2 = st.columns(2)
     r1c1.metric("總資產 NAV", f"${total_assets:,.2f}")
     r1c2.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
@@ -274,18 +286,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "👀 Watchlist",
     "⚙️ 系統監控",
 ])
-
-if mobile_mode:
-    top_signal = "無"
-    if portfolio:
-        top_item = sorted(portfolio, key=lambda x: x.get("SignalScore") or -999, reverse=True)[0]
-        top_signal = f"{top_item['Ticker']} / {top_item.get('Signal', 'WATCH')}"
-
-    st.success(
-        f"📌 今日摘要｜市場：{display_market_regime(market_regime['regime'])} ｜ "
-        f"Heat：{heat_info['heat_pct']:.2f}% ｜ "
-        f"最強持股訊號：{top_signal}"
-    )
 
 # ===============================
 # Tab 1 Dashboard
