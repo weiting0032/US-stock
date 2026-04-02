@@ -41,6 +41,65 @@ from core import (
 
 st.set_page_config(page_title="美股投資組合專業版", layout="wide")
 
+def get_heat_signal(heat_pct: float) -> tuple[str, str, str]:
+    if heat_pct >= 8:
+        return "🔴", "偏高", "組合風險偏高，暫不宜積極加碼"
+    if heat_pct >= 4:
+        return "🟡", "中等", "組合風險可控，但新倉仍需挑選"
+    return "🟢", "健康", "組合風險低，可保留彈性"
+
+
+def get_maxdd_signal(max_dd_pct) -> tuple[str, str, str]:
+    if max_dd_pct is None:
+        return "⚪", "資料不足", "NAV 歷史不足，暫無法判讀"
+    if max_dd_pct <= -10:
+        return "🔴", "偏弱", "歷史回撤較大，需注意風控"
+    if max_dd_pct <= -5:
+        return "🟡", "普通", "回撤可接受，但需持續觀察"
+    return "🟢", "穩健", "歷史回撤控制良好"
+
+
+def get_sharpe_signal(sharpe) -> tuple[str, str, str]:
+    if sharpe is None:
+        return "⚪", "資料不足", "樣本不足，暫無法判讀"
+    if sharpe < 1:
+        return "🔴", "偏弱", "報酬相對波動效率偏低"
+    if sharpe < 2:
+        return "🟡", "尚可", "風險報酬比尚可，可繼續觀察"
+    return "🟢", "優秀", "風險報酬效率良好"
+
+
+def get_market_regime_signal(regime: str, score: float, vix) -> tuple[str, str, str]:
+    regime = str(regime).upper()
+
+    if regime == "RISK_ON":
+        return "🟢", "偏多", f"市場環境偏強，可優先關注強勢股（分數 {score}）"
+    if regime == "NEUTRAL":
+        return "🟡", "中性", f"市場方向不明，宜精選個股（分數 {score}）"
+    if regime == "RISK_OFF":
+        return "🔴", "偏空", f"市場防禦為主，應降低進攻性（分數 {score}）"
+    return "⚪", "未知", "市場資料不足或暫無法判讀"
+
+
+def render_signal_card(title: str, light: str, status: str, desc: str, value_text: str):
+    st.markdown(
+        f"""
+        <div style="
+            border:1px solid rgba(128,128,128,0.25);
+            border-radius:14px;
+            padding:14px;
+            margin-bottom:10px;
+            background: rgba(255,255,255,0.03);
+        ">
+            <div style="font-size:0.95rem; color:#A0A0A0; margin-bottom:4px;">{title}</div>
+            <div style="font-size:1.4rem; font-weight:700; margin-bottom:6px;">{light} {value_text}</div>
+            <div style="font-size:1rem; font-weight:600; margin-bottom:4px;">{status}</div>
+            <div style="font-size:0.88rem; color:#C8C8C8; line-height:1.45;">{desc}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 st.markdown(
     """
     <style>
@@ -182,6 +241,15 @@ heat_info = calc_portfolio_heat(portfolio, total_assets)
 
 perf = calculate_performance_metrics(history_df)
 
+heat_light, heat_status, heat_desc = get_heat_signal(heat_info["heat_pct"])
+dd_light, dd_status, dd_desc = get_maxdd_signal(perf["max_drawdown_pct"])
+sharpe_light, sharpe_status, sharpe_desc = get_sharpe_signal(perf["sharpe"])
+regime_light, regime_status, regime_desc = get_market_regime_signal(
+    market_regime["regime"],
+    market_regime["score"],
+    market_regime.get("vix"),
+)
+
 if log_nav_now:
     ok, msg = maybe_log_daily_history(
         total_assets=total_assets,
@@ -227,19 +295,19 @@ if mobile_mode:
     if portfolio:
         top_item = sorted(portfolio, key=lambda x: x.get("SignalScore") or -999, reverse=True)[0]
         top_signal = f"{top_item['Ticker']} / {top_item.get('Signal', 'WATCH')}"
-
-    st.success(
-        f"📌 今日摘要｜市場：{display_market_regime(market_regime['regime'])} ｜ "
-        f"Heat：{heat_info['heat_pct']:.2f}% ｜ "
+    
+    summary_text = (
+        f"{regime_light} 市場：{display_market_regime(market_regime['regime'])} ｜ "
+        f"{heat_light} Heat：{heat_info['heat_pct']:.2f}% ｜ "
         f"最強持股訊號：{top_signal}"
     )
-
-    st.caption(
-        "Heat = 若所有持股跌至停損時的組合風險；"
-        "Max DD = 歷史最大回撤；"
-        "Sharpe = 報酬相對波動效率；"
-        "市場狀態 = 依大盤趨勢/廣度/VIX 判斷的環境分級。"
-    )
+    
+    if heat_info["heat_pct"] >= 8 or str(market_regime["regime"]).upper() == "RISK_OFF":
+        st.warning(f"📌 今日摘要｜{summary_text}")
+    elif str(market_regime["regime"]).upper() == "RISK_ON" and heat_info["heat_pct"] < 6:
+        st.success(f"📌 今日摘要｜{summary_text}")
+    else:
+        st.info(f"📌 今日摘要｜{summary_text}")
 
 if mobile_mode:
     r1c1, r1c2 = st.columns(2)
@@ -285,6 +353,70 @@ st.info(
     f"分數：{market_regime['score']} ｜ "
     f"VIX：{market_regime.get('vix', 'N/A')}"
 )
+
+st.markdown("### 🚦 風險燈號判讀")
+
+if mobile_mode:
+    render_signal_card(
+        "市場狀態",
+        regime_light,
+        regime_status,
+        regime_desc,
+        f"{display_market_regime(market_regime['regime'])}｜分數 {market_regime['score']}"
+    )
+    render_signal_card(
+        "Heat",
+        heat_light,
+        heat_status,
+        heat_desc,
+        f"{heat_info['heat_pct']:.2f}%"
+    )
+    render_signal_card(
+        "Max DD",
+        dd_light,
+        dd_status,
+        dd_desc,
+        "-" if perf["max_drawdown_pct"] is None else f"{perf['max_drawdown_pct']:.2f}%"
+    )
+    render_signal_card(
+        "Sharpe",
+        sharpe_light,
+        sharpe_status,
+        sharpe_desc,
+        "-" if perf["sharpe"] is None else f"{perf['sharpe']:.2f}"
+    )
+else:
+    c1, c2 = st.columns(2)
+    with c1:
+        render_signal_card(
+            "市場狀態",
+            regime_light,
+            regime_status,
+            regime_desc,
+            f"{display_market_regime(market_regime['regime'])}｜分數 {market_regime['score']}"
+        )
+        render_signal_card(
+            "Heat",
+            heat_light,
+            heat_status,
+            heat_desc,
+            f"{heat_info['heat_pct']:.2f}%"
+        )
+    with c2:
+        render_signal_card(
+            "Max DD",
+            dd_light,
+            dd_status,
+            dd_desc,
+            "-" if perf["max_drawdown_pct"] is None else f"{perf['max_drawdown_pct']:.2f}%"
+        )
+        render_signal_card(
+            "Sharpe",
+            sharpe_light,
+            sharpe_status,
+            sharpe_desc,
+            "-" if perf["sharpe"] is None else f"{perf['sharpe']:.2f}"
+        )
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📊 儀表板",
