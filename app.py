@@ -234,6 +234,13 @@ if mobile_mode:
         f"最強持股訊號：{top_signal}"
     )
 
+    st.caption(
+        "Heat = 若所有持股跌至停損時的組合風險；"
+        "Max DD = 歷史最大回撤；"
+        "Sharpe = 報酬相對波動效率；"
+        "市場狀態 = 依大盤趨勢/廣度/VIX 判斷的環境分級。"
+    )
+
 if mobile_mode:
     r1c1, r1c2 = st.columns(2)
     r1c1.metric("總資產 NAV", f"${total_assets:,.2f}")
