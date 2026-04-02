@@ -45,11 +45,11 @@ st.markdown(
     """
     <style>
     [data-testid="stMetricValue"] {
-        font-size: 1.5rem !important;
+        font-size: 1.2rem !important;
         white-space: nowrap !important;
     }
     [data-testid="stMetricLabel"] {
-        font-size: 0.92rem !important;
+        font-size: 0.85rem !important;
     }
     .stMetric {
         border: 1px solid rgba(128, 128, 128, 0.25);
@@ -63,6 +63,35 @@ st.markdown(
         border-radius: 12px;
         border-left: 5px solid #17BECF;
         margin-bottom: 14px;
+    }
+    .mobile-card {
+        border: 1px solid rgba(128,128,128,0.25);
+        border-radius: 12px;
+        padding: 12px;
+        margin-bottom: 10px;
+        background: rgba(255,255,255,0.03);
+    }
+    .mobile-card-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 6px;
+    }
+    .mobile-card-text {
+        font-size: 0.92rem;
+        line-height: 1.45;
+    }
+
+    @media (max-width: 768px) {
+        [data-testid="stMetricValue"] {
+            font-size: 1rem !important;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 0.78rem !important;
+        }
+        .stMetric {
+            padding: 8px !important;
+            border-radius: 10px;
+        }
     }
     </style>
     """,
@@ -87,6 +116,7 @@ for k, v in defaults.items():
 # Sidebar
 # ===============================
 st.sidebar.title("🎮 控制中心")
+mobile_mode = st.sidebar.toggle("📱 手機簡潔模式", value=True)
 
 if st.sidebar.button("🔄 手動重新整理"):
     clear_market_cache()
@@ -192,20 +222,42 @@ if manual_scan:
 st.title("🏛️ 美股投資組合專業版")
 st.caption(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("總資產 NAV", f"${total_assets:,.2f}")
-m2.metric("現金", f"${cash:,.2f}")
-m3.metric("持股市值", f"${market_value:,.2f}")
-m4.metric("已實現損益", f"${total_realized_pl:,.2f}")
-m5.metric("未實現損益", f"${total_unrealized_pl:,.2f}")
-m6.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
+if mobile_mode:
+    r1c1, r1c2 = st.columns(2)
+    r1c1.metric("總資產 NAV", f"${total_assets:,.2f}")
+    r1c2.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
 
-x1, x2, x3, x4, x5 = st.columns(5)
-x1.metric("市場狀態", display_market_regime(market_regime["regime"]))
-x2.metric("Regime Score", market_regime["score"])
-x3.metric("最大回撤", "-" if perf["max_drawdown_pct"] is None else f"{perf['max_drawdown_pct']:.2f}%")
-x4.metric("Sharpe", "-" if perf["sharpe"] is None else f"{perf['sharpe']:.2f}")
-x5.metric("Portfolio Heat", f"{heat_info['heat_pct']:.2f}%")
+    r2c1, r2c2 = st.columns(2)
+    r2c1.metric("現金", f"${cash:,.2f}")
+    r2c2.metric("持股市值", f"${market_value:,.2f}")
+
+    r3c1, r3c2 = st.columns(2)
+    r3c1.metric("已實現", f"${total_realized_pl:,.2f}")
+    r3c2.metric("未實現", f"${total_unrealized_pl:,.2f}")
+
+    r4c1, r4c2 = st.columns(2)
+    r4c1.metric("市場狀態", display_market_regime(market_regime["regime"]))
+    r4c2.metric("Heat", f"{heat_info['heat_pct']:.2f}%")
+
+    r5c1, r5c2 = st.columns(2)
+    r5c1.metric("Max DD", "-" if perf["max_drawdown_pct"] is None else f"{perf['max_drawdown_pct']:.2f}%")
+    r5c2.metric("Sharpe", "-" if perf["sharpe"] is None else f"{perf['sharpe']:.2f}")
+else:
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
+    m1.metric("總資產 NAV", f"${total_assets:,.2f}")
+    m2.metric("現金", f"${cash:,.2f}")
+    m3.metric("持股市值", f"${market_value:,.2f}")
+    m4.metric("已實現損益", f"${total_realized_pl:,.2f}")
+    m5.metric("未實現損益", f"${total_unrealized_pl:,.2f}")
+    m6.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
+
+    x1, x2, x3, x4, x5 = st.columns(5)
+    x1.metric("市場狀態", display_market_regime(market_regime["regime"]))
+    x2.metric("Regime Score", market_regime["score"])
+    x3.metric("最大回撤", "-" if perf["max_drawdown_pct"] is None else f"{perf['max_drawdown_pct']:.2f}%")
+    x4.metric("Sharpe", "-" if perf["sharpe"] is None else f"{perf['sharpe']:.2f}")
+    x5.metric("Portfolio Heat", f"{heat_info['heat_pct']:.2f}%")
+    
 if perf.get("history_points", 0) < 2:
     st.warning("NAV 歷史資料不足 2 筆，Sharpe 與最大回撤暫時不具參考性。請先累積每日 NAV。")
 
@@ -223,13 +275,32 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "⚙️ 系統監控",
 ])
 
+if mobile_mode:
+    top_signal = "無"
+    if portfolio:
+        top_item = sorted(portfolio, key=lambda x: x.get("SignalScore") or -999, reverse=True)[0]
+        top_signal = f"{top_item['Ticker']} / {top_item.get('Signal', 'WATCH')}"
+
+    st.success(
+        f"📌 今日摘要｜市場：{display_market_regime(market_regime['regime'])} ｜ "
+        f"Heat：{heat_info['heat_pct']:.2f}% ｜ "
+        f"最強持股訊號：{top_signal}"
+    )
 
 # ===============================
 # Tab 1 Dashboard
 # ===============================
 with tab1:
-    top_left, top_right = st.columns([6, 4])
-
+    if mobile_mode:
+        top_left = st.container()
+        top_right = st.container()
+    else:
+        top_left, top_right = st.columns([6, 4])
+        
+    bar_height = 240 if mobile_mode else 320
+    pie_height = 260 if mobile_mode else 320
+    nav_height = 260 if mobile_mode else 350
+    
     with top_left:
         st.subheader("📈 投資組合總覽")
         if portfolio:
@@ -243,7 +314,7 @@ with tab1:
             ))
             fig_bar.update_layout(
                 template="plotly_dark",
-                height=320,
+                height=bar_height,
                 margin=dict(l=10, r=10, t=10, b=10),
                 xaxis_title="股票代碼",
                 yaxis_title="市值",
@@ -271,7 +342,11 @@ with tab1:
                     hole=0.45
                 )
             ])
-            pie_fig.update_layout(template="plotly_dark", height=320, margin=dict(l=10, r=10, t=10, b=10))
+            pie_fig.update_layout(
+                template="plotly_dark",
+                height=pie_height,
+                margin=dict(l=10, r=10, t=10, b=10)
+            )
             st.plotly_chart(pie_fig, use_container_width=True)
 
     st.subheader("🧾 淨值與基準表現")
@@ -293,7 +368,11 @@ with tab1:
                 nav_fig.add_trace(go.Scatter(
                     x=history_df["Date"], y=normalized_spy, mode="lines", name="SPY (Normalized)"
                 ))
-        nav_fig.update_layout(template="plotly_dark", height=350, margin=dict(l=10, r=10, t=10, b=10))
+        nav_fig.update_layout(
+            template="plotly_dark",
+            height=nav_height,
+            margin=dict(l=10, r=10, t=10, b=10)
+        )
         st.plotly_chart(nav_fig, use_container_width=True)
     else:
         st.info("尚無 NAV 歷史資料，可按側欄『寫入今日 NAV』。")
@@ -321,51 +400,108 @@ with tab1:
             "DistanceToStopPct", "DistanceToTP1Pct", "DistanceToTrendStopPct", "Divergence"
         ]
         holdings_df = holdings_df[display_cols].sort_values("MarketValue", ascending=False)
-        holdings_df = holdings_df.rename(columns={
-            "Ticker": "代碼",
-            "Shares": "股數",
-            "AvgCost": "平均成本",
-            "FIFOCostBasis": "FIFO 成本",
-            "LastPrice": "最新價",
-            "MarketValue": "市值",
-            "Unrealized": "未實現損益",
-            "PL_Pct": "報酬率",
-            "WeightPct": "權重",
-            "SignalScore": "訊號分數",
-            "Signal": "策略訊號",
-            "StrategyMode": "策略模式",
-            "StopLoss": "停損價",
-            "TakeProfit1": "目標1",
-            "TakeProfit2": "目標2",
-            "TrendStop": "趨勢停損",
-            "DistanceToStopPct": "距停損%",
-            "DistanceToTP1Pct": "距目標1%",
-            "DistanceToTrendStopPct": "距趨勢停損%",
-            "Divergence": "量價背離",
-            "Bucket": "分組",
-            "RS20vsSPY": "相對SPY強弱",
-            "ADX": "ADX",
-        })
-        styled = holdings_df.style.map(color_pl, subset=["未實現損益", "報酬率"]).format({
-            "平均成本": "${:,.2f}",
-            "FIFO 成本": "${:,.2f}",
-            "最新價": "${:,.2f}",
-            "市值": "${:,.2f}",
-            "未實現損益": "${:,.2f}",
-            "報酬率": "{:.2f}%",
-            "權重": "{:.2f}%",
-            "訊號分數": "{:.2f}",
-            "停損價": "${:,.2f}",
-            "目標1": "${:,.2f}",
-            "目標2": "${:,.2f}",
-            "趨勢停損": "${:,.2f}",
-            "距停損%": "{:.2f}%",
-            "距目標1%": "{:.2f}%",
-            "距趨勢停損%": "{:.2f}%",
-            "相對SPY強弱": "{:.2f}",
-            "ADX": "{:.2f}",
-        })
-        st.dataframe(styled, use_container_width=True)
+
+        if mobile_mode:
+            for _, row in holdings_df.iterrows():
+                pl_color = "#26A69A" if row["Unrealized"] > 0 else "#EF5350" if row["Unrealized"] < 0 else "white"
+                st.markdown(
+                    f"""
+                    <div class="mobile-card">
+                        <div class="mobile-card-title">{row['Ticker']} ｜ {row['Signal']}</div>
+                        <div class="mobile-card-text">
+                            市值：<b>${row['MarketValue']:,.2f}</b> ｜ 權重：<b>{row['WeightPct']:.2f}%</b><br>
+                            未實現：<span style="color:{pl_color}; font-weight:700;">${row['Unrealized']:,.2f}</span> ｜ 報酬率：<span style="color:{pl_color}; font-weight:700;">{row['PL_Pct']:.2f}%</span><br>
+                            股數：{row['Shares']:.4f} ｜ 成本：${row['AvgCost']:.2f} ｜ 現價：${row['LastPrice']:.2f}<br>
+                            模式：{row['StrategyMode']} ｜ 分組：{row['Bucket']}<br>
+                            Stop：${row['StopLoss'] if pd.notna(row['StopLoss']) else '-'} ｜ TP1：${row['TakeProfit1'] if pd.notna(row['TakeProfit1']) else '-'}<br>
+                            RS：{row['RS20vsSPY'] if pd.notna(row['RS20vsSPY']) else '-'} ｜ ADX：{row['ADX'] if pd.notna(row['ADX']) else '-'}<br>
+                            背離：{row['Divergence']}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            with st.expander("查看完整持股表"):
+                full_df = holdings_df.rename(columns={
+                    "Ticker": "代碼",
+                    "Shares": "股數",
+                    "AvgCost": "平均成本",
+                    "FIFOCostBasis": "FIFO 成本",
+                    "LastPrice": "最新價",
+                    "MarketValue": "市值",
+                    "Unrealized": "未實現損益",
+                    "PL_Pct": "報酬率",
+                    "WeightPct": "權重",
+                    "SignalScore": "訊號分數",
+                    "Signal": "策略訊號",
+                    "StrategyMode": "策略模式",
+                    "StopLoss": "停損價",
+                    "TakeProfit1": "目標1",
+                    "TakeProfit2": "目標2",
+                    "TrendStop": "趨勢停損",
+                    "DistanceToStopPct": "距停損%",
+                    "DistanceToTP1Pct": "距目標1%",
+                    "DistanceToTrendStopPct": "距趨勢停損%",
+                    "Divergence": "量價背離",
+                    "Bucket": "分組",
+                    "RS20vsSPY": "相對SPY強弱",
+                    "ADX": "ADX",
+                })
+                st.dataframe(full_df, use_container_width=True, hide_index=True)
+        else:
+            holdings_df = holdings_df.rename(columns={
+                "Ticker": "代碼",
+                "Shares": "股數",
+                "AvgCost": "平均成本",
+                "FIFOCostBasis": "FIFO 成本",
+                "LastPrice": "最新價",
+                "MarketValue": "市值",
+                "Unrealized": "未實現損益",
+                "PL_Pct": "報酬率",
+                "WeightPct": "權重",
+                "SignalScore": "訊號分數",
+                "Signal": "策略訊號",
+                "StrategyMode": "策略模式",
+                "StopLoss": "停損價",
+                "TakeProfit1": "目標1",
+                "TakeProfit2": "目標2",
+                "TrendStop": "趨勢停損",
+                "DistanceToStopPct": "距停損%",
+                "DistanceToTP1Pct": "距目標1%",
+                "DistanceToTrendStopPct": "距趨勢停損%",
+                "Divergence": "量價背離",
+                "Bucket": "分組",
+                "RS20vsSPY": "相對SPY強弱",
+                "ADX": "ADX",
+            })
+
+            styler = holdings_df.style
+            if hasattr(styler, "map"):
+                styler = styler.map(color_pl, subset=["未實現損益", "報酬率"])
+            else:
+                styler = styler.applymap(color_pl, subset=["未實現損益", "報酬率"])
+
+            styled = styler.format({
+                "平均成本": "${:,.2f}",
+                "FIFO 成本": "${:,.2f}",
+                "最新價": "${:,.2f}",
+                "市值": "${:,.2f}",
+                "未實現損益": "${:,.2f}",
+                "報酬率": "{:.2f}%",
+                "權重": "{:.2f}%",
+                "訊號分數": "{:.2f}",
+                "停損價": "${:,.2f}",
+                "目標1": "${:,.2f}",
+                "目標2": "${:,.2f}",
+                "趨勢停損": "${:,.2f}",
+                "距停損%": "{:.2f}%",
+                "距目標1%": "{:.2f}%",
+                "距趨勢停損%": "{:.2f}%",
+                "相對SPY強弱": "{:.2f}",
+                "ADX": "{:.2f}",
+            })
+            st.dataframe(styled, use_container_width=True)
     else:
         st.info("尚無持倉資料。")
 
@@ -723,14 +859,19 @@ with tab3:
 
             fig.add_trace(go.Bar(x=plot_df.index, y=plot_df["MACD_Hist"], name="MACD Hist"), row=3, col=1)
             fig.add_trace(go.Bar(x=plot_df.index, y=plot_df["Volume"], name="Volume"), row=4, col=1)
-
+            chart_height = 520 if mobile_mode else 900
+            
             fig.update_layout(
                 template="plotly_dark",
-                height=900,
+                height=chart_height,
                 margin=dict(l=10, r=10, t=10, b=10),
                 xaxis_rangeslider_visible=False
             )
-            st.plotly_chart(fig, use_container_width=True)
+            if mobile_mode:
+                with st.expander("展開技術圖表"):
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.plotly_chart(fig, use_container_width=True)
 
 # ===============================
 # Tab 4 Watchlist
@@ -850,11 +991,20 @@ with tab4:
 with tab5:
     st.subheader("⚙️ 系統監控")
 
-    st.write(f"- 交易筆數：{len(trades_df)}")
-    st.write(f"- 持股數量：{len(portfolio)}")
-    st.write(f"- Watchlist 數量：{len(watchlist_df)}")
-    st.write(f"- 市場狀態：{market_regime['regime']}")
-    st.write(f"- 現金比例：{(cash / total_assets * 100):.2f}%" if total_assets > 0 else "- 現金比例：N/A")
+    if mobile_mode:
+        mc1, mc2 = st.columns(2)
+        mc1.metric("交易筆數", len(trades_df))
+        mc2.metric("持股數量", len(portfolio))
+    
+        mc3, mc4 = st.columns(2)
+        mc3.metric("Watchlist", len(watchlist_df))
+        mc4.metric("現金比例", f"{(cash / total_assets * 100):.2f}%" if total_assets > 0 else "N/A")
+    else:
+        st.write(f"- 交易筆數：{len(trades_df)}")
+        st.write(f"- 持股數量：{len(portfolio)}")
+        st.write(f"- Watchlist 數量：{len(watchlist_df)}")
+        st.write(f"- 市場狀態：{market_regime['regime']}")
+        st.write(f"- 現金比例：{(cash / total_assets * 100):.2f}%" if total_assets > 0 else "- 現金比例：N/A")
 
     if scan_result:
         st.markdown("#### 🤖 最近一次掃描統計")
