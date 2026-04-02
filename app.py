@@ -346,7 +346,7 @@ with tab1:
             "RS20vsSPY": "相對SPY強弱",
             "ADX": "ADX",
         })
-        styled = holdings_df.style.applymap(color_pl, subset=["未實現損益", "報酬率"]).format({
+        styled = holdings_df.style.map(color_pl, subset=["未實現損益", "報酬率"]).format({
             "平均成本": "${:,.2f}",
             "FIFO 成本": "${:,.2f}",
             "最新價": "${:,.2f}",
