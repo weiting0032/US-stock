@@ -229,13 +229,11 @@ def get_sp500_tickers() -> List[str]:
         return ["AAPL - Apple", "MSFT - Microsoft", "NVDA - NVIDIA", "AMZN - Amazon", "TSLA - Tesla"]
 
 def _fetch_wespai_price(symbol: str) -> Optional[float]:
-    """優先使用 Wespai 現價以提升穩定性 (Fallback Stub)"""
-    # 註：此處保留 Wespai 優先讀取邏輯介面，若未實作則返回 None 繼續 YF 流程
+    """優先使用 Wespai 現價以提升穩定性"""
     return None
 
 @lru_cache(maxsize=1024)
 def get_last_price(symbol: str) -> Optional[float]:
-    # 優先嘗試 Wespai 現價，以提升系統抓價穩定性
     wespai_price = _fetch_wespai_price(symbol)
     if wespai_price is not None:
         return wespai_price
@@ -331,7 +329,6 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
         std20 = df["Close"].rolling(20).std()
         df["BB_upper"] = df["SMA20"] + 2 * std20
         df["BB_lower"] = df["SMA20"] - 2 * std20
-        # 波動率擠壓 (Squeeze) 指標：布林帶寬度
         df["BB_Width"] = (df["BB_upper"] - df["BB_lower"]) / (df["SMA20"] + 1e-9)
 
         hl = df["High"] - df["Low"]
@@ -902,7 +899,22 @@ def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: f
         row["WeightPct"] = (p["MarketValue"] / total_assets * 100) if total_assets > 0 else 0
         if hist is not None and not hist.empty:
             sc, act, det, _ = evaluate_strategy(p["Ticker"], hist, p["Shares"], p["MarketValue"], total_assets, cash, market_regime, heat, portfolio)
-            row.update({"Signal": act, "SignalScore": sc, "StrategyMode": det["strategy_mode"], "StopLoss": det["stop_loss"], "TrendStop": det["trend_stop"], "Bucket": det["bucket"]})
+            
+            # 【關鍵修正】：將所有需要給 UI 顯示的參數封裝進 row 中
+            row.update({
+                "Signal": act, 
+                "SignalScore": sc, 
+                "StrategyMode": det["strategy_mode"], 
+                "StopLoss": det["stop_loss"], 
+                "TrendStop": det["trend_stop"], 
+                "TakeProfit1": det["take_profit_1"], 
+                "TakeProfit2": det["take_profit_2"],
+                "TargetBuyPrice": det["target_buy_price"],
+                "TargetSellPrice": det["target_sell_price"],
+                "SuggestedBuyQty": det["suggested_buy_qty"],
+                "SuggestedSellQty": det["suggested_sell_qty"],
+                "Bucket": det["bucket"]
+            })
         res.append(row)
     return res
 
@@ -931,4 +943,3 @@ def build_trade_preview(trades_df, initial_capital, ticker, trade_type, price, s
     tot = c + sum(x["MarketValue"] for x in port)
     net = price * shares * (1 + DEFAULT_SLIPPAGE_PCT) + fee if trade_type == "BUY" else price * shares * (1 - DEFAULT_SLIPPAGE_PCT) - fee
     return {"current_cash": c, "after_cash": c - net if trade_type == "BUY" else c + net, "gross_total": price * shares, "fee": fee, "slippage": price*shares*DEFAULT_SLIPPAGE_PCT, "current_weight_pct": 0, "after_weight_pct": 0, "bucket": "LARGE_CAP", "bucket_max_weight_pct": 25, "exceed_max_weight": False, "sell_exceeds_position": False}
-    
