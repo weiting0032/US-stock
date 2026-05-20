@@ -86,6 +86,15 @@ SMALL_CAP_RISK_PER_TRADE_PCT = get_env_float("SMALL_CAP_RISK_PER_TRADE_PCT", 0.0
 
 SIGNAL_LOG_LOOKAHEAD_DAYS = get_env_int("SIGNAL_LOG_LOOKAHEAD_DAYS", 20)
 
+# ── Enhanced strategy thresholds ──────────────────────────────────────────────
+SCORE_BUY_NOW_THRESHOLD   = get_env_float("SCORE_BUY_NOW_THRESHOLD",  3.5)  # was 3
+SCORE_BUY_ADD_THRESHOLD   = get_env_float("SCORE_BUY_ADD_THRESHOLD",  4.5)  # scale-in
+SCALE_IN_MAX_WEIGHT_RATIO = get_env_float("SCALE_IN_MAX_WEIGHT_RATIO", 0.75) # <75% of max_weight
+RS_STRONG_THRESHOLD       = get_env_float("RS_STRONG_THRESHOLD",  2.0)       # RS20 > 2% vs SPY
+RS_WEAK_THRESHOLD         = get_env_float("RS_WEAK_THRESHOLD",   -2.0)       # RS20 < -2%
+OBV_LOOKBACK              = get_env_int("OBV_LOOKBACK", 20)
+SCANNER_TOP_N             = get_env_int("SCANNER_TOP_N", 10)                  # top-N in scanner
+
 TRADE_HEADERS_V1 = ["Date", "Ticker", "Type", "Price", "Shares", "Total", "Note"]
 TRADE_HEADERS_V2 = [
     "TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares",
@@ -229,7 +238,6 @@ def get_sp500_tickers() -> List[str]:
         return ["AAPL - Apple", "MSFT - Microsoft", "NVDA - NVIDIA", "AMZN - Amazon", "TSLA - Tesla"]
 
 def _fetch_wespai_price(symbol: str) -> Optional[float]:
-    """優先使用 Wespai 現價以提升穩定性"""
     return None
 
 @lru_cache(maxsize=1024)
@@ -383,6 +391,11 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
             elif closes[i] < closes[i - 1]: obv.append(obv[-1] - vols[i])
             else: obv.append(obv[-1])
         df["OBV"] = obv
+
+        # ── Enhanced: OBV momentum slope (20-bar linear regression slope) ────
+        obv_s = pd.Series(obv, index=df.index)
+        df["OBV_SMA20"] = obv_s.rolling(20).mean()
+        df["OBV_Slope20"] = obv_s.diff(20)  # simple delta as slope proxy
 
         spy = yf.Ticker("SPY").history(period="2y", auto_adjust=True)
         if spy is not None and not spy.empty:
@@ -744,7 +757,7 @@ def log_signal_snapshot(ticker, action, strategy_mode, score, details, reason, s
     except Exception: return False
 
 # ===============================
-# Market regime / filters
+# Market regime
 # ===============================
 def get_market_regime() -> Dict:
     spy = get_unified_analysis("SPY")
@@ -770,43 +783,90 @@ def get_market_regime() -> Dict:
     if score <= 2: return {"regime": "RISK_OFF", "score": score, "allow_new_position": False, "allow_add_position": False, "risk_multiplier": 0.0, "vix": vix_level}
     return {"regime": "NEUTRAL", "score": score, "allow_new_position": False, "allow_add_position": True, "risk_multiplier": 0.5, "vix": vix_level}
 
+# ===============================
+# ★ Enhanced symbol scoring ★
+# ===============================
 def rank_symbol_strength(ticker: str, hist: pd.DataFrame, market_regime: Optional[Dict] = None) -> Tuple[float, Dict]:
     if hist is None or hist.empty: return 0.0, {}
-    last, prev = hist.iloc[-1], hist.iloc[-2] if len(hist) >= 2 else hist.iloc[-1]
-    
-    close, sma20, sma50, sma200 = safe_float(last["Close"]), safe_float(last["SMA20"]), safe_float(last["SMA50"]), safe_float(last["SMA200"])
-    volume, vol_sma20 = safe_float(last["Volume"]), safe_float(last["VOL_SMA20"])
-    macd_hist, rsi, adx = safe_float(last["MACD_Hist"]), safe_float(last["RSI"]), safe_float(last.get("ADX", 0))
-    bb_width = safe_float(last.get("BB_Width", 1.0))
-    
+    last = hist.iloc[-1]
+    prev = hist.iloc[-2] if len(hist) >= 2 else hist.iloc[-1]
+
+    close   = safe_float(last["Close"])
+    sma20   = safe_float(last["SMA20"])
+    sma50   = safe_float(last["SMA50"])
+    sma200  = safe_float(last["SMA200"])
+    volume  = safe_float(last["Volume"])
+    vol_sma20 = safe_float(last["VOL_SMA20"])
+    macd_hist = safe_float(last["MACD_Hist"])
+    rsi       = safe_float(last["RSI"])
+    adx       = safe_float(last.get("ADX", 0))
+    bb_width  = safe_float(last.get("BB_Width", 1.0))
+
     reasons, score = [], 0.0
-    
-    # 趨勢動能
+
+    # ── 1. Long-term trend alignment ─────────────────────────────────────────
     if close > sma200 and sma50 > sma200:
         score += 1.4; reasons.append("長線多頭")
-        if sma20 > sma50: score += 1.0; reasons.append("均線多頭排列")
-    
-    # 波動率擠壓爆發 (科技股高勝率因子)
-    is_squeeze = bb_width < 0.08  # 通道緊縮
-    if is_squeeze:
-        reasons.append("BB 壓縮 (醞釀表態)")
-    elif bb_width > 0.12 and close > safe_float(hist["RollingHigh20"].shift(1).iloc[-1]) and volume > vol_sma20 * 1.3:
-        score += 1.5; reasons.append("放量突破壓縮區")
+        if sma20 > sma50:
+            score += 1.0; reasons.append("均線多頭排列")
 
-    # 基礎動能
+    # ── 2. Bollinger Squeeze / Breakout ──────────────────────────────────────
+    is_squeeze = bb_width < 0.08
+    if is_squeeze:
+        reasons.append("📦 BB 壓縮蓄力")
+    elif bb_width > 0.12:
+        prev_high20 = safe_float(hist["RollingHigh20"].shift(1).iloc[-1])
+        if close > prev_high20 and volume > vol_sma20 * 1.3:
+            score += 1.5; reasons.append("🚀 放量突破壓縮區")
+
+    # ── 3. Momentum indicators ───────────────────────────────────────────────
     if macd_hist > 0: score += 0.8
-    if 45 <= rsi <= 70: score += 0.8
-    if adx >= BREAKOUT_ADX_MIN: score += 0.8; reasons.append("ADX 趨勢強")
-    
+    if 50 <= rsi <= 72:               # tightened zone for stronger momentum
+        score += 0.8
+    elif rsi > 72:                    # overextended — minor penalty
+        score -= 0.3
+    if adx >= BREAKOUT_ADX_MIN:
+        score += 0.8; reasons.append(f"ADX 趨勢強 ({adx:.0f})")
+
+    # ── 4. [NEW] Relative strength vs SPY ────────────────────────────────────
+    rs20 = safe_float(last.get("RS20_vs_SPY", 0))
+    if rs20 > RS_STRONG_THRESHOLD:
+        score += 1.0; reasons.append(f"強於大盤 +{rs20:.1f}%")
+    elif rs20 < RS_WEAK_THRESHOLD:
+        score -= 0.5; reasons.append(f"弱於大盤 {rs20:.1f}%")
+
+    # ── 5. [NEW] OBV accumulation trend ──────────────────────────────────────
+    obv_slope = safe_float(last.get("OBV_Slope20", 0))
+    if obv_slope > 0 and close > sma20:
+        score += 0.5; reasons.append("OBV 機構吸籌")
+
+    # ── 6. [NEW] Near 52-week high (leadership) ───────────────────────────────
+    high_252 = safe_float(last.get("RollingHigh252", 0))
+    if high_252 > 0 and close >= high_252 * (1 - NEAR_52W_HIGH_PCT):
+        score += 0.8; reasons.append("接近年高 (領導股)")
+
+    # ── 7. [NEW] Volume surge on up day ──────────────────────────────────────
+    prev_close = safe_float(prev["Close"])
+    if volume > vol_sma20 * 1.5 and close > prev_close:
+        score += 0.5; reasons.append("大量上漲日")
+
+    # ── 8. Market regime multiplier ──────────────────────────────────────────
+    if market_regime:
+        score *= safe_float(market_regime.get("risk_multiplier", 1.0), 1.0)
+
     return score, {
         "bucket": classify_symbol_bucket(ticker, hist),
         "liquid_ok": close >= MIN_PRICE and safe_float(last["DollarVolume20"]) >= MIN_AVG_DOLLAR_VOLUME,
         "earnings_blocked": is_earnings_blocked(ticker),
         "trend_ok": close > sma200 and sma50 > sma200,
         "strong_trend": close > sma200 and sma50 > sma200 and sma20 > sma50,
+        "is_squeeze": is_squeeze,
         "reasons": reasons,
         "adx": adx,
-        "rs20_vs_spy": safe_float(last.get("RS20_vs_SPY")),
+        "rsi": rsi,
+        "rs20_vs_spy": rs20,
+        "obv_slope": obv_slope,
+        "bb_width": bb_width,
     }
 
 # ===============================
@@ -856,40 +916,91 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
     return portfolio, cash, total_realized_pl
 
 def get_bucket_limits(bucket: str) -> Dict:
-    return {"max_weight": SMALL_CAP_MAX_WEIGHT if bucket == "SMALL_CAP" else LARGE_CAP_MAX_WEIGHT, 
+    return {"max_weight": SMALL_CAP_MAX_WEIGHT if bucket == "SMALL_CAP" else LARGE_CAP_MAX_WEIGHT,
             "risk_per_trade_pct": SMALL_CAP_RISK_PER_TRADE_PCT if bucket == "SMALL_CAP" else LARGE_CAP_RISK_PER_TRADE_PCT}
 
 def calc_portfolio_heat(portfolio: List[Dict], total_assets: float) -> Dict:
     heat = sum((safe_float(p.get("LastPrice")) - safe_float(p.get("StopLoss", 0))) * safe_float(p.get("Shares")) for p in portfolio if safe_float(p.get("LastPrice")) > safe_float(p.get("StopLoss", 0)) > 0)
     return {"heat_pct": heat / total_assets * 100 if total_assets > 0 else 0.0}
 
+# ===============================
+# ★ Enhanced strategy evaluator ★
+# ===============================
 def evaluate_strategy(ticker, hist, held_shares, current_mkt_value, total_assets, cash, market_regime, portfolio_heat_pct, portfolio) -> Tuple[float, str, Dict, str]:
     last = hist.iloc[-1]
-    close, atr, sma20, rsi = safe_float(last["Close"]), safe_float(last["ATR"]), safe_float(last["SMA20"]), safe_float(last["RSI"])
-    
+    close = safe_float(last["Close"])
+    atr   = safe_float(last["ATR"])
+    sma20 = safe_float(last["SMA20"])
+    rsi   = safe_float(last["RSI"])
+
     score, meta = rank_symbol_strength(ticker, hist, market_regime)
-    stop_loss = max(0.01, close - 2 * atr) if atr > 0 else close * 0.93
-    trend_stop = safe_float(last.get("TrailingStop", stop_loss))
-    
+
+    # ── Stop levels ──────────────────────────────────────────────────────────
+    stop_loss   = max(0.01, close - 2.0 * atr) if atr > 0 else close * 0.93
+    trend_stop  = safe_float(last.get("TrailingStop", stop_loss))
+    tp1         = close + 2.0 * atr
+    tp2         = close + 4.0 * atr
+
     limits = get_bucket_limits(meta.get("bucket", "LARGE_CAP"))
-    qty = math.floor((total_assets * limits["risk_per_trade_pct"] * safe_float(market_regime.get("risk_multiplier", 1.0))) / max(0.01, close - stop_loss)) if max(0.01, close - stop_loss) > 0 else 0
-    
+
+    # ── Position size ─────────────────────────────────────────────────────────
+    risk_dollars = total_assets * limits["risk_per_trade_pct"] * safe_float(market_regime.get("risk_multiplier", 1.0))
+    risk_per_share = max(0.01, close - stop_loss)
+    qty = math.floor(risk_dollars / risk_per_share) if risk_per_share > 0 else 0
+
+    # ── Signal decision tree ──────────────────────────────────────────────────
     action, mode, tp = "WATCH", "NONE", None
-    
-    if held_shares > 0 and close < stop_loss: action, mode, tp = "SELL_EXIT", "RISK_EXIT", close
-    elif held_shares > 0 and close < trend_stop: action, mode, tp = "SELL_EXIT", "TRAIL_EXIT", trend_stop
+
+    # Priority 1: Hard stop (protect capital first)
+    if held_shares > 0 and close < stop_loss:
+        action, mode, tp = "SELL_EXIT", "RISK_EXIT", close
+
+    # Priority 2: Trailing stop exit
+    elif held_shares > 0 and close < trend_stop:
+        action, mode, tp = "SELL_EXIT", "TRAIL_EXIT", trend_stop
+
+    # Priority 3: [NEW] Partial profit at TP1 (scale-out 50%)
+    elif held_shares > 0 and close >= tp1 and rsi > 72:
+        sell_qty = max(1, math.floor(held_shares * 0.5))
+        action, mode, tp = "SELL_PARTIAL", "TAKE_PROFIT", tp1
+
+    # Priority 4: [NEW] Scale-in for existing winners
+    elif held_shares > 0 and meta["trend_ok"] and meta["liquid_ok"] and not meta["earnings_blocked"]:
+        current_weight = current_mkt_value / total_assets if total_assets > 0 else 0
+        can_add = current_weight < limits["max_weight"] * SCALE_IN_MAX_WEIGHT_RATIO
+        pullback_ok = close <= sma20 * 1.03         # near / below SMA20 = healthy pullback
+        if score >= SCORE_BUY_ADD_THRESHOLD and can_add and pullback_ok and qty > 0 and market_regime.get("allow_add_position"):
+            action, mode, tp = "BUY_ADD", "SCALE_IN", close
+
+    # Priority 5: New entry
     elif held_shares <= 0 and meta["trend_ok"] and meta["liquid_ok"] and not meta["earnings_blocked"]:
-        if score > 3 and qty > 0: action, mode, tp = "BUY_NOW", "TREND_MOMENTUM", close
-        
+        avail_cash = cash - (total_assets * CASH_RESERVE_PCT)
+        heat_ok = portfolio_heat_pct < PORTFOLIO_HEAT_LIMIT_PCT * 100
+        if score >= SCORE_BUY_NOW_THRESHOLD and qty > 0 and avail_cash > close * qty and heat_ok and market_regime.get("allow_new_position"):
+            action, mode, tp = "BUY_NOW", "TREND_MOMENTUM", close
+
+    # Partial sell qty helper
+    partial_sell_qty = max(1, math.floor(held_shares * 0.5)) if action == "SELL_PARTIAL" else 0
+
     return score, action, {
-        "close": close, "rsi": rsi, "atr": atr, "stop_loss": stop_loss, "trend_stop": trend_stop,
-        "take_profit_1": close + 2*atr, "take_profit_2": close + 4*atr,
-        "suggested_buy_qty": qty, "suggested_sell_qty": math.ceil(held_shares) if action == "SELL_EXIT" else 0,
-        "target_buy_price": tp if "BUY" in action else None, "target_sell_price": tp if "SELL" in action else None,
-        "market_regime": market_regime.get("regime"), "strategy_mode": mode, "bucket": meta.get("bucket"),
-        "liquid_ok": meta["liquid_ok"], "earnings_blocked": meta["earnings_blocked"],
-        "reasons": meta["reasons"]
+        "close": close, "rsi": rsi, "atr": atr,
+        "stop_loss": stop_loss, "trend_stop": trend_stop,
+        "take_profit_1": tp1, "take_profit_2": tp2,
+        "suggested_buy_qty": qty,
+        "suggested_sell_qty": math.ceil(held_shares) if action == "SELL_EXIT" else partial_sell_qty,
+        "target_buy_price": tp if "BUY" in action else None,
+        "target_sell_price": tp if "SELL" in action else None,
+        "market_regime": market_regime.get("regime"),
+        "strategy_mode": mode,
+        "bucket": meta.get("bucket"),
+        "liquid_ok": meta["liquid_ok"],
+        "earnings_blocked": meta["earnings_blocked"],
+        "is_squeeze": meta.get("is_squeeze", False),
+        "rs20_vs_spy": meta.get("rs20_vs_spy", 0),
+        "adx": meta.get("adx", 0),
+        "reasons": meta["reasons"],
     }, " | ".join(meta["reasons"]) if meta["reasons"] else "No Signal"
+
 
 def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: float, cash: float, market_regime: Dict) -> List[Dict]:
     res, heat = [], calc_portfolio_heat(portfolio, total_assets).get("heat_pct", 0)
@@ -899,47 +1010,99 @@ def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: f
         row["WeightPct"] = (p["MarketValue"] / total_assets * 100) if total_assets > 0 else 0
         if hist is not None and not hist.empty:
             sc, act, det, _ = evaluate_strategy(p["Ticker"], hist, p["Shares"], p["MarketValue"], total_assets, cash, market_regime, heat, portfolio)
-            
-            # 【關鍵修正】：將所有需要給 UI 顯示的參數封裝進 row 中
             row.update({
-                "Signal": act, 
-                "SignalScore": sc, 
-                "StrategyMode": det["strategy_mode"], 
-                "StopLoss": det["stop_loss"], 
-                "TrendStop": det["trend_stop"], 
-                "TakeProfit1": det["take_profit_1"], 
+                "Signal": act,
+                "SignalScore": sc,
+                "StrategyMode": det["strategy_mode"],
+                "StopLoss": det["stop_loss"],
+                "TrendStop": det["trend_stop"],
+                "TakeProfit1": det["take_profit_1"],
                 "TakeProfit2": det["take_profit_2"],
                 "TargetBuyPrice": det["target_buy_price"],
                 "TargetSellPrice": det["target_sell_price"],
                 "SuggestedBuyQty": det["suggested_buy_qty"],
                 "SuggestedSellQty": det["suggested_sell_qty"],
-                "Bucket": det["bucket"]
+                "Bucket": det["bucket"],
+                "RS20vsSPY": det.get("rs20_vs_spy", 0),
+                "IsSqueeze": det.get("is_squeeze", False),
+                "Reasons": det.get("reasons", []),
             })
         res.append(row)
     return res
 
+# ===============================
+# ★ Enhanced scanner with ranking ★
+# ===============================
 def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, watchlist_df=None) -> Dict:
-    logs, sent, alerts_df = [], 0, load_alerts()
-    universe = sorted(list(set([p["Ticker"] for p in portfolio] + (watchlist_df[watchlist_df["Enabled"]]["Ticker"].tolist() if not watchlist_df.empty else []))))
+    logs, alerts_df = [], load_alerts()
+    session = get_market_session()
+
+    universe = sorted(list(set(
+        [p["Ticker"] for p in portfolio] +
+        (watchlist_df[watchlist_df["Enabled"]]["Ticker"].tolist() if watchlist_df is not None and not watchlist_df.empty else [])
+    )))
+
+    candidates = []   # (score, ticker, action, det, note)
+
     for tk in universe:
         h = get_unified_analysis(tk)
         if h is None: continue
-        sc, act, det, note = evaluate_strategy(tk, h, 0, 0, total_assets, cash, market_regime, 0, portfolio)
-        if act != "WATCH" and should_send_alert(alerts_df, tk, act, det["close"], sc, get_market_session()):
-            if send_telegram_msg(f"{tk} 觸發 {act} (分數: {sc:.1f})"): log_sent_alert(tk, act, det["close"], sc, get_market_session(), det["target_buy_price"], "")
-    return {"logs": ["掃描完成"], "metrics": {"universe_count": len(universe)}}
+        held = next((p["Shares"] for p in portfolio if p["Ticker"] == tk), 0)
+        mkt_val = next((p["MarketValue"] for p in portfolio if p["Ticker"] == tk), 0)
+        sc, act, det, note = evaluate_strategy(tk, h, held, mkt_val, total_assets, cash, market_regime, 0, portfolio)
+        candidates.append({"ticker": tk, "score": sc, "action": act, "details": det, "note": note})
+
+        # Telegram alert
+        if act != "WATCH" and should_send_alert(alerts_df, tk, act, det["close"], sc, session):
+            action_emoji = "🟢" if "BUY" in act else "🔴"
+            msg = f"{action_emoji} *{tk}* `{act}` | 分數: {sc:.1f}\n{note}"
+            if send_telegram_msg(msg):
+                log_sent_alert(tk, act, det["close"], sc, session, det.get("target_buy_price"), "")
+
+    # Sort: exit signals first, then by score descending
+    candidates.sort(key=lambda x: (0 if "SELL" in x["action"] else 1, -x["score"]))
+    top_buys   = [c for c in candidates if "BUY"  in c["action"]][:SCANNER_TOP_N]
+    top_exits  = [c for c in candidates if "SELL" in c["action"]]
+    top_watch  = [c for c in candidates if c["action"] == "WATCH"][:5]
+
+    return {
+        "candidates": candidates,
+        "top_buys": top_buys,
+        "top_exits": top_exits,
+        "top_watch": top_watch,
+        "logs": ["掃描完成"],
+        "metrics": {
+            "universe_count": len(universe),
+            "buy_signals": len(top_buys),
+            "sell_signals": len(top_exits),
+        },
+    }
 
 def calculate_performance_metrics(history_df: pd.DataFrame) -> Dict:
-    if history_df.empty or len(history_df) < 2: return {"max_drawdown_pct": None, "sharpe": None}
+    if history_df.empty or len(history_df) < 2:
+        return {"max_drawdown_pct": None, "sharpe": None, "win_rate": None, "total_return_pct": None}
     nav = pd.to_numeric(history_df["TotalAssets"], errors="coerce").dropna()
     rets = nav.pct_change().dropna()
+    total_ret = (nav.iloc[-1] / nav.iloc[0] - 1) * 100 if nav.iloc[0] > 0 else 0
+    win_rate = (rets > 0).sum() / len(rets) * 100 if len(rets) > 0 else None
     return {
         "max_drawdown_pct": ((nav / nav.cummax() - 1).min() * 100) if not nav.empty else 0,
-        "sharpe": (rets.mean() / rets.std() * (252**0.5)) if len(rets)>1 and rets.std()>0 else None
+        "sharpe": (rets.mean() / rets.std() * (252 ** 0.5)) if len(rets) > 1 and rets.std() > 0 else None,
+        "win_rate": win_rate,
+        "total_return_pct": total_ret,
     }
 
 def build_trade_preview(trades_df, initial_capital, ticker, trade_type, price, shares, fee) -> Dict:
     port, c, _ = build_portfolio(trades_df, initial_capital)
     tot = c + sum(x["MarketValue"] for x in port)
     net = price * shares * (1 + DEFAULT_SLIPPAGE_PCT) + fee if trade_type == "BUY" else price * shares * (1 - DEFAULT_SLIPPAGE_PCT) - fee
-    return {"current_cash": c, "after_cash": c - net if trade_type == "BUY" else c + net, "gross_total": price * shares, "fee": fee, "slippage": price*shares*DEFAULT_SLIPPAGE_PCT, "current_weight_pct": 0, "after_weight_pct": 0, "bucket": "LARGE_CAP", "bucket_max_weight_pct": 25, "exceed_max_weight": False, "sell_exceeds_position": False}
+    return {
+        "current_cash": c,
+        "after_cash": c - net if trade_type == "BUY" else c + net,
+        "gross_total": price * shares,
+        "fee": fee,
+        "slippage": price * shares * DEFAULT_SLIPPAGE_PCT,
+        "current_weight_pct": 0, "after_weight_pct": 0,
+        "bucket": "LARGE_CAP", "bucket_max_weight_pct": 25,
+        "exceed_max_weight": False, "sell_exceeds_position": False
+    }
