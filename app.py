@@ -1,219 +1,930 @@
-from datetime import date, datetime, time as dtime
+"""
+量化投資組合 Pro  ·  v3.0
+Mobile-first · Bloomberg Terminal aesthetic · Dark precision UI
+"""
+from datetime import datetime
 import pandas as pd
 import plotly.graph_objects as go
-import streamlit as st
 from plotly.subplots import make_subplots
+import streamlit as st
 
 from core import (
     DEFAULT_COMMISSION, DEFAULT_INITIAL_CAPITAL, DEFAULT_SLIPPAGE_PCT,
     build_portfolio, build_trade_preview, calculate_performance_metrics,
-    calc_portfolio_heat, clear_market_cache, color_pl, display_divergence,
-    display_market_regime, enrich_portfolio_with_weight_and_risk,
-    evaluate_strategy, get_market_regime, get_recent_trade_status,
-    get_sp500_tickers, get_unified_analysis, load_alerts, load_history,
-    load_signals, load_trades, load_watchlist, maybe_log_daily_history,
-    normalize_ticker, run_auto_scanner, save_trade, save_watchlist,
-    send_telegram_msg, delete_watchlist_ticker, set_watchlist_enabled,
+    calc_portfolio_heat, clear_market_cache, color_pl, display_market_regime,
+    enrich_portfolio_with_weight_and_risk, evaluate_strategy,
+    get_market_regime, get_market_session, get_unified_analysis,
+    load_alerts, load_history, load_signals, load_trades, load_watchlist,
+    maybe_log_daily_history, normalize_ticker, run_auto_scanner,
+    save_trade, save_watchlist, send_telegram_msg,
+    delete_watchlist_ticker, set_watchlist_enabled,
 )
 
-st.set_page_config(page_title="量化投資組合 Pro", layout="wide", initial_sidebar_state="collapsed")
-
-# ===============================
-# RWD UI CSS 注入 (針對折疊機與手機)
-# ===============================
-st.markdown(
-    """
-    <style>
-    /* 全域字體與間距微調 */
-    [data-testid="stMetricValue"] { font-size: 1.4rem !important; font-weight: 700; white-space: nowrap !important; }
-    [data-testid="stMetricLabel"] { font-size: 0.9rem !important; color: #a0a0a0; }
-    .stMetric { border: 1px solid rgba(255, 255, 255, 0.1); padding: 12px !important; border-radius: 12px; background: rgba(255,255,255,0.03); }
-    
-    /* 質感卡片設計 */
-    .mobile-card { border: 1px solid rgba(255,255,255,0.15); border-radius: 16px; padding: 16px; margin-bottom: 12px; background: linear-gradient(145deg, rgba(30,30,30,0.6) 0%, rgba(15,15,15,0.9) 100%); box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
-    .mobile-card-title { font-size: 1.15rem; font-weight: 800; margin-bottom: 8px; color: #E0E0E0; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 4px; }
-    .mobile-card-text { font-size: 0.95rem; line-height: 1.6; color: #C0C0C0; }
-    .price-box { background: rgba(23, 190, 207, 0.1); padding: 16px; border-radius: 12px; border-left: 6px solid #17BECF; margin-bottom: 16px; }
-    .action-box { margin-top: 8px; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; font-size: 0.9rem; }
-
-    /* RWD 響應式：手機與摺疊外螢幕 */
-    @media (max-width: 600px) {
-        [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
-        .stMetric { padding: 8px !important; }
-    }
-    
-    /* RWD 響應式：摺疊機內螢幕 */
-    @media (min-width: 601px) and (max-width: 900px) {
-        .mobile-card { padding: 20px; }
-        .mobile-card-title { font-size: 1.3rem; }
-    }
-    </style>
-    """, unsafe_allow_html=True
+# ─────────────────────────────────────────────────────────────────────────────
+# Page config
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="量化 Pro",
+    page_icon="📈",
+    layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-def render_signal_card(title: str, light: str, status: str, desc: str, value_text: str):
-    st.markdown(
-        f"""
-        <div style="border:1px solid rgba(255,255,255,0.15); border-radius:14px; padding:16px; margin-bottom:12px; background: rgba(25,25,25,0.6);">
-            <div style="font-size:0.9rem; color:#A0A0A0;">{title}</div>
-            <div style="font-size:1.5rem; font-weight:700; margin:4px 0;">{light} {value_text}</div>
-            <div style="font-size:1.05rem; font-weight:600; color:#E0E0E0;">{status}</div>
-            <div style="font-size:0.85rem; color:#A8A8A8; margin-top:4px;">{desc}</div>
-        </div>
-        """, unsafe_allow_html=True
-    )
+# ─────────────────────────────────────────────────────────────────────────────
+# Global CSS — Bloomberg Terminal × iOS precision
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
 
-# session defaults
-for k, v in {"trade_ticker": "NVDA", "trade_type": "BUY", "trade_price": 100.0, "trade_shares": 1.0, "trade_note": "", "trade_fee": DEFAULT_COMMISSION}.items():
-    if k not in st.session_state: st.session_state[k] = v
+/* ── Reset & base ───────────────────────────────────────────────────────── */
+:root {
+  --bg:         #07080D;
+  --surface:    #0F1118;
+  --surface2:   #161923;
+  --border:     rgba(255,255,255,0.07);
+  --border2:    rgba(255,255,255,0.12);
+  --text:       #E8EAF0;
+  --muted:      #636B80;
+  --cyan:       #00D4FF;
+  --green:      #00E5A0;
+  --red:        #FF3366;
+  --gold:       #FFB800;
+  --purple:     #9B6DFF;
+  --mono:       'JetBrains Mono', monospace;
+  --sans:       'DM Sans', sans-serif;
+}
 
-# ===============================
-# Sidebar & Data Init
-# ===============================
-st.sidebar.title("🎮 終端控制")
-mobile_mode = st.sidebar.toggle("📱 強制切換卡片流佈局", value=True, help="推薦手機與摺疊機使用者開啟")
-if st.sidebar.button("🔄 刷新快取 (Sync)"): clear_market_cache(); st.rerun()
+html, body, [data-testid="stAppViewContainer"] {
+  background: var(--bg) !important;
+  color: var(--text);
+  font-family: var(--sans);
+}
 
-initial_capital = st.sidebar.number_input("初始資金 (USD)", min_value=1000.0, value=float(DEFAULT_INITIAL_CAPITAL), step=1000.0)
+/* hide default streamlit chrome */
+#MainMenu, footer, header { visibility: hidden; }
+[data-testid="stSidebarNav"] { display: none; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+
+/* ── Typography ─────────────────────────────────────────────────────────── */
+h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--text); }
+.mono { font-family: var(--mono); }
+
+/* ── Streamlit overrides ────────────────────────────────────────────────── */
+[data-testid="stMetricValue"] {
+  font-family: var(--mono) !important;
+  font-size: 1.35rem !important;
+  font-weight: 700 !important;
+  color: var(--text) !important;
+  letter-spacing: -0.02em;
+}
+[data-testid="stMetricLabel"] {
+  font-size: 0.72rem !important;
+  color: var(--muted) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--sans) !important;
+}
+[data-testid="stMetricDelta"] { font-size: 0.78rem !important; font-family: var(--mono) !important; }
+
+.stMetric {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+  padding: 14px 16px !important;
+}
+
+/* Tab bar */
+[data-baseweb="tab-list"] {
+  background: var(--surface) !important;
+  border-radius: 12px !important;
+  padding: 4px !important;
+  gap: 2px !important;
+  border: 1px solid var(--border) !important;
+}
+[data-baseweb="tab"] {
+  background: transparent !important;
+  color: var(--muted) !important;
+  border-radius: 8px !important;
+  font-size: 0.78rem !important;
+  font-weight: 600 !important;
+  font-family: var(--sans) !important;
+  padding: 6px 12px !important;
+  transition: all 0.2s;
+}
+[aria-selected="true"][data-baseweb="tab"] {
+  background: var(--cyan) !important;
+  color: #000 !important;
+}
+
+/* Buttons */
+.stButton > button {
+  background: var(--surface2) !important;
+  border: 1px solid var(--border2) !important;
+  color: var(--text) !important;
+  border-radius: 10px !important;
+  font-family: var(--sans) !important;
+  font-weight: 600 !important;
+  font-size: 0.85rem !important;
+  transition: all 0.2s;
+}
+.stButton > button:hover {
+  border-color: var(--cyan) !important;
+  color: var(--cyan) !important;
+}
+
+/* Inputs */
+.stTextInput > div > div > input,
+.stNumberInput > div > div > input,
+.stSelectbox > div > div {
+  background: var(--surface2) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: 10px !important;
+  color: var(--text) !important;
+  font-family: var(--mono) !important;
+  font-size: 0.9rem !important;
+}
+
+/* Expanders */
+[data-testid="stExpander"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 12px !important;
+}
+
+/* ── Custom components ──────────────────────────────────────────────────── */
+
+/* Top header bar */
+.qp-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 0 20px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+}
+.qp-logo {
+  font-family: var(--mono);
+  font-size: 1.1rem; font-weight: 700;
+  color: var(--cyan);
+  letter-spacing: -0.02em;
+}
+.qp-logo span { color: var(--muted); font-weight: 400; }
+
+/* Regime + session badges */
+.badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.72rem; font-weight: 700;
+  font-family: var(--sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.badge-on  { background: rgba(0,229,160,0.15); color: var(--green); border: 1px solid rgba(0,229,160,0.3); }
+.badge-off { background: rgba(255,51,102,0.15); color: var(--red);   border: 1px solid rgba(255,51,102,0.3); }
+.badge-neu { background: rgba(255,184,0,0.12);  color: var(--gold);  border: 1px solid rgba(255,184,0,0.25); }
+.badge-session { background: rgba(0,212,255,0.1); color: var(--cyan); border: 1px solid rgba(0,212,255,0.25); }
+.badge-closed  { background: rgba(99,107,128,0.15); color: var(--muted); border: 1px solid var(--border2); }
+
+/* Portfolio card */
+.pc {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 10px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.2s;
+}
+.pc:hover { border-color: var(--border2); }
+.pc-accent {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  border-radius: 16px 0 0 16px;
+}
+.pc-header {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  margin-bottom: 10px;
+}
+.pc-ticker {
+  font-family: var(--mono); font-size: 1.05rem; font-weight: 700;
+  color: var(--text); letter-spacing: -0.01em;
+}
+.pc-meta { font-size: 0.7rem; color: var(--muted); font-family: var(--sans); }
+.pc-signal {
+  font-size: 0.65rem; font-weight: 700; font-family: var(--sans);
+  padding: 3px 8px; border-radius: 999px; text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.sig-buy  { background: rgba(0,229,160,0.15); color: var(--green); border: 1px solid rgba(0,229,160,0.35); }
+.sig-sell { background: rgba(255,51,102,0.15); color: var(--red);   border: 1px solid rgba(255,51,102,0.35); }
+.sig-add  { background: rgba(0,212,255,0.12); color: var(--cyan);  border: 1px solid rgba(0,212,255,0.3); }
+.sig-part { background: rgba(255,184,0,0.12); color: var(--gold);  border: 1px solid rgba(255,184,0,0.3); }
+.sig-watch{ background: rgba(99,107,128,0.15); color: var(--muted); border: 1px solid var(--border2); }
+
+.pc-pl-positive { color: var(--green); font-family: var(--mono); font-weight: 700; }
+.pc-pl-negative { color: var(--red);   font-family: var(--mono); font-weight: 700; }
+.pc-pl-zero     { color: var(--muted); font-family: var(--mono); font-weight: 700; }
+
+.pc-grid {
+  display: grid; grid-template-columns: 1fr 1fr;
+  gap: 6px 16px; margin-top: 8px;
+}
+.pc-kv { display: flex; flex-direction: column; }
+.pc-kv-label { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--sans); }
+.pc-kv-value { font-size: 0.88rem; font-family: var(--mono); color: var(--text); font-weight: 600; }
+
+/* Weight bar */
+.wbar-bg { background: var(--surface2); border-radius: 999px; height: 4px; margin-top: 10px; }
+.wbar-fill { height: 4px; border-radius: 999px; transition: width 0.4s; }
+
+/* Action strip */
+.action-strip {
+  margin-top: 12px; padding: 10px 12px;
+  background: var(--surface2); border-radius: 10px;
+  font-size: 0.8rem; color: var(--text);
+  border-left: 3px solid var(--cyan);
+  font-family: var(--sans);
+}
+
+/* Scanner card */
+.sc-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 14px; padding: 14px 16px; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 14px;
+}
+.sc-rank {
+  font-family: var(--mono); font-size: 0.75rem; color: var(--muted);
+  min-width: 24px; text-align: center;
+}
+.sc-ticker {
+  font-family: var(--mono); font-size: 1rem; font-weight: 700; color: var(--text);
+}
+.sc-score {
+  font-family: var(--mono); font-size: 0.85rem; color: var(--cyan); font-weight: 600;
+}
+.sc-reason { font-size: 0.75rem; color: var(--muted); margin-top: 2px; font-family: var(--sans); }
+
+/* Score bar */
+.sbar { background: var(--surface2); border-radius: 999px; height: 3px; flex: 1; }
+.sbar-fill { height: 3px; border-radius: 999px; background: linear-gradient(90deg, var(--cyan), var(--green)); }
+
+/* Perf stat grid */
+.pstat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pstat {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 14px;
+}
+.pstat-label { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-family: var(--sans); }
+.pstat-value { font-family: var(--mono); font-size: 1.2rem; font-weight: 700; margin-top: 4px; }
+
+/* Divider */
+.qdiv { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
+
+/* Section heading */
+.qsec { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: var(--sans); font-weight: 700; margin: 18px 0 10px; }
+
+/* VIX meter */
+.vix-bar { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.vix-label { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); min-width: 36px; }
+.vix-track { flex: 1; background: var(--surface2); border-radius: 999px; height: 6px; }
+.vix-fill { height: 6px; border-radius: 999px; }
+
+/* Mobile breakpoints */
+@media (max-width: 600px) {
+  [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+  .pc { padding: 14px; }
+  .pc-ticker { font-size: 0.95rem; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+def signal_badge(signal: str) -> str:
+    signal = str(signal).upper()
+    if "BUY_NOW"    in signal: return f'<span class="pc-signal sig-buy">▲ 買進</span>'
+    if "BUY_ADD"    in signal: return f'<span class="pc-signal sig-add">＋ 加碼</span>'
+    if "SELL_EXIT"  in signal: return f'<span class="pc-signal sig-sell">▼ 出場</span>'
+    if "SELL_PART"  in signal: return f'<span class="pc-signal sig-part">◑ 減碼</span>'
+    return f'<span class="pc-signal sig-watch">— 觀望</span>'
+
+def regime_badge(regime: str, vix) -> str:
+    label = display_market_regime(regime)
+    vix_str = f" VIX {vix:.1f}" if vix else ""
+    if regime == "RISK_ON":  return f'<span class="badge badge-on">🟢 {label}{vix_str}</span>'
+    if regime == "RISK_OFF": return f'<span class="badge badge-off">🔴 {label}{vix_str}</span>'
+    return f'<span class="badge badge-neu">🟡 {label}{vix_str}</span>'
+
+def session_badge(session: str) -> str:
+    labels = {"REGULAR": ("正常盤", "badge-session"), "PREMARKET": ("盤前", "badge-session"),
+              "AFTERMARKET": ("盤後", "badge-session"), "CLOSED": ("休市", "badge-closed")}
+    lbl, cls = labels.get(session, (session, "badge-closed"))
+    return f'<span class="badge {cls}">{lbl}</span>'
+
+def pl_class(val: float) -> str:
+    if val > 0: return "pc-pl-positive"
+    if val < 0: return "pc-pl-negative"
+    return "pc-pl-zero"
+
+def fmt_dollar(v: float) -> str:
+    return f"${v:,.2f}"
+
+def fmt_pct(v: float) -> str:
+    sign = "+" if v > 0 else ""
+    return f"{sign}{v:.2f}%"
+
+def weight_bar(pct: float, max_pct: float = 25) -> str:
+    fill = min(100, pct / max_pct * 100)
+    colour = "#FF3366" if pct > max_pct * 0.9 else "#00D4FF"
+    return f'''<div class="wbar-bg"><div class="wbar-fill" style="width:{fill:.0f}%;background:{colour}"></div></div>'''
+
+def score_bar(score: float, max_score: float = 8) -> str:
+    fill = min(100, score / max_score * 100)
+    return f'''<div class="sbar"><div class="sbar-fill" style="width:{fill:.0f}%"></div></div>'''
+
+def action_tip(p: dict) -> str:
+    sig = p.get("Signal", "WATCH")
+    if "BUY_NOW" in sig:
+        return f'🛒 建議買進 <b>{p.get("SuggestedBuyQty", 0)} 股</b>，參考價 <b>${p["LastPrice"]:.2f}</b>'
+    if "BUY_ADD" in sig:
+        return f'➕ 建議加碼 <b>{p.get("SuggestedBuyQty", 0)} 股</b>，動能仍強，控制部位權重'
+    if "SELL_EXIT" in sig:
+        return f'⚠️ 跌破停損，建議出場 <b>{p.get("SuggestedSellQty", 0)} 股</b>，執行紀律'
+    if "SELL_PARTIAL" in sig:
+        return f'💰 到達 TP1，建議獲利了結 <b>{p.get("SuggestedSellQty", 0)} 股</b> (約 50%)'
+    return '👁 無強烈訊號，持續觀察。'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Data init
+# ─────────────────────────────────────────────────────────────────────────────
+if "init_capital" not in st.session_state:
+    st.session_state.init_capital = float(DEFAULT_INITIAL_CAPITAL)
+
+initial_capital = st.session_state.init_capital
 
 try:
-    trades_df, watchlist_df = load_trades(), load_watchlist()
-    history_df, alerts_df = load_history(), load_alerts()
-except:
-    trades_df, watchlist_df, history_df, alerts_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    trades_df    = load_trades()
+    watchlist_df = load_watchlist()
+    history_df   = load_history()
+    alerts_df    = load_alerts()
+except Exception:
+    trades_df = watchlist_df = history_df = alerts_df = pd.DataFrame()
 
 portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
-market_value = sum(x["MarketValue"] for x in portfolio_raw)
-total_assets, total_unrealized_pl = cash + market_value, sum(x["Unrealized"] for x in portfolio_raw)
-total_pl = total_assets - initial_capital
+market_value         = sum(x["MarketValue"] for x in portfolio_raw)
+total_assets         = cash + market_value
+total_unrealized_pl  = sum(x["Unrealized"]   for x in portfolio_raw)
+total_pl             = total_assets - initial_capital
 
 market_regime = get_market_regime()
-portfolio = enrich_portfolio_with_weight_and_risk(portfolio_raw, total_assets, cash, market_regime) if portfolio_raw else []
-heat_info, perf = calc_portfolio_heat(portfolio, total_assets), calculate_performance_metrics(history_df)
+portfolio     = enrich_portfolio_with_weight_and_risk(portfolio_raw, total_assets, cash, market_regime) if portfolio_raw else []
+heat_info     = calc_portfolio_heat(portfolio, total_assets)
+perf          = calculate_performance_metrics(history_df)
 
-# ===============================
-# Header
-# ===============================
-st.title("📈 量化組合 Pro")
-st.caption(f"Sync: {datetime.now().strftime('%m/%d %H:%M')} | 策略引擎在線")
+session = get_market_session()
 
-if mobile_mode:
-    st.markdown(f"**⚡ 摘要**：市場 {display_market_regime(market_regime['regime'])} | Heat {heat_info['heat_pct']:.1f}%")
-    r1, r2 = st.columns(2)
-    r1.metric("NAV", f"${total_assets:,.0f}")
-    r2.metric("總損益", f"${total_pl:,.0f}", f"{(total_pl/initial_capital*100):.2f}%")
-    r3, r4 = st.columns(2)
-    r3.metric("現金部位", f"${cash:,.0f}")
-    r4.metric("市場持倉", f"${market_value:,.0f}")
-else:
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("總資產 NAV", f"${total_assets:,.2f}")
-    m2.metric("現金 (購買力)", f"${cash:,.2f}")
-    m3.metric("持股市值", f"${market_value:,.2f}")
-    m4.metric("總損益", f"${total_pl:,.2f}", f"{(total_pl / initial_capital * 100):.2f}%")
+# ─────────────────────────────────────────────────────────────────────────────
+# Top header
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div class="qp-header">
+  <div class="qp-logo">QUANT<span>PRO</span></div>
+  <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+    {regime_badge(market_regime.get('regime','UNKNOWN'), market_regime.get('vix'))}
+    {session_badge(session)}
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
-tab1, tab2, tab3 = st.tabs(["📊 組合儀表", "🎯 策略中樞", "📝 交易終端"])
+# ─────────────────────────────────────────────────────────────────────────────
+# NAV summary bar (4 metrics)
+# ─────────────────────────────────────────────────────────────────────────────
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("NAV 總資產", fmt_dollar(total_assets))
+delta_pct = f"{(total_pl / initial_capital * 100):+.2f}%"
+c2.metric("總損益", fmt_dollar(total_pl), delta_pct)
+c3.metric("現金", fmt_dollar(cash))
+c4.metric("Portfolio Heat", f"{heat_info['heat_pct']:.1f}%")
 
-# ===============================
-# Tab 1: Dashboard
-# ===============================
+st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main tabs
+# ─────────────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效"
+])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — Portfolio Dashboard
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab1:
-    if portfolio:
-        # 在折疊機上，利用 Expander 節省空間
-        with st.expander("📍 資產配置圓餅圖", expanded=not mobile_mode):
-            pie_fig = go.Figure(data=[go.Pie(labels=[p["Ticker"] for p in portfolio], values=[p["MarketValue"] for p in portfolio], hole=0.5)])
-            pie_fig.update_layout(template="plotly_dark", height=300, margin=dict(l=0, r=0, t=20, b=0), showlegend=not mobile_mode)
-            st.plotly_chart(pie_fig, use_container_width=True, config={'displayModeBar': False})
-            
-        st.subheader("📋 目前持倉")
-        for p in sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True):
-            pl_color = "#00E676" if p["Unrealized"] > 0 else "#FF1744" if p["Unrealized"] < 0 else "#E0E0E0"
-            
-            # 【關鍵修正】：安全解析 StopLoss 與 TakeProfit1，避免因 None 產生的格式化錯誤與 '-'
-            sl_val = p.get('StopLoss')
-            sl_str = f"${sl_val:.2f}" if sl_val and pd.notna(sl_val) else "-"
-            tp_val = p.get('TakeProfit1')
-            tp_str = f"${tp_val:.2f}" if tp_val and pd.notna(tp_val) else "-"
-
-            # 【新增】：具體操作建議邏輯
-            signal = p.get('Signal', 'WATCH')
-            if "BUY" in signal:
-                buy_qty = p.get('SuggestedBuyQty', 0)
-                action_html = f"<div class='action-box'>🛒 <b>策略建議：</b><span style='color:#17BECF;'>建議加碼買進 {buy_qty} 股 (參考價: ${p['LastPrice']:.2f})</span></div>"
-            elif "SELL" in signal:
-                sell_qty = p.get('SuggestedSellQty', p['Shares'])
-                action_html = f"<div class='action-box'>📉 <b>策略建議：</b><span style='color:#FF1744;'>建議減碼/出場 {sell_qty} 股 (參考價: ${p['LastPrice']:.2f})</span></div>"
-            else:
-                action_html = f"<div class='action-box'>👀 <b>策略建議：</b>目前無強烈訊號，建議持續觀望。</div>"
-
-            st.markdown(
-                f"""
-                <div class="mobile-card">
-                    <div class="mobile-card-title">{p['Ticker']} <span style="float:right; font-size:0.9rem; color:#17BECF;">{signal}</span></div>
-                    <div class="mobile-card-text">
-                        權重：<b>{p['WeightPct']:.1f}%</b> | 價值：${p['MarketValue']:,.0f}<br>
-                        報酬：<span style="color:{pl_color}; font-weight:bold;">{p['PL_Pct']:.2f}% (${p['Unrealized']:,.0f})</span><br>
-                        現價：${p['LastPrice']:.2f} | 成本：${p['AvgCost']:.2f}<br>
-                        停損/目標：{sl_str} / {tp_str}
-                    </div>
-                    {action_html}
-                </div>
-                """, unsafe_allow_html=True
-            )
+    if not portfolio:
+        st.info("目前無持倉。在「交易」頁籤新增第一筆買進紀錄。")
     else:
-        st.info("目前無持倉。")
+        # Pie chart in expander to save space
+        with st.expander("資產配置圖", expanded=False):
+            labels = [p["Ticker"] for p in portfolio]
+            values = [p["MarketValue"] for p in portfolio]
+            colours = ["#00D4FF", "#00E5A0", "#FFB800", "#9B6DFF", "#FF3366",
+                       "#FF8C42", "#4CC9F0", "#7BFF6A", "#F72585"][:len(labels)]
+            pie = go.Figure(go.Pie(
+                labels=labels, values=values, hole=0.6,
+                marker=dict(colors=colours, line=dict(color="#07080D", width=2)),
+                textfont=dict(family="JetBrains Mono", size=11),
+            ))
+            pie.update_layout(
+                template="plotly_dark", height=260,
+                margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                showlegend=True,
+                legend=dict(font=dict(family="DM Sans", size=11), orientation="h", yanchor="bottom", y=-0.2),
+            )
+            st.plotly_chart(pie, use_container_width=True, config={"displayModeBar": False})
 
-# ===============================
-# Tab 2: Strategy (Alpha)
-# ===============================
+        st.markdown('<div class="qsec">持倉明細</div>', unsafe_allow_html=True)
+
+        for p in sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True):
+            sig   = p.get("Signal", "WATCH")
+            pl    = p.get("Unrealized", 0)
+            pl_p  = p.get("PL_Pct", 0)
+
+            sl_val = p.get("StopLoss");  sl_str = f"${sl_val:.2f}" if sl_val and pd.notna(sl_val) else "—"
+            tp_val = p.get("TakeProfit1"); tp_str = f"${tp_val:.2f}" if tp_val and pd.notna(tp_val) else "—"
+            rs_val = p.get("RS20vsSPY", 0); rs_str = f"{rs_val:+.1f}%" if rs_val else "—"
+            sc_val = p.get("SignalScore", 0)
+
+            # Accent colour
+            if "BUY_NOW" in sig:  accent = "#00E5A0"
+            elif "BUY_ADD" in sig: accent = "#00D4FF"
+            elif "SELL" in sig:    accent = "#FF3366"
+            else:                  accent = "#636B80"
+
+            bucket_label = "Large" if p.get("Bucket", "LARGE_CAP") == "LARGE_CAP" else "Small"
+
+            st.markdown(f"""
+<div class="pc">
+  <div class="pc-accent" style="background:{accent}"></div>
+  <div class="pc-header">
+    <div>
+      <div class="pc-ticker">{p['Ticker']} <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_label}</span></div>
+      <div class="pc-meta">{p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}</div>
+    </div>
+    <div style="text-align:right">
+      {signal_badge(sig)}
+      <div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">分數 {sc_val:.1f}</div>
+    </div>
+  </div>
+
+  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
+    <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">${p['LastPrice']:.2f}</span>
+    <span class="{pl_class(pl)}" style="font-size:0.88rem">{fmt_pct(pl_p)}&nbsp;&nbsp;{fmt_dollar(pl)}</span>
+  </div>
+
+  {weight_bar(p.get('WeightPct', 0))}
+
+  <div class="pc-grid">
+    <div class="pc-kv"><span class="pc-kv-label">停損</span><span class="pc-kv-value">{sl_str}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">目標1</span><span class="pc-kv-value">{tp_str}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">RS vs SPY</span><span class="pc-kv-value" style="color:{'var(--green)' if (rs_val or 0)>0 else 'var(--red)'}">{rs_str}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">部位權重</span><span class="pc-kv-value">{p.get('WeightPct',0):.1f}%</span></div>
+  </div>
+
+  <div class="action-strip">{action_tip(p)}</div>
+</div>
+""", unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Auto Scanner
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
-    st.subheader("🎯 策略分析 (含布林擠壓 Squeeze)")
-    analyze_ticker = normalize_ticker(st.text_input("輸入股票代碼 (e.g. NVDA)", value="NVDA"))
-    
-    if st.button("🚀 執行策略運算"):
-        hist = get_unified_analysis(analyze_ticker)
-        if hist is not None:
-            held_shares = next((p["Shares"] for p in portfolio if p["Ticker"] == analyze_ticker), 0)
-            score, action, details, note = evaluate_strategy(analyze_ticker, hist, held_shares, 0, total_assets, cash, market_regime, heat_info["heat_pct"], portfolio)
-            
-            st.markdown(f'<div class="price-box">動能分數: <span style="font-size: 1.5rem; color:#17BECF;">{score:.1f}</span> | {action}</div>', unsafe_allow_html=True)
-            st.markdown(f"**分析依據**：{note}")
-            
-            # 【新增】：具體買賣股數與價位建議提示匡
-            if "BUY" in action:
-                st.success(f"🛒 **操作建議**：系統建議 **買進 {details['suggested_buy_qty']} 股** (參考現價/突破價: **${details['close']:.2f}**)。")
-            elif "SELL" in action:
-                st.warning(f"📉 **操作建議**：系統建議 **賣出 {details['suggested_sell_qty']} 股** (參考現價/跌破價: **${details['close']:.2f}**)。")
-            else:
-                st.info("👀 **操作建議**：目前未達動能突破門檻或已跌破停損，建議 **觀望 (WATCH)**。")
-            
-            # 手機適配技術圖
-            plot_df = hist.tail(100)
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.7, 0.3], vertical_spacing=0.05)
-            fig.add_trace(go.Candlestick(x=plot_df.index, open=plot_df["Open"], high=plot_df["High"], low=plot_df["Low"], close=plot_df["Close"], name="K"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_upper"], line=dict(color='rgba(255,255,255,0.3)', dash='dot')), row=1, col=1)
-            fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df["BB_lower"], fill='tonexty', fillcolor='rgba(23,190,207,0.05)', line=dict(color='rgba(255,255,255,0.3)', dash='dot')), row=1, col=1)
-            fig.add_trace(go.Bar(x=plot_df.index, y=plot_df["MACD_Hist"], marker_color=plot_df["MACD_Hist"].apply(lambda x: '#00E676' if x>0 else '#FF1744')), row=2, col=1)
-            
-            fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0, r=0, t=10, b=0), xaxis_rangeslider_visible=False, showlegend=False)
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False, 'scrollZoom': False})
-        else:
-            st.error("查無資料")
+    st.markdown('<div class="qsec">自動掃描器</div>', unsafe_allow_html=True)
 
-# ===============================
-# Tab 3: Trade Terminal
-# ===============================
+    col_a, col_b = st.columns([3, 1])
+    with col_a:
+        add_ticker = st.text_input("新增至 Watchlist", placeholder="AAPL, TSLA …", label_visibility="collapsed")
+    with col_b:
+        if st.button("＋ 加入", use_container_width=True):
+            for t in [x.strip() for x in add_ticker.split(",") if x.strip()]:
+                ok, msg = save_watchlist(normalize_ticker(t))
+                st.toast(msg, icon="✅" if ok else "❌")
+
+    if st.button("🔄 執行完整掃描", use_container_width=True):
+        with st.spinner("掃描中 …"):
+            result = run_auto_scanner(
+                portfolio=portfolio, trades_df=trades_df,
+                cash=cash, total_assets=total_assets,
+                market_regime=market_regime, watchlist_df=watchlist_df,
+            )
+        st.session_state["scan_result"] = result
+        st.rerun()
+
+    result = st.session_state.get("scan_result")
+    if result:
+        m = result["metrics"]
+        ma, mb, mc = st.columns(3)
+        ma.metric("掃描標的", m.get("universe_count", 0))
+        mb.metric("買進訊號", m.get("buy_signals", 0))
+        mc.metric("出場訊號", m.get("sell_signals", 0))
+
+        # Exit alerts (priority)
+        exits = result.get("top_exits", [])
+        if exits:
+            st.markdown('<div class="qsec" style="color:var(--red)">⚠️ 出場訊號</div>', unsafe_allow_html=True)
+            for c in exits:
+                det = c["details"]
+                st.markdown(f"""
+<div class="sc-card" style="border-color:rgba(255,51,102,0.35)">
+  <div class="sc-rank">🔴</div>
+  <div style="flex:1">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div class="sc-ticker">{c['ticker']}</div>
+      <div style="font-family:var(--mono);font-size:0.85rem;color:var(--red)">${det['close']:.2f}</div>
+    </div>
+    <div class="sc-reason">{c['note']}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+        # Buy signals ranked
+        buys = result.get("top_buys", [])
+        if buys:
+            st.markdown('<div class="qsec">🟢 買進機會 (依強度排序)</div>', unsafe_allow_html=True)
+            for i, c in enumerate(buys, 1):
+                det = c["details"]
+                rs_c = "var(--green)" if det.get("rs20_vs_spy", 0) > 0 else "var(--red)"
+                st.markdown(f"""
+<div class="sc-card">
+  <div class="sc-rank">{i}</div>
+  <div style="flex:1">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;">
+      <div>
+        <div class="sc-ticker">{c['ticker']}</div>
+        <div class="sc-reason">{c['note'][:80]}</div>
+      </div>
+      <div style="text-align:right;min-width:72px;">
+        <div class="sc-score">{c['score']:.1f}</div>
+        <div style="font-size:0.68rem;color:{rs_c};font-family:var(--mono)">RS {det.get('rs20_vs_spy',0):+.1f}%</div>
+      </div>
+    </div>
+    {score_bar(c['score'])}
+  </div>
+</div>""", unsafe_allow_html=True)
+    else:
+        # Watchlist table when no scan run
+        if not watchlist_df.empty:
+            st.markdown('<div class="qsec">Watchlist</div>', unsafe_allow_html=True)
+            wl = watchlist_df[["Ticker", "Enabled", "Category", "Note"]].copy()
+            wl["Enabled"] = wl["Enabled"].map({True: "✅", False: "⏸"})
+            st.dataframe(wl, use_container_width=True, hide_index=True)
+        else:
+            st.info("Watchlist 空白。輸入代碼後按「＋ 加入」。")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 3 — Strategy Analysis (single stock deep-dive)
+# ═══════════════════════════════════════════════════════════════════════════════
 with tab3:
-    st.subheader("⚡ 快速下單終端")
-    with st.form("trade_form"):
-        t1, t2 = st.columns(2)
-        tk = t1.text_input("Ticker", value=st.session_state["trade_ticker"])
-        tp = t2.selectbox("方向", ["BUY", "SELL"])
+    st.markdown('<div class="qsec">單股策略分析</div>', unsafe_allow_html=True)
+
+    analyze_ticker = normalize_ticker(
+        st.text_input("股票代碼", value="NVDA", label_visibility="collapsed", placeholder="輸入代碼如 NVDA …")
+    )
+
+    if st.button("🚀 執行分析", use_container_width=True):
+        with st.spinner(f"分析 {analyze_ticker} …"):
+            hist = get_unified_analysis(analyze_ticker)
+
+        if hist is None:
+            st.error(f"無法取得 {analyze_ticker} 資料，請確認代碼。")
+        else:
+            held = next((p["Shares"] for p in portfolio if p["Ticker"] == analyze_ticker), 0)
+            mkt_val = next((p["MarketValue"] for p in portfolio if p["Ticker"] == analyze_ticker), 0)
+            score, action, det, note = evaluate_strategy(
+                analyze_ticker, hist, held, mkt_val,
+                total_assets, cash, market_regime,
+                heat_info["heat_pct"], portfolio,
+            )
+            last = hist.iloc[-1]
+
+            # ── Score + action pill ──────────────────────────────────────────
+            score_colour = "#00E5A0" if score >= 5 else "#00D4FF" if score >= 3 else "#FFB800" if score >= 1.5 else "#FF3366"
+            action_map = {
+                "BUY_NOW":      ("🛒 立即買進", "var(--green)"),
+                "BUY_ADD":      ("➕ 加碼買進", "var(--cyan)"),
+                "SELL_EXIT":    ("⚠️ 立即出場", "var(--red)"),
+                "SELL_PARTIAL": ("◑ 部分獲利", "var(--gold)"),
+                "WATCH":        ("👁 觀望", "var(--muted)"),
+            }
+            act_label, act_colour = action_map.get(action, ("— 觀望", "var(--muted)"))
+
+            st.markdown(f"""
+<div class="pc" style="margin-bottom:14px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <div>
+      <div style="font-family:var(--mono);font-size:1.5rem;font-weight:700;color:{score_colour}">{score:.1f}</div>
+      <div style="font-size:0.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em">動能分數</div>
+    </div>
+    <div style="text-align:right;">
+      <div style="font-size:1.1rem;font-weight:700;color:{act_colour}">{act_label}</div>
+      <div style="font-size:0.72rem;color:var(--muted);margin-top:2px">{det['strategy_mode']}</div>
+    </div>
+  </div>
+  {score_bar(score)}
+</div>
+""", unsafe_allow_html=True)
+
+            # ── Key stats ──────────────────────────────────────────────────
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("現價",   f"${det['close']:.2f}")
+            k2.metric("RSI",   f"{det['rsi']:.1f}")
+            k3.metric("ATR",   f"${det['atr']:.2f}")
+            k4.metric("ADX",   f"{det.get('adx', 0):.1f}")
+
+            k5, k6, k7, k8 = st.columns(4)
+            k5.metric("停損",   f"${det['stop_loss']:.2f}")
+            k6.metric("目標 1", f"${det['take_profit_1']:.2f}")
+            k7.metric("目標 2", f"${det['take_profit_2']:.2f}")
+            k8.metric("RS vs SPY", f"{det.get('rs20_vs_spy', 0):+.1f}%")
+
+            # ── Action recommendation ──────────────────────────────────────
+            if "BUY" in action:
+                st.success(f"🛒 建議 **{action}** — 參考數量：**{det['suggested_buy_qty']} 股** @ ${det['close']:.2f}")
+            elif "SELL" in action:
+                st.warning(f"📉 建議 **{action}** — 參考數量：**{det['suggested_sell_qty']} 股** @ ${det['close']:.2f}")
+            else:
+                st.info(f"👁 {note if note != 'No Signal' else '目前無強烈訊號，建議觀望'}")
+
+            if det.get("is_squeeze"):
+                st.warning("📦 **Bollinger Squeeze 偵測到** — 波動率極低，市場即將表態，密切注意突破方向。")
+
+            if det.get("earnings_blocked"):
+                st.error("⚠️ **財報封鎖期** — 距離財報 ≤2 天，策略建議暫停操作。")
+
+            # ── Technical chart ────────────────────────────────────────────
+            st.markdown('<div class="qsec">技術圖表 (近 90 日)</div>', unsafe_allow_html=True)
+            plot_df = hist.tail(90)
+            fig = make_subplots(
+                rows=3, cols=1, shared_xaxes=True,
+                row_heights=[0.55, 0.25, 0.20],
+                vertical_spacing=0.04,
+                subplot_titles=("", "MACD", "RSI"),
+            )
+
+            # Candlestick
+            fig.add_trace(go.Candlestick(
+                x=plot_df.index, open=plot_df["Open"], high=plot_df["High"],
+                low=plot_df["Low"], close=plot_df["Close"], name="K線",
+                increasing_fillcolor="#00E5A0", increasing_line_color="#00E5A0",
+                decreasing_fillcolor="#FF3366", decreasing_line_color="#FF3366",
+            ), row=1, col=1)
+
+            for sma_col, sma_col_name, sma_colour in [
+                ("SMA20", "SMA20", "#FFB800"), ("SMA50", "SMA50", "#00D4FF"), ("SMA200", "SMA200", "#9B6DFF")
+            ]:
+                fig.add_trace(go.Scatter(
+                    x=plot_df.index, y=plot_df[sma_col], name=sma_col_name,
+                    line=dict(color=sma_colour, width=1.2, dash="dot"), opacity=0.7,
+                ), row=1, col=1)
+
+            # Bollinger Bands
+            fig.add_trace(go.Scatter(
+                x=plot_df.index, y=plot_df["BB_upper"],
+                line=dict(color="rgba(255,255,255,0.15)", width=1),
+                showlegend=False,
+            ), row=1, col=1)
+            fig.add_trace(go.Scatter(
+                x=plot_df.index, y=plot_df["BB_lower"],
+                fill="tonexty", fillcolor="rgba(0,212,255,0.04)",
+                line=dict(color="rgba(255,255,255,0.15)", width=1),
+                showlegend=False,
+            ), row=1, col=1)
+
+            # MACD
+            hist_colours = ["#00E5A0" if v > 0 else "#FF3366" for v in plot_df["MACD_Hist"]]
+            fig.add_trace(go.Bar(
+                x=plot_df.index, y=plot_df["MACD_Hist"],
+                marker_color=hist_colours, name="MACD Hist",
+            ), row=2, col=1)
+            fig.add_trace(go.Scatter(
+                x=plot_df.index, y=plot_df["MACD"],
+                line=dict(color="#00D4FF", width=1.2), name="MACD",
+            ), row=2, col=1)
+
+            # RSI
+            fig.add_trace(go.Scatter(
+                x=plot_df.index, y=plot_df["RSI"],
+                line=dict(color="#9B6DFF", width=1.4), name="RSI",
+            ), row=3, col=1)
+            for lvl, col in [(70, "rgba(255,51,102,0.3)"), (50, "rgba(255,255,255,0.1)"), (30, "rgba(0,229,160,0.3)")]:
+                fig.add_hline(y=lvl, line_color=col, line_dash="dot", row=3, col=1)
+
+            fig.update_layout(
+                template="plotly_dark", height=480,
+                margin=dict(l=0, r=0, t=20, b=0),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                xaxis_rangeslider_visible=False, showlegend=False,
+                font=dict(family="JetBrains Mono", size=10),
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": False})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — Trade Terminal
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.markdown('<div class="qsec">快速下單終端</div>', unsafe_allow_html=True)
+
+    with st.form("trade_form_v3", clear_on_submit=False):
+        col_tk, col_dir = st.columns([3, 2])
+        tk_input = col_tk.text_input("股票代碼", value="NVDA", placeholder="NVDA")
+        dir_input = col_dir.selectbox("方向", ["BUY", "SELL"])
+
+        col_pr, col_sh = st.columns(2)
+        pr_input = col_pr.number_input("成交價", value=100.0, min_value=0.01, format="%.2f")
+        sh_input = col_sh.number_input("股數", value=1.0, min_value=0.0001, format="%.4f")
         
-        pr = st.number_input("價格", value=float(st.session_state["trade_price"]), format="%.2f")
-        sh = st.number_input("股數", value=float(st.session_state["trade_shares"]), format="%.4f")
-        
-        if st.form_submit_button("🚀 同步至 Google Sheets", use_container_width=True):
-            ok, msg = save_trade(datetime.now(), tk, tp, pr, sh)
-            if ok: st.success(msg)
-            else: st.error(msg)
+        fee_input  = st.number_input("手續費 (USD)", value=float(DEFAULT_COMMISSION), min_value=0.0, format="%.2f")
+        note_input = st.text_input("備註", value="", placeholder="選填")
+
+        # Real-time preview
+        gross = pr_input * sh_input
+        slip  = gross * DEFAULT_SLIPPAGE_PCT
+        net   = gross + fee_input + slip if dir_input == "BUY" else gross - fee_input - slip
+        after = cash - net if dir_input == "BUY" else cash + net
+        wt    = (pr_input * sh_input / total_assets * 100) if total_assets > 0 else 0
+
+        st.markdown(f"""
+<div class="pc" style="margin:10px 0;">
+  <div class="pc-grid">
+    <div class="pc-kv"><span class="pc-kv-label">毛額</span><span class="pc-kv-value">{fmt_dollar(gross)}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">滑點</span><span class="pc-kv-value">{fmt_dollar(slip)}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">淨額</span><span class="pc-kv-value">{fmt_dollar(net)}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">交後現金</span><span class="pc-kv-value" style="color:{'var(--red)' if after < 0 else 'var(--text)'}">{fmt_dollar(after)}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">佔資產%</span><span class="pc-kv-value">{wt:.1f}%</span></div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        submitted = st.form_submit_button("🚀 確認寫入 Google Sheets", use_container_width=True)
+        if submitted:
+            ok, msg = save_trade(datetime.now(), normalize_ticker(tk_input), dir_input, pr_input, sh_input, note_input, fee_input)
+            if ok:
+                st.success(f"✅ {msg}")
+            else:
+                st.error(f"❌ {msg}")
+
+    # Recent trades table
+    if not trades_df.empty:
+        st.markdown('<div class="qsec">最近交易紀錄</div>', unsafe_allow_html=True)
+        recent = trades_df.tail(15)[["TradeDateTime", "Ticker", "Type", "Price", "Shares", "NetTotal"]].copy()
+        recent["TradeDateTime"] = recent["TradeDateTime"].dt.strftime("%m/%d %H:%M")
+        recent.columns = ["時間", "代碼", "方向", "價格", "股數", "淨額"]
+        st.dataframe(recent[::-1], use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 5 — Performance & Analytics
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab5:
+    st.markdown('<div class="qsec">績效分析</div>', unsafe_allow_html=True)
+
+    # Perf stats
+    max_dd   = perf.get("max_drawdown_pct")
+    sharpe   = perf.get("sharpe")
+    win_rate = perf.get("win_rate")
+    tot_ret  = perf.get("total_return_pct")
+
+    st.markdown(f"""
+<div class="pstat-grid">
+  <div class="pstat">
+    <div class="pstat-label">累積報酬</div>
+    <div class="pstat-value" style="color:{'var(--green)' if (tot_ret or 0) >= 0 else 'var(--red)'}">
+      {f'{tot_ret:+.2f}%' if tot_ret is not None else '—'}
+    </div>
+  </div>
+  <div class="pstat">
+    <div class="pstat-label">最大回撤</div>
+    <div class="pstat-value" style="color:var(--red)">
+      {f'{max_dd:.2f}%' if max_dd is not None else '—'}
+    </div>
+  </div>
+  <div class="pstat">
+    <div class="pstat-label">Sharpe Ratio</div>
+    <div class="pstat-value" style="color:{'var(--green)' if (sharpe or 0) >= 1 else 'var(--gold)' if (sharpe or 0) >= 0.5 else 'var(--muted)'}">
+      {f'{sharpe:.2f}' if sharpe is not None else '—'}
+    </div>
+  </div>
+  <div class="pstat">
+    <div class="pstat-label">勝率</div>
+    <div class="pstat-value" style="color:{'var(--green)' if (win_rate or 0) >= 55 else 'var(--muted)'}">
+      {f'{win_rate:.1f}%' if win_rate is not None else '—'}
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # NAV chart with SPY benchmark
+    if not history_df.empty and len(history_df) >= 2:
+        st.markdown('<div class="qsec">NAV vs SPY 曲線</div>', unsafe_allow_html=True)
+        hdf = history_df.copy()
+        base_nav = hdf["TotalAssets"].iloc[0]
+        hdf["NAV_idx"] = hdf["TotalAssets"] / base_nav * 100
+
+        fig_nav = go.Figure()
+        fig_nav.add_trace(go.Scatter(
+            x=hdf["Date"], y=hdf["NAV_idx"], name="Portfolio NAV",
+            line=dict(color="#00D4FF", width=2),
+            fill="tozeroy", fillcolor="rgba(0,212,255,0.06)",
+        ))
+
+        # SPY rebased benchmark
+        if "BenchmarkSPY" in hdf.columns and hdf["BenchmarkSPY"].notna().any():
+            base_spy = hdf["BenchmarkSPY"].iloc[0]
+            hdf["SPY_idx"] = hdf["BenchmarkSPY"] / base_spy * 100
+            fig_nav.add_trace(go.Scatter(
+                x=hdf["Date"], y=hdf["SPY_idx"], name="SPY",
+                line=dict(color="#9B6DFF", width=1.5, dash="dot"),
+            ))
+
+        # Drawdown background
+        nav_series = hdf["TotalAssets"]
+        drawdown_pct = (nav_series / nav_series.cummax() - 1) * 100
+        fig_nav.add_trace(go.Scatter(
+            x=hdf["Date"], y=drawdown_pct, name="Drawdown",
+            line=dict(color="#FF3366", width=0),
+            fill="tozeroy", fillcolor="rgba(255,51,102,0.07)",
+            yaxis="y2",
+        ))
+
+        fig_nav.update_layout(
+            template="plotly_dark", height=320,
+            margin=dict(l=0, r=0, t=10, b=0),
+            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="JetBrains Mono", size=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.01, font=dict(size=10)),
+            yaxis=dict(title="Index (100=Start)", gridcolor="rgba(255,255,255,0.05)"),
+            yaxis2=dict(title="DD %", overlaying="y", side="right", gridcolor="rgba(0,0,0,0)", range=[-50, 5]),
+            xaxis=dict(gridcolor="rgba(255,255,255,0.04)"),
+        )
+        st.plotly_chart(fig_nav, use_container_width=True, config={"displayModeBar": False})
+
+        # Drawdown stats
+        if "DrawdownPct" in hdf.columns:
+            st.markdown('<div class="qsec">每日報酬分佈</div>', unsafe_allow_html=True)
+            if "DailyReturnPct" in hdf.columns:
+                rets = pd.to_numeric(hdf["DailyReturnPct"], errors="coerce").dropna()
+                fig_hist = go.Figure(go.Histogram(
+                    x=rets, nbinsx=40,
+                    marker_color="#00D4FF", opacity=0.75,
+                ))
+                fig_hist.update_layout(
+                    template="plotly_dark", height=200,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    paper_bgcolor="rgba(0,0,0,0)",
+                    plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(title="Daily Return %", gridcolor="rgba(255,255,255,0.05)"),
+                    yaxis=dict(gridcolor="rgba(255,255,255,0.05)"),
+                    bargap=0.05,
+                )
+                st.plotly_chart(fig_hist, use_container_width=True, config={"displayModeBar": False})
+    else:
+        st.info("歷史資料不足，累積每日 NAV 後圖表將自動顯示。")
+
+    # Sidebar-style settings panel at bottom of perf tab
+    st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
+    st.markdown('<div class="qsec">快速設定</div>', unsafe_allow_html=True)
+    new_cap = st.number_input("初始資金 (USD)", value=st.session_state.init_capital,
+                               min_value=1000.0, step=1000.0, format="%.0f")
+    if new_cap != st.session_state.init_capital:
+        st.session_state.init_capital = new_cap
+        st.rerun()
+
+    col_ref, col_sync = st.columns(2)
+    if col_ref.button("🔄 刷新快取", use_container_width=True):
+        clear_market_cache()
+        st.rerun()
+    if col_sync.button("📡 記錄今日 NAV", use_container_width=True):
+        ok, msg = maybe_log_daily_history(
+            total_assets=total_assets, cash=cash, market_value=market_value,
+            realized_pl=total_realized_pl, unrealized_pl=total_unrealized_pl,
+        )
+        st.toast(msg, icon="✅" if ok else "ℹ️")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Footer
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown(f"""
+<div style="text-align:center;padding:20px 0 8px;font-size:0.65rem;color:var(--muted);font-family:var(--mono)">
+  QUANTPRO v3.0 · {datetime.now().strftime('%Y/%m/%d %H:%M')} · 本系統僅供輔助參考，不構成投資建議
+</div>
+""", unsafe_allow_html=True)
