@@ -34,14 +34,15 @@ st.markdown(
     .mobile-card-title { font-size: 1.15rem; font-weight: 800; margin-bottom: 8px; color: #E0E0E0; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 4px; }
     .mobile-card-text { font-size: 0.95rem; line-height: 1.6; color: #C0C0C0; }
     .price-box { background: rgba(23, 190, 207, 0.1); padding: 16px; border-radius: 12px; border-left: 6px solid #17BECF; margin-bottom: 16px; }
+    .action-box { margin-top: 8px; padding: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 8px; font-size: 0.9rem; }
 
-    /* RWD 響應式：手機與摺疊外螢幕 (iPhone, Pixel Fold Cover) */
+    /* RWD 響應式：手機與摺疊外螢幕 */
     @media (max-width: 600px) {
         [data-testid="stMetricValue"] { font-size: 1.15rem !important; }
         .stMetric { padding: 8px !important; }
     }
     
-    /* RWD 響應式：摺疊機內螢幕 (Pixel Fold Inner, iPad mini) */
+    /* RWD 響應式：摺疊機內螢幕 */
     @media (min-width: 601px) and (max-width: 900px) {
         .mobile-card { padding: 20px; }
         .mobile-card-title { font-size: 1.3rem; }
@@ -127,16 +128,35 @@ with tab1:
         st.subheader("📋 目前持倉")
         for p in sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True):
             pl_color = "#00E676" if p["Unrealized"] > 0 else "#FF1744" if p["Unrealized"] < 0 else "#E0E0E0"
+            
+            # 【關鍵修正】：安全解析 StopLoss 與 TakeProfit1，避免因 None 產生的格式化錯誤與 '-'
+            sl_val = p.get('StopLoss')
+            sl_str = f"${sl_val:.2f}" if sl_val and pd.notna(sl_val) else "-"
+            tp_val = p.get('TakeProfit1')
+            tp_str = f"${tp_val:.2f}" if tp_val and pd.notna(tp_val) else "-"
+
+            # 【新增】：具體操作建議邏輯
+            signal = p.get('Signal', 'WATCH')
+            if "BUY" in signal:
+                buy_qty = p.get('SuggestedBuyQty', 0)
+                action_html = f"<div class='action-box'>🛒 <b>策略建議：</b><span style='color:#17BECF;'>建議加碼買進 {buy_qty} 股 (參考價: ${p['LastPrice']:.2f})</span></div>"
+            elif "SELL" in signal:
+                sell_qty = p.get('SuggestedSellQty', p['Shares'])
+                action_html = f"<div class='action-box'>📉 <b>策略建議：</b><span style='color:#FF1744;'>建議減碼/出場 {sell_qty} 股 (參考價: ${p['LastPrice']:.2f})</span></div>"
+            else:
+                action_html = f"<div class='action-box'>👀 <b>策略建議：</b>目前無強烈訊號，建議持續觀望。</div>"
+
             st.markdown(
                 f"""
                 <div class="mobile-card">
-                    <div class="mobile-card-title">{p['Ticker']} <span style="float:right; font-size:0.9rem; color:#17BECF;">{p.get('Signal', 'WATCH')}</span></div>
+                    <div class="mobile-card-title">{p['Ticker']} <span style="float:right; font-size:0.9rem; color:#17BECF;">{signal}</span></div>
                     <div class="mobile-card-text">
                         權重：<b>{p['WeightPct']:.1f}%</b> | 價值：${p['MarketValue']:,.0f}<br>
                         報酬：<span style="color:{pl_color}; font-weight:bold;">{p['PL_Pct']:.2f}% (${p['Unrealized']:,.0f})</span><br>
                         現價：${p['LastPrice']:.2f} | 成本：${p['AvgCost']:.2f}<br>
-                        停損/目標：${p.get('StopLoss', '-')} / ${p.get('TakeProfit1', '-')}
+                        停損/目標：{sl_str} / {tp_str}
                     </div>
+                    {action_html}
                 </div>
                 """, unsafe_allow_html=True
             )
@@ -157,7 +177,15 @@ with tab2:
             score, action, details, note = evaluate_strategy(analyze_ticker, hist, held_shares, 0, total_assets, cash, market_regime, heat_info["heat_pct"], portfolio)
             
             st.markdown(f'<div class="price-box">動能分數: <span style="font-size: 1.5rem; color:#17BECF;">{score:.1f}</span> | {action}</div>', unsafe_allow_html=True)
-            st.markdown(f"**依據**：{note}")
+            st.markdown(f"**分析依據**：{note}")
+            
+            # 【新增】：具體買賣股數與價位建議提示匡
+            if "BUY" in action:
+                st.success(f"🛒 **操作建議**：系統建議 **買進 {details['suggested_buy_qty']} 股** (參考現價/突破價: **${details['close']:.2f}**)。")
+            elif "SELL" in action:
+                st.warning(f"📉 **操作建議**：系統建議 **賣出 {details['suggested_sell_qty']} 股** (參考現價/跌破價: **${details['close']:.2f}**)。")
+            else:
+                st.info("👀 **操作建議**：目前未達動能突破門檻或已跌破停損，建議 **觀望 (WATCH)**。")
             
             # 手機適配技術圖
             plot_df = hist.tail(100)
