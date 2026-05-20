@@ -9,7 +9,6 @@ from core import (
     run_auto_scanner,
 )
 
-
 def main():
     trades_df = load_trades()
     watchlist_df = load_watchlist()
@@ -28,7 +27,7 @@ def main():
         market_regime,
     ) if portfolio_raw else []
 
-    # 每次 scanner 執行時，自動嘗試寫入當日 NAV
+    # 每日 NAV 紀錄
     nav_ok, nav_msg = maybe_log_daily_history(
         total_assets=total_assets,
         cash=cash,
@@ -47,24 +46,12 @@ def main():
     )
 
     print("===== Scanner Result =====")
-    print(f"Trades: {len(trades_df)}")
-    print(f"Portfolio count: {len(portfolio)}")
-    print(f"Watchlist count: {len(watchlist_df)}")
-    print(f"Cash: {cash:.2f}")
-    print(f"Market Value: {market_value:.2f}")
-    print(f"Total Assets: {total_assets:.2f}")
-    print(f"Realized P/L: {total_realized_pl:.2f}")
-    print(f"Unrealized P/L: {total_unrealized_pl:.2f}")
+    print(f"Trades: {len(trades_df)} | Portfolio: {len(portfolio)} | Watchlist: {len(watchlist_df)}")
+    print(f"Cash: {cash:.2f} | Market Value: {market_value:.2f} | Total Assets: {total_assets:.2f}")
     print(f"NAV Log: {nav_msg}")
 
-    print("----- Metrics -----")
     for k, v in result["metrics"].items():
         print(f"{k}: {v}")
-
-    print("----- Logs -----")
-    for line in result["logs"]:
-        print(line)
-
 
 if __name__ == "__main__":
     main()
