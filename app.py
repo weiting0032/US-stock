@@ -786,9 +786,17 @@ with tab4:
     # Recent trades table
     if not trades_df.empty:
         st.markdown('<div class="qsec">最近交易紀錄</div>', unsafe_allow_html=True)
-        recent = trades_df.tail(15)[["TradeDateTime", "Ticker", "Type", "Price", "Shares", "NetTotal"]].copy()
-        recent["TradeDateTime"] = recent["TradeDateTime"].dt.strftime("%m/%d %H:%M")
-        recent.columns = ["時間", "代碼", "方向", "價格", "股數", "淨額"]
+        # 相容 V1 舊資料（NetTotal 等於 GrossTotal）與 V2 新資料
+        _rcols = ["TradeDateTime", "Ticker", "Type", "Price", "Shares", "GrossTotal", "Fee", "NetTotal"]
+        _rcols_exist = [c for c in _rcols if c in trades_df.columns]
+        recent = trades_df.tail(20)[_rcols_exist].copy()
+        recent["TradeDateTime"] = pd.to_datetime(recent["TradeDateTime"], errors="coerce").dt.strftime("%m/%d %H:%M")
+        _rename = {
+            "TradeDateTime": "時間", "Ticker": "代碼", "Type": "方向",
+            "Price": "價格", "Shares": "股數",
+            "GrossTotal": "毛額", "Fee": "手續費", "NetTotal": "淨額",
+        }
+        recent = recent.rename(columns={k: v for k, v in _rename.items() if k in recent.columns})
         st.dataframe(recent[::-1], use_container_width=True, hide_index=True)
 
 
