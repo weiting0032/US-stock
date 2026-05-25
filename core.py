@@ -450,16 +450,39 @@ def get_spreadsheet():
     return get_gsheet_client().open(PORTFOLIO_SHEET_TITLE)
 
 def ensure_headers(ws, headers: List[str]):
+    """建立或更新工作表 header。若 header 為空則寫入；非空則保持不動。"""
     try:
         first_row = gsheet_retry(lambda: ws.row_values(1))
-        if not first_row: gsheet_retry(lambda: ws.append_row(headers))
+        if not first_row:
+            gsheet_retry(lambda: ws.append_row(headers))
     except Exception:
         gsheet_retry(lambda: ws.append_row(headers))
+
+
+def ensure_trades_headers_v2(ws):
+    """
+    Trades 工作表專用：自動將 V1 header（7欄）升級為 V2 header（12欄）。
+    - 若第一列為空 → 寫入 V2 header
+    - 若第一列為 V1 header → 升級為 V2（原地更新第一列）
+    - 若第一列已是 V2 → 不動
+    保護：只有在確認是 V1 header 時才覆寫，不會誤改其他工作表。
+    """
+    try:
+        first_row = gsheet_retry(lambda: ws.row_values(1))
+        if not first_row:
+            gsheet_retry(lambda: ws.append_row(TRADE_HEADERS_V2))
+        elif [str(c).strip() for c in first_row[:len(TRADE_HEADERS_V1)]] == TRADE_HEADERS_V1                 and [str(c).strip() for c in first_row[:len(TRADE_HEADERS_V2)]] != TRADE_HEADERS_V2:
+            # V1 header detected → upgrade to V2 in-place (row 1, cols A–L)
+            gsheet_retry(lambda: ws.update("A1:L1", [TRADE_HEADERS_V2]))
+        # Already V2 or unknown → leave untouched
+    except Exception:
+        pass
 
 def get_trades_worksheet(readonly: bool = True):
     ws = get_or_create_worksheet(get_spreadsheet(), "Trades", rows=10000, cols=14)
     if not readonly:
-        ensure_headers(ws, TRADE_HEADERS_V2)
+        # 自動升級 V1 → V2 header，確保新舊資料欄位一致
+        ensure_trades_headers_v2(ws)
     return ws
 
 def get_history_worksheet(readonly: bool = True):
@@ -549,39 +572,75 @@ def set_watchlist_enabled(ticker: str, enabled: bool) -> Tuple[bool, str]:
     except Exception as e: return False, f"更新失敗：{e}"
 
 def _load_trades_raw() -> pd.DataFrame:
+    """
+    讀取 Trades 工作表，同時相容 V1（7欄舊格式）與 V2（12欄新格式），
+    以及同一工作表中 V1/V2 混存的情況（升級後新舊資料並列）。
+
+    判斷邏輯（逐列偵測，不依賴 header）：
+      - 每列欄位數 >= 10 → V2 列（TradeDateTime, CreatedAt, Ticker, Type, …）
+      - 每列欄位數  < 10 → V1 列（Date, Ticker, Type, Price, Shares, Total, Note）
+    統一輸出 V2 欄位結構（TRADE_HEADERS_V2），下游函數無需感知版本差異。
+    """
     ws = get_trades_worksheet(readonly=True)
     values = gsheet_retry(lambda: ws.get_all_values())
     if not values: return pd.DataFrame(columns=TRADE_HEADERS_V2)
-    headers, rows = [str(x).strip() for x in values[0]], values[1:]
-    if not headers: return pd.DataFrame(columns=TRADE_HEADERS_V2)
-    
-    normalized_rows = []
-    is_legacy = headers[:len(TRADE_HEADERS_V1)] == TRADE_HEADERS_V1
-    is_v2 = headers[:len(TRADE_HEADERS_V2)] == TRADE_HEADERS_V2
 
+    # 第一列可能是 header（V1 或 V2），跳過後作為資料列
+    first = [str(x).strip() for x in values[0]]
+    is_header_row = (
+        first[:len(TRADE_HEADERS_V1)] == TRADE_HEADERS_V1 or
+        first[:len(TRADE_HEADERS_V2)] == TRADE_HEADERS_V2
+    )
+    rows = values[1:] if is_header_row else values
+
+    normalized_rows = []
     for row in rows:
         row = list(row)
-        if is_legacy:
-            row7 = row[:7] + [""] * max(0, 7 - len(row[:7]))
-            normalized_rows.append({
-                "TradeDateTime": pd.to_datetime(row7[0], errors="coerce"),
-                "CreatedAt": pd.to_datetime(row7[0], errors="coerce"),
-                "Ticker": row7[1], "Type": row7[2], "Price": row7[3], "Shares": row7[4],
-                "GrossTotal": row7[5], "Fee": 0.0, "Slippage": 0.0, "NetTotal": row7[5],
-                "Note": row7[6], "OrderID": "",
-            })
-        elif is_v2 or len(row) >= 12:
+        # 跳過完全空白列
+        if not any(str(c).strip() for c in row):
+            continue
+
+        # ── 逐列判斷格式（per-row detection）────────────────────────────────
+        # V2 列有 12 欄（含 Fee/Slippage/NetTotal/OrderID），非空欄數 >= 10
+        non_empty = sum(1 for c in row if str(c).strip())
+        row_is_v2 = len(row) >= 10 and non_empty >= 6
+
+        if row_is_v2:
+            # V2 格式：TradeDateTime, CreatedAt, Ticker, Type, Price, Shares,
+            #          GrossTotal, Fee, Slippage, NetTotal, Note, OrderID
             row12 = row[:12] + [""] * max(0, 12 - len(row))
             normalized_rows.append(dict(zip(TRADE_HEADERS_V2, row12)))
-            
+        else:
+            # V1 格式：Date, Ticker, Type, Price, Shares, Total, Note
+            row7 = row[:7] + [""] * max(0, 7 - len(row))
+            normalized_rows.append({
+                "TradeDateTime": row7[0],      # 日期字串，稍後解析
+                "CreatedAt":     row7[0],
+                "Ticker":        row7[1],
+                "Type":          row7[2],
+                "Price":         row7[3],
+                "Shares":        row7[4],
+                "GrossTotal":    row7[5],      # 舊版 Total → GrossTotal
+                "Fee":           0.0,
+                "Slippage":      0.0,
+                "NetTotal":      row7[5],      # 無費用分離，沿用 Total
+                "Note":          row7[6],
+                "OrderID":       "",
+            })
+
     df = pd.DataFrame(normalized_rows, columns=TRADE_HEADERS_V2)
     if df.empty: return df
+
     df["Ticker"] = df["Ticker"].astype(str).apply(normalize_ticker)
-    df["Type"] = df["Type"].astype(str).apply(normalize_trade_type)
+    df["Type"]   = df["Type"].astype(str).apply(normalize_trade_type)
     for col in ["Price", "Shares", "GrossTotal", "Fee", "Slippage", "NetTotal"]:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     df["TradeDateTime"] = pd.to_datetime(df["TradeDateTime"], errors="coerce")
-    return df.dropna(subset=["TradeDateTime"]).sort_values("TradeDateTime").reset_index(drop=True)
+    df = df.dropna(subset=["TradeDateTime"])
+
+    # 去除 Ticker 為空或 header 殘留列
+    df = df[df["Ticker"].str.strip().ne("") & df["Ticker"].str.upper().ne("TICKER")]
+    return df.sort_values("TradeDateTime").reset_index(drop=True)
 
 if st:
     @st.cache_data(ttl=120, show_spinner=False)
@@ -656,24 +715,42 @@ else:
     def load_signals() -> pd.DataFrame: return _load_signals_raw()
 
 def save_trade(trade_dt, ticker, trade_type, price, shares, note="", fee=DEFAULT_COMMISSION, slippage=None, order_id="") -> Tuple[bool, str]:
+    """
+    寫入交易紀錄（V2 格式，12 欄）。
+    trade_dt 可傳入 date 或 datetime，自動轉換為 datetime 以統一格式。
+    相容舊版呼叫：save_trade(trade_date=date.today(), ticker=..., ...)
+    """
+    from datetime import date as _date
+    # 相容 V1 呼叫傳入 date（非 datetime）
+    if isinstance(trade_dt, _date) and not isinstance(trade_dt, datetime):
+        trade_dt = datetime(trade_dt.year, trade_dt.month, trade_dt.day)
+
     ticker, trade_type = normalize_ticker(ticker), normalize_trade_type(trade_type)
-    if not ticker or trade_type not in ["BUY", "SELL"] or price <= 0 or shares <= 0: return False, "輸入無效"
+    if not ticker or trade_type not in ["BUY", "SELL"] or price <= 0 or shares <= 0:
+        return False, "輸入無效"
     trades_df = load_trades()
     holding_shares = get_current_holding_shares(trades_df, ticker)
-    if trade_type == "SELL" and shares > holding_shares + 1e-9: return False, f"賣出超過持股 {holding_shares:.4f}"
+    if trade_type == "SELL" and shares > holding_shares + 1e-9:
+        return False, f"賣出超過持股 {holding_shares:.4f}"
 
-    ws = get_trades_worksheet(readonly=False)
+    ws = get_trades_worksheet(readonly=False)   # ← 內部會自動升級 V1→V2 header
     gross_total = round(price * shares, 4)
-    slippage = round(float(slippage) if slippage is not None else gross_total * DEFAULT_SLIPPAGE_PCT, 4)
-    fee = round(float(fee), 4)
-    net_total = round(gross_total + fee + slippage if trade_type == "BUY" else gross_total - fee - slippage, 4)
+    slippage    = round(float(slippage) if slippage is not None else gross_total * DEFAULT_SLIPPAGE_PCT, 4)
+    fee         = round(float(fee), 4)
+    net_total   = round(
+        gross_total + fee + slippage if trade_type == "BUY" else gross_total - fee - slippage, 4
+    )
 
     gsheet_retry(lambda: ws.append_row([
-        trade_dt.strftime("%Y-%m-%d %H:%M:%S"), datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        ticker, trade_type, float(price), float(shares), float(gross_total), float(fee), float(slippage), float(net_total), note, order_id
+        trade_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ticker, trade_type,
+        float(price), float(shares),
+        float(gross_total), float(fee), float(slippage), float(net_total),
+        note, order_id
     ]))
     clear_app_caches()
-    return True, f"交易寫入成功"
+    return True, "交易寫入成功"
 
 def maybe_log_daily_history(total_assets, cash, market_value, realized_pl, unrealized_pl) -> Tuple[bool, str]:
     try:
