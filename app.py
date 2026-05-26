@@ -18,6 +18,8 @@ from core import (
     maybe_log_daily_history, normalize_ticker, run_auto_scanner,
     save_trade, save_watchlist, send_telegram_msg,
     delete_watchlist_ticker, set_watchlist_enabled,
+    run_us_semi_scanner, format_us_semi_tg_messages, send_us_semi_tg,
+    US_SEMI_UNIVERSE, US_SEMI_SCORE_STRONG, US_SEMI_SCORE_BUY, US_SEMI_SCORE_WATCH,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -418,8 +420,8 @@ st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # Main tabs
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效", "🔬 美股半導體"
 ])
 
 
@@ -927,6 +929,252 @@ with tab5:
             realized_pl=total_realized_pl, unrealized_pl=total_unrealized_pl,
         )
         st.toast(msg, icon="✅" if ok else "ℹ️")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — 美股半導體宇宙掃描器
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab6:
+    # ── Session state init ──────────────────────────────────────────────────
+    if "semi_result"    not in st.session_state: st.session_state.semi_result    = None
+    if "semi_scan_prog" not in st.session_state: st.session_state.semi_scan_prog = ""
+
+    # ── Header status ───────────────────────────────────────────────────────
+    st.markdown('<div class="qsec">🔬 美股半導體宇宙掃描器</div>', unsafe_allow_html=True)
+
+    # Quick info bar
+    _semi_n = len(set(US_SEMI_UNIVERSE))
+    st.markdown(f"""
+<div class="pc" style="margin-bottom:14px;">
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+    <div style="text-align:center;">
+      <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">掃描宇宙</div>
+      <div style="font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--cyan)">{_semi_n} 檔</div>
+      <div style="font-size:.65rem;color:var(--muted)">SOX + AI 基礎建設</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">強力買進門檻</div>
+      <div style="font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--red)">≥ {US_SEMI_SCORE_STRONG:.1f}</div>
+      <div style="font-size:.65rem;color:var(--muted)">/ 10 分</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">自動執行</div>
+      <div style="font-family:var(--mono);font-size:1.1rem;font-weight:700;color:var(--gold)">09:00</div>
+      <div style="font-size:.65rem;color:var(--muted)">台灣時間（GitHub Actions）</div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # ── Strategy explanation ─────────────────────────────────────────────────
+    with st.expander("📐 策略過濾器說明", expanded=False):
+        st.markdown("""
+**8 層多因子評分（滿分 ~10 分）**
+
+| 層 | 因子 | 分值 | 說明 |
+|---|---|---|---|
+| A | SMA 多頭排列 | +2.5 | SMA20 > SMA50 > SMA200 全線向上 |
+| B | MACD 翻多加速 | +0.8 | 柱狀圖翻正且持續放大 |
+| B | RSI 健康帶 50–72 | +0.8 | 動能健康，非超買 |
+| B | ADX ≥ 18 | +0.8 | 趨勢強度足夠 |
+| C | RS vs SPY > +2% | +1.0 | 強於大盤（20日相對強度）|
+| C | 優於 SOX 指數 | +0.8 | 領先半導體板塊 |
+| D | OBV 法人吸籌 | +0.5 | OBV 斜率向上 + 站上 SMA20 |
+| D | 放量上漲日 | +0.5 | 成交量 > 均量 1.5x 且收漲 |
+| E | BB 壓縮放量突破 | +1.5 | 低波動率壓縮後量價齊揚 |
+| F | 接近 52W 年高 | +0.8 | 距年高 10% 內（強勢領頭羊）|
+| G | SOX 趨勢乘數 | ×1.0/0.85/0.65 | BULL/NEUTRAL/BEAR 調整整體得分 |
+| H | 流動性門檻 | 必要條件 | 日均成交值 > $20M，非財報封鎖期 |
+
+**訊號門檻**：🔴 強力買進 ≥ {strong} ｜ 🟢 積極買進 ≥ {buy} ｜ 🟡 留意候補 ≥ {watch}
+""".format(strong=US_SEMI_SCORE_STRONG, buy=US_SEMI_SCORE_BUY, watch=US_SEMI_SCORE_WATCH))
+
+    st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
+
+    # ── Scan controls ────────────────────────────────────────────────────────
+    st.markdown('<div class="qsec">手動掃描設定</div>', unsafe_allow_html=True)
+
+    _ctl1, _ctl2 = st.columns(2)
+    _workers  = _ctl1.slider("平行 Worker 數", min_value=3, max_value=20, value=10,
+                              help="越多越快，但易觸發 yfinance 限流")
+    _dry_run  = _ctl2.checkbox("Dry Run（掃描但不發 Telegram）", value=True)
+
+    _extra_input = st.text_input(
+        "額外加入掃描的標的（逗號分隔）",
+        placeholder="SMCI, PLTR, ARM …",
+        help="除預設宇宙外額外加入，例如你的持倉中有半導體股",
+    )
+    _extra_tickers = [t.strip().upper() for t in _extra_input.split(",") if t.strip()]
+
+    if st.button("🚀 立即執行美股半導體掃描", use_container_width=True, type="primary"):
+        import concurrent.futures as _cf_ui
+        from core import _us_semi_score_one, _get_sox_regime, normalize_ticker as _nt
+        import math as _math
+
+        _universe = list(dict.fromkeys(
+            [_nt(t) for t in US_SEMI_UNIVERSE] + [_nt(t) for t in _extra_tickers]
+        ))
+
+        _prog_bar  = st.progress(0, text="取得 SOX 指數狀態 …")
+        _prog_text = st.empty()
+
+        # SOX regime first
+        _sox = _get_sox_regime()
+        _sox_trend = _sox.get("trend", "NEUTRAL")
+        _sox_emoji = {"BULL": "🐂", "NEUTRAL": "➡️", "BEAR": "🐻"}
+        _prog_bar.progress(0, text=f"SOX {_sox_emoji.get(_sox_trend)} {_sox_trend}  "
+                                    f"vs SPY {_sox.get('rs_vs_spy', 0):+.1f}% ｜ 開始掃描 {len(_universe)} 檔 …")
+
+        _results, _done = [], [0]
+        _total = len(_universe)
+
+        def _scan_ticker(tk):
+            r = _us_semi_score_one(tk, _sox)
+            _done[0] += 1
+            pct = _done[0] / _total
+            _prog_bar.progress(pct, text=f"掃描 {_done[0]}/{_total} ({pct*100:.0f}%) — "
+                                          f"發現 {len(_results)} 個入選標的")
+            return r
+
+        with _cf_ui.ThreadPoolExecutor(max_workers=_workers) as _ex:
+            for _r in _cf_ui.as_completed({_ex.submit(_scan_ticker, tk): tk for tk in _universe}):
+                _res = _r.result()
+                if _res: _results.append(_res)
+
+        _prog_bar.empty()
+        _prog_text.empty()
+
+        _results.sort(key=lambda x: -x["score"])
+        _strong = [r for r in _results if r["signal"] == "STRONG_BUY"]
+        _buys   = [r for r in _results if r["signal"] == "BUY"]
+        _watch  = [r for r in _results if r["signal"] == "WATCH"]
+
+        st.session_state.semi_result = {
+            "strong_buy": _strong, "buy": _buys, "watch": _watch,
+            "all_results": _results, "sox_regime": _sox,
+            "total_scanned": _total, "total_hits": len(_results),
+            "scan_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }
+
+        # Telegram
+        if not _dry_run and _results:
+            from core import format_us_semi_tg_messages, send_us_semi_tg
+            _scan_res_for_tg = dict(st.session_state.semi_result)
+            _scan_res_for_tg["scan_date"] = datetime.now().strftime("%Y-%m-%d")
+            _msgs = format_us_semi_tg_messages(_scan_res_for_tg)
+            _ok   = send_us_semi_tg(_msgs)
+            st.toast("✅ Telegram 推播成功！" if _ok else "❌ Telegram 推播失敗", icon="📡")
+        elif _dry_run:
+            st.toast("Dry Run 模式：未發送 Telegram", icon="🔕")
+
+    # ── Results display ──────────────────────────────────────────────────────
+    _res_data = st.session_state.get("semi_result")
+    if _res_data:
+        _sox_r     = _res_data["sox_regime"]
+        _all       = _res_data["all_results"]
+        _strong    = _res_data["strong_buy"]
+        _buys      = _res_data["buy"]
+        _watches   = _res_data["watch"]
+        _scan_time = _res_data.get("scan_date", "—")
+        _sox_trend = _sox_r.get("trend", "NEUTRAL")
+        _SOX_BADGE = {"BULL": ("badge-up", "🐂 多頭"), "NEUTRAL": ("badge-flat", "➡️ 中性"), "BEAR": ("badge-down", "🐻 空頭")}
+        _sox_cls, _sox_lbl = _SOX_BADGE.get(_sox_trend, ("badge-flat", "—"))
+
+        # Summary bar
+        st.markdown(f"""
+<div class="pc" style="margin-bottom:12px;">
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+    <div>
+      <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase">掃描時間</div>
+      <div style="font-family:var(--mono);font-size:.9rem;font-weight:700">{_scan_time}</div>
+    </div>
+    <span class="badge {_sox_cls}">SOX {_sox_lbl}  vs SPY {_sox_r.get('rs_vs_spy', 0):+.1f}%</span>
+    <div style="text-align:right;">
+      <div style="font-size:.65rem;color:var(--muted)">掃描 {_res_data['total_scanned']} 檔</div>
+      <div style="font-size:.8rem;font-family:var(--mono)">
+        <span style="color:var(--red)">🔴{len(_strong)}</span>&nbsp;
+        <span style="color:var(--green)">🟢{len(_buys)}</span>&nbsp;
+        <span style="color:var(--gold)">🟡{len(_watches)}</span>
+      </div>
+    </div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+        if not _all:
+            st.info("本次掃描無符合條件標的，市場環境可能偏弱。")
+        else:
+            # Render cards
+            _SIG_LABEL = {
+                "STRONG_BUY": ("var(--red)",   "🔴 強力買進"),
+                "BUY":        ("var(--green)",  "🟢 積極買進"),
+                "WATCH":      ("var(--gold)",   "🟡 留意候補"),
+            }
+            _rank_emoji = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+
+            for _i, _r in enumerate(_all[:20]):
+                _sig_color, _sig_label = _SIG_LABEL.get(_r["signal"], ("var(--muted)", "—"))
+                _stars   = "⭐" * min(5, max(1, round(_r["score"] / 1.5)))
+                _reasons = "、".join(_r["reasons"][:3]) if _r["reasons"] else "—"
+                _rank    = _rank_emoji[_i] if _i < len(_rank_emoji) else f"{_i+1}."
+                _score_w = min(100, _r["score"] / 8 * 100)
+
+                st.markdown(f"""
+<div class="pc">
+  <div class="pc-accent" style="background:{_sig_color}"></div>
+  <div class="pc-header">
+    <div>
+      <div class="pc-ticker">{_rank} {_r['ticker']} <span style="font-size:.7rem;color:var(--muted);font-weight:400">{_stars}</span></div>
+      <div class="pc-meta">{_r['reasons'][0] if _r['reasons'] else ''}</div>
+    </div>
+    <div style="text-align:right">
+      <span class="pc-signal" style="background:rgba(255,255,255,.05);color:{_sig_color};border:1px solid {_sig_color}40">{_sig_label}</span>
+      <div style="font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-top:4px">分數 {_r['score']:.1f}/10</div>
+    </div>
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
+    <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">${_r['close']}</span>
+    <span style="font-family:var(--mono);font-size:.8rem;color:var(--cyan)">RS vs SPY {_r['rs20_vs_spy']:+.1f}%</span>
+  </div>
+  <div class="wbar-bg"><div class="wbar-fill" style="width:{_score_w:.0f}%;background:{_sig_color}"></div></div>
+  <div class="pc-grid" style="margin-top:10px;">
+    <div class="pc-kv"><span class="pc-kv-label">停損</span><span class="pc-kv-value" style="color:var(--red)">${_r['stop_loss']}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">目標 TP1</span><span class="pc-kv-value" style="color:var(--green)">${_r['tp1']}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">RSI / ADX</span><span class="pc-kv-value">{_r['rsi']:.0f} / {_r['adx']:.0f}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">日均成交</span><span class="pc-kv-value">${_r['dv20_m']:.0f}M</span></div>
+    <div class="pc-kv" style="grid-column:span 2;"><span class="pc-kv-label">因子</span><span class="pc-kv-value" style="font-size:.75rem">{_reasons}</span></div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+            # Full results table
+            st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
+            st.markdown('<div class="qsec">完整結果表格</div>', unsafe_allow_html=True)
+            _df_show = pd.DataFrame([{
+                "代碼": r["ticker"], "訊號": r["signal"], "分數": r["score"],
+                "現價": r["close"], "停損": r["stop_loss"],
+                "TP1": r["tp1"], "TP2": r["tp2"],
+                "RSI": r["rsi"], "ADX": r["adx"],
+                "RS%SPY": r["rs20_vs_spy"], "日均量$M": r["dv20_m"],
+                "建議股數": r["suggested_qty"],
+                "因子": "、".join(r["reasons"][:3]),
+            } for r in _all])
+            st.dataframe(_df_show, use_container_width=True, hide_index=True)
+
+            # TG preview
+            with st.expander(f"📨 Telegram 訊息預覽", expanded=False):
+                _tg_res = dict(_res_data)
+                _tg_res["scan_date"] = datetime.now().strftime("%Y-%m-%d")
+                _tg_msgs = format_us_semi_tg_messages(_tg_res)
+                for _mi, _m in enumerate(_tg_msgs, 1):
+                    st.caption(f"第 {_mi} 則（{len(_m)} 字元）")
+                    st.code(_m, language=None)
+
+            # Clear button
+            if st.button("✖ 清除掃描結果", use_container_width=True):
+                st.session_state.semi_result = None
+                st.rerun()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Footer
