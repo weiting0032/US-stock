@@ -1183,3 +1183,364 @@ def build_trade_preview(trades_df, initial_capital, ticker, trade_type, price, s
         "bucket": "LARGE_CAP", "bucket_max_weight_pct": 25,
         "exceed_max_weight": False, "sell_exceeds_position": False
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 美股半導體強勢股自動掃描模組
+# 每日美股收盤後 (台灣時間 09:00) 掃描 SOX 成分股及主要半導體標的
+# 策略：多因子共振過濾，結合相對強度、趨勢位置、動能指標
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import concurrent.futures as _cf
+import threading as _thr
+
+# ── 美股半導體宇宙（SOX 成分 + AI 基礎建設 + 設備材料）────────────────────
+US_SEMI_UNIVERSE: List[str] = [
+    # ── AI / GPU / 高效能運算 ──────────────────────────────────────────────
+    "NVDA", "AMD", "INTC", "QCOM",
+    # ── 晶圓代工 ADR ──────────────────────────────────────────────────────
+    "TSM", "GFS", "UMC",
+    # ── 類比 / 混合訊號 / 電源管理 ────────────────────────────────────────
+    "TXN", "ADI", "MPWR", "MCHP", "ON", "NXPI", "SWKS", "QRVO",
+    "WOLF", "SMTC", "MTSI", "ALGM", "CRUS",
+    # ── 網路 / 資料中心 IC ─────────────────────────────────────────────────
+    "AVGO", "MRVL", "RMBS", "AMBA", "SLAB",
+    # ── 記憶體 ────────────────────────────────────────────────────────────
+    "MU", "WDC",
+    # ── 半導體設備 ────────────────────────────────────────────────────────
+    "AMAT", "LRCX", "KLAC", "TER", "ONTO", "FORM", "ICHR", "ACMR",
+    # ── EDA / IP / 測試 ────────────────────────────────────────────────────
+    "CDNS", "SNPS", "COHU", "MKSI",
+    # ── 封裝 / 特殊製程 ───────────────────────────────────────────────────
+    "AMKR", "ASX", "AOSL", "DIOD", "IXYS",
+    # ── 光學 / 光子 ────────────────────────────────────────────────────────
+    "II-VI", "IIVI", "LITE", "AAOI",
+]
+
+# ── 掃描策略參數 ──────────────────────────────────────────────────────────────
+US_SEMI_SCORE_STRONG  = get_env_float("US_SEMI_SCORE_STRONG", 5.5)  # 強力買進門檻
+US_SEMI_SCORE_BUY     = get_env_float("US_SEMI_SCORE_BUY",    3.5)  # 積極買進門檻
+US_SEMI_SCORE_WATCH   = get_env_float("US_SEMI_SCORE_WATCH",  2.0)  # 留意候補門檻
+US_SEMI_MIN_DOLLAR_VOL = get_env_float("US_SEMI_MIN_DOLLAR_VOL", 20_000_000)  # 最低日成交值
+US_SEMI_MIN_PRICE      = get_env_float("US_SEMI_MIN_PRICE", 10.0)
+US_SEMI_SCAN_WORKERS   = get_env_int("US_SEMI_SCAN_WORKERS", 10)
+US_SEMI_TOP_N          = get_env_int("US_SEMI_TOP_N", 15)  # TG 最多顯示 N 檔
+
+
+def _get_sox_regime() -> Dict:
+    """
+    取得半導體產業指數 (SOXX) 的市場狀態，
+    作為美股半導體掃描的整體趨勢濾網。
+    回傳 {trend: 'BULL'/'BEAR'/'NEUTRAL', rs_vs_spy: float, score: int}
+    """
+    try:
+        soxx = yf.Ticker("SOXX").history(period="1y", auto_adjust=True)
+        spy  = yf.Ticker("SPY").history(period="1y", auto_adjust=True)
+        if soxx.empty or spy.empty:
+            return {"trend": "NEUTRAL", "rs_vs_spy": 0.0, "score": 0}
+
+        soxx_close = float(soxx["Close"].iloc[-1])
+        soxx_sma50 = float(soxx["Close"].rolling(50).mean().iloc[-1])
+        soxx_sma200= float(soxx["Close"].rolling(200).mean().iloc[-1])
+
+        spy_ret20  = (spy["Close"].iloc[-1] / spy["Close"].iloc[-20] - 1) * 100
+        soxx_ret20 = (soxx["Close"].iloc[-1] / soxx["Close"].iloc[-20] - 1) * 100
+        rs_vs_spy  = round(soxx_ret20 - spy_ret20, 2)
+
+        score = 0
+        if soxx_close > soxx_sma50:  score += 1
+        if soxx_close > soxx_sma200: score += 1
+        if soxx_sma50 > soxx_sma200: score += 1
+        if rs_vs_spy > 0:            score += 1
+
+        trend = "BULL" if score >= 3 else "BEAR" if score <= 1 else "NEUTRAL"
+        return {"trend": trend, "rs_vs_spy": rs_vs_spy, "score": score,
+                "soxx_price": round(soxx_close, 2)}
+    except Exception:
+        return {"trend": "NEUTRAL", "rs_vs_spy": 0.0, "score": 0}
+
+
+def _us_semi_score_one(ticker: str, sox_regime: Dict) -> Optional[Dict]:
+    """
+    對單一半導體股票執行多因子評分，回傳標的資訊 dict 或 None。
+
+    評分因子（沿用 rank_symbol_strength 基礎，加入半導體專屬強化）：
+    ┌──────────────────────────────────────────────────────────────────┐
+    │  A. 趨勢位置   SMA 多頭排列（已持倉護城河）                     │
+    │  B. 動能指標   RSI / MACD / ADX 共振                            │
+    │  C. 相對強度   RS vs SPY + RS vs SOX（雙重強度確認）            │
+    │  D. 量能確認   OBV 法人吸籌 + 量增上漲                          │
+    │  E. BB 突破    壓縮後放量突破（最佳時機點）                     │
+    │  F. 年高位置   接近 52W 高點 = 強勢領頭羊                       │
+    │  G. SOX 趨勢   半導體指數狀態乘數（趨勢不好時降低暴露）         │
+    └──────────────────────────────────────────────────────────────────┘
+    """
+    ticker = normalize_ticker(ticker)
+    try:
+        hist = get_unified_analysis(ticker)
+        if hist is None or hist.empty or len(hist) < 60:
+            return None
+
+        last    = hist.iloc[-1]
+        prev    = hist.iloc[-2] if len(hist) >= 2 else last
+        close   = safe_float(last["Close"])
+        atr     = safe_float(last.get("ATR", 0))
+        sma20   = safe_float(last["SMA20"])
+        sma50   = safe_float(last["SMA50"])
+        sma200  = safe_float(last["SMA200"])
+        volume  = safe_float(last["Volume"])
+        vsma20  = safe_float(last["VOL_SMA20"])
+        rsi     = safe_float(last["RSI"])
+        adx     = safe_float(last.get("ADX", 0))
+        macd_h  = safe_float(last["MACD_Hist"])
+        bb_w    = safe_float(last.get("BB_Width", 1.0))
+        rs20    = safe_float(last.get("RS20_vs_SPY", 0))
+        obv_slp = safe_float(last.get("OBV_Slope20", 0))
+        high252 = safe_float(last.get("RollingHigh252", 0))
+        dv20    = safe_float(last.get("DollarVolume20", 0))
+
+        # ── 基本流動性門檻（必須通過，否則直接跳過）────────────────────────
+        if close < US_SEMI_MIN_PRICE or dv20 < US_SEMI_MIN_DOLLAR_VOL:
+            return None
+        # ── 財報封鎖期（避免財報前不確定性）────────────────────────────────
+        if is_earnings_blocked(ticker):
+            return None
+
+        score, reasons = 0.0, []
+
+        # ── A. 趨勢位置（長線必要條件）──────────────────────────────────────
+        above_200 = close > sma200
+        above_50  = close > sma50
+        if above_200 and sma50 > sma200:
+            score += 1.5; reasons.append("SMA 長線多頭")
+            if above_50 and sma20 > sma50:
+                score += 1.0; reasons.append("均線完美排列")
+        elif above_200:
+            score += 0.8; reasons.append("站上 SMA200")
+        else:
+            score -= 1.0  # 年線下方扣分
+
+        # ── B. 動能指標（三角共振）──────────────────────────────────────────
+        if macd_h > 0 and safe_float(prev.get("MACD_Hist", 0)) < macd_h:
+            score += 0.8; reasons.append("MACD 翻多加速")
+        elif macd_h > 0:
+            score += 0.4
+        if 50 <= rsi <= 72:
+            score += 0.8; reasons.append(f"RSI 健康 ({rsi:.0f})")
+        elif rsi < 40:
+            score += 0.3  # 低 RSI 可能是超賣反彈機會，不加分也不扣
+        elif rsi > 75:
+            score -= 0.4  # 高 RSI 短期過熱
+        if adx >= BREAKOUT_ADX_MIN:
+            score += 0.8; reasons.append(f"ADX 強趨勢 ({adx:.0f})")
+
+        # ── C. 相對強度（雙重強度：vs SPY + vs SOX）─────────────────────────
+        if rs20 > RS_STRONG_THRESHOLD:
+            score += 1.0; reasons.append(f"強於大盤 +{rs20:.1f}%")
+        elif rs20 < RS_WEAK_THRESHOLD:
+            score -= 0.6  # 弱於大盤扣分
+
+        # vs SOX (半導體指數相對強度)
+        sox_rs = sox_regime.get("rs_vs_spy", 0)
+        if rs20 > sox_rs + 2.0:
+            score += 0.8; reasons.append("優於半導體指數")
+
+        # ── D. 量能確認（法人動向）──────────────────────────────────────────
+        if obv_slp > 0 and close > sma20:
+            score += 0.5; reasons.append("OBV 法人吸籌")
+        if volume > vsma20 * 1.5 and close > safe_float(prev["Close"]):
+            score += 0.5; reasons.append("放量上漲日")
+
+        # ── E. BB 壓縮突破（最佳進場時機）──────────────────────────────────
+        prev_bw = safe_float(prev.get("BB_Width", 1.0))
+        if bb_w < 0.08:
+            reasons.append("BB 壓縮蓄力")
+        if bb_w > 0.08 and prev_bw < 0.08 and close > safe_float(last.get("BB_upper", 0)) and volume > vsma20 * 1.3:
+            score += 1.5; reasons.append("BB 壓縮放量突破")
+
+        # ── F. 52 週年高位置（強勢領頭羊）──────────────────────────────────
+        if high252 > 0 and close >= high252 * (1 - NEAR_52W_HIGH_PCT):
+            score += 0.8; reasons.append("接近 52W 年高")
+
+        # ── G. SOX 指數趨勢乘數 ──────────────────────────────────────────────
+        sox_mult = {"BULL": 1.0, "NEUTRAL": 0.85, "BEAR": 0.65}.get(
+            sox_regime.get("trend", "NEUTRAL"), 0.85
+        )
+        score = round(score * sox_mult, 2)
+
+        # ── 訊號分類 ─────────────────────────────────────────────────────────
+        if score >= US_SEMI_SCORE_STRONG:
+            signal = "STRONG_BUY"
+        elif score >= US_SEMI_SCORE_BUY:
+            signal = "BUY"
+        elif score >= US_SEMI_SCORE_WATCH:
+            signal = "WATCH"
+        else:
+            return None  # 分數不足，不納入結果
+
+        # ── 停損 / 目標 ───────────────────────────────────────────────────────
+        stop_loss = round(max(0.01, close - 2.0 * atr) if atr > 0 else close * 0.93, 2)
+        tp1       = round(close + 2.0 * atr if atr > 0 else close * 1.08, 2)
+        tp2       = round(close + 4.0 * atr if atr > 0 else close * 1.15, 2)
+
+        # ── 建議股數（ATR-based 風險控制）────────────────────────────────────
+        risk_per_share = max(0.01, close - stop_loss)
+        risk_dollars   = DEFAULT_INITIAL_CAPITAL * LARGE_CAP_RISK_PER_TRADE_PCT
+        suggested_qty  = max(1, math.floor(risk_dollars / risk_per_share))
+
+        return {
+            "ticker":        ticker,
+            "score":         score,
+            "signal":        signal,
+            "close":         round(close, 2),
+            "stop_loss":     stop_loss,
+            "tp1":           tp1,
+            "tp2":           tp2,
+            "suggested_qty": suggested_qty,
+            "rsi":           round(rsi, 1),
+            "adx":           round(adx, 1),
+            "rs20_vs_spy":   round(rs20, 2),
+            "reasons":       reasons[:5],
+            "atr":           round(atr, 2),
+            "dv20_m":        round(dv20 / 1_000_000, 1),  # 日均成交量（百萬$）
+        }
+    except Exception:
+        return None
+
+
+def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
+    """
+    掃描美股半導體宇宙，回傳按分數排序的強勢標的。
+
+    Args:
+        extra_tickers: 額外加入掃描的 ticker（如持倉/watchlist 中的半導體個股）
+
+    Returns:
+        {
+          "strong_buy": [...],  # score >= US_SEMI_SCORE_STRONG
+          "buy":        [...],  # score >= US_SEMI_SCORE_BUY
+          "watch":      [...],  # score >= US_SEMI_SCORE_WATCH
+          "sox_regime": {...},  # SOX 趨勢狀態
+          "total_scanned": int,
+          "scan_date": str,
+        }
+    """
+    sox_regime = _get_sox_regime()
+
+    universe = list(dict.fromkeys(
+        [normalize_ticker(t) for t in US_SEMI_UNIVERSE] +
+        [normalize_ticker(t) for t in (extra_tickers or [])]
+    ))
+
+    results = []
+    with _cf.ThreadPoolExecutor(max_workers=US_SEMI_SCAN_WORKERS) as ex:
+        futs = {ex.submit(_us_semi_score_one, tk, sox_regime): tk for tk in universe}
+        for fut in _cf.as_completed(futs):
+            r = fut.result()
+            if r: results.append(r)
+
+    results.sort(key=lambda x: -x["score"])
+
+    strong_buy = [r for r in results if r["signal"] == "STRONG_BUY"]
+    buy        = [r for r in results if r["signal"] == "BUY"]
+    watch      = [r for r in results if r["signal"] == "WATCH"]
+
+    eastern  = pytz.timezone("US/Eastern")
+    scan_date = datetime.now(eastern).strftime("%Y-%m-%d")
+
+    return {
+        "strong_buy":    strong_buy,
+        "buy":           buy,
+        "watch":         watch,
+        "all_results":   results,
+        "sox_regime":    sox_regime,
+        "total_scanned": len(universe),
+        "total_hits":    len(results),
+        "scan_date":     scan_date,
+    }
+
+
+# _get_sox_regime is defined above with @lru_cache(maxsize=1)
+
+
+def format_us_semi_tg_messages(scan_result: Dict) -> List[str]:
+    """
+    將掃描結果格式化為 Telegram Markdown 訊息列表（每則 ≤ 4000 字自動分頁）。
+    """
+    sox     = scan_result["sox_regime"]
+    strong  = scan_result["strong_buy"]
+    buys    = scan_result["buy"]
+    watches = scan_result["watch"]
+    date    = scan_result["scan_date"]
+    n_scan  = scan_result["total_scanned"]
+    n_hit   = scan_result["total_hits"]
+
+    SOX_EMOJI = {"BULL": "🐂", "NEUTRAL": "➡️", "BEAR": "🐻"}
+    RANK = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+
+    sox_trend = sox.get("trend", "NEUTRAL")
+    sox_rs    = sox.get("rs_vs_spy", 0)
+    sox_price = sox.get("soxx_price", 0)
+
+    header = [
+        "📡 *美股半導體強勢股 · 收盤掃描*",
+        f"📅 {date} (美東)  |  台灣時間 09:00 掃描",
+        f"📊 SOX {SOX_EMOJI[sox_trend]} {sox_trend}  "
+        f"vs SPY {sox_rs:+.1f}%  |  SOXX ${sox_price}",
+        f"掃描 {n_scan} 檔  |  入選 {n_hit} 檔",
+        f"🔴 強力 {len(strong)}  🟢 積極 {len(buys)}  🟡 留意 {len(watches)}",
+        "─────────────────────────────",
+        "",
+    ]
+
+    def _stock_block(i: int, r: dict) -> List[str]:
+        rank   = RANK[i] if i < len(RANK) else f"{i+1}."
+        stars  = "⭐" * min(5, max(1, round(r["score"] / 1.5)))
+        sig_lbl = {"STRONG_BUY": "🔴 強力買進", "BUY": "🟢 積極買進", "WATCH": "🟡 留意"}.get(r["signal"], "")
+        reasons = "、".join(r["reasons"][:3]) if r["reasons"] else "—"
+        return [
+            f"{rank} *{r['ticker']}*  {stars}  {sig_lbl}",
+            f"   分數 *{r['score']:.1f}*  |  RSI {r['rsi']:.0f}  ADX {r['adx']:.0f}",
+            f"   現價 ${r['close']}  |  RS vs SPY {r['rs20_vs_spy']:+.1f}%",
+            f"   📈 {reasons}",
+            f"   🛑 ${r['stop_loss']}  🎯 TP1 ${r['tp1']}  TP2 ${r['tp2']}",
+            f"   建議股數 {r['suggested_qty']} 股  |  日均量 ${r['dv20_m']:.0f}M",
+            "",
+        ]
+
+    footer = ["─────────────────────────────", "⚠️ 本訊息僅供參考，不構成投資建議"]
+
+    MAX  = 4000
+    sep  = "\n"
+    msgs, cur = [], list(header)
+    is_first = True
+    all_stocks = (strong + buys + watches)[:US_SEMI_TOP_N]
+
+    for i, r in enumerate(all_stocks):
+        blk     = sep.join(_stock_block(i, r))
+        cur_txt = sep.join(cur)
+        if len(cur_txt) + len(blk) + 1 > MAX and not is_first:
+            msgs.append(cur_txt)
+            cur = [f"📡 *美股半導體 · 續篇 ({len(msgs)+1})*", ""]
+        cur.extend(_stock_block(i, r))
+        is_first = False
+
+    cur.extend(footer)
+    msgs.append(sep.join(cur))
+    return msgs
+
+
+def send_us_semi_tg(messages: List[str]) -> bool:
+    """發送美股半導體掃描 Telegram 訊息（多則自動送出）"""
+    if not TG_TOKEN or not TG_CHAT_ID: return False
+    ok = True
+    for msg in messages:
+        try:
+            r = requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                json={"chat_id": TG_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
+                timeout=15,
+            )
+            if not r.json().get("ok"): ok = False
+        except Exception: ok = False
+    return ok
