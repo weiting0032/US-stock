@@ -1412,34 +1412,38 @@ with tab6:
                 _reasons = "、".join(_r["reasons"][:3]) if _r["reasons"] else "—"
                 _rank = _rank_emoji[_i] if _i < len(_rank_emoji) else f"{_i+1}."
                 _score_w = min(100, _r["score"] / 8 * 100)
-
+            
                 st.markdown(f"""
-<div class="pc">
-  <div class="pc-accent" style="background:{_sig_color}"></div>
-  <div class="pc-header">
-    <div>
-      <div class="pc-ticker">{_rank} {_r['ticker']} <span style="font-size:.7rem;color:var(--muted);font-weight:400">{_stars}</span></div>
-      <div class="pc-meta">{_r.get('category', 'Semiconductor / Other')} · {_r['reasons'][0] if _r['reasons'] else ''}</div>
-    </div>
-    <div style="text-align:right">
-      <span class="pc-signal" style="background:rgba(255,255,255,.05);color:{_sig_color};border:1px solid {_sig_color}40">{_sig_label}</span>
-      <div style="font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-top:4px">分數 {_r['score']:.1f}/10</div>
-    </div>
-  </div>
-  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
-    <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">${_r['close']}</span>
-    <span style="font-family:var(--mono);font-size:.8rem;color:var(--cyan)">RS vs SPY {_r['rs20_vs_spy']:+.1f}%</span>
-  </div>
-  <div class="wbar-bg"><div class="wbar-fill" style="width:{_score_w:.0f}%;background:{_sig_color}"></div></div>
-  <div class="pc-grid" style="margin-top:10px;">
-    <div class="pc-kv"><span class="pc-kv-label">停損</span><span class="pc-kv-value" style="color:var(--red)">${_r['stop_loss']}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">目標 TP1</span><span class="pc-kv-value" style="color:var(--green)">${_r['tp1']}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">RSI / ADX</span><span class="pc-kv-value">{_r['rsi']:.0f} / {_r['adx']:.0f}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">日均成交</span><span class="pc-kv-value">${_r['dv20_m']:.0f}M</span></div>
-    <div class="pc-kv" style="grid-column:span 2;"><span class="pc-kv-label">因子</span><span class="pc-kv-value" style="font-size:.75rem">{_reasons}</span></div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+            <div class="pc">
+              <div class="pc-accent" style="background:{_sig_color}"></div>
+              <div class="pc-header">
+                <div>
+                  <div class="pc-ticker">{_rank} {_r['ticker']} <span style="font-size:.7rem;color:var(--muted);font-weight:400">{_stars}</span></div>
+                  <div class="pc-meta">{_r.get('category', 'Semiconductor / Other')} · {_r['reasons'][0] if _r['reasons'] else ''}</div>
+                </div>
+                <div style="text-align:right">
+                  <span class="pc-signal" style="background:rgba(255,255,255,.05);color:{_sig_color};border:1px solid {_sig_color}40">{_sig_label}</span>
+                  <div style="font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-top:4px">分數 {_r['score']:.1f}/10</div>
+                </div>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
+                <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">${_r['close']}</span>
+                <span style="font-family:var(--mono);font-size:.8rem;color:var(--cyan)">RS vs SPY {_r['rs20_vs_spy']:+.1f}%</span>
+              </div>
+              <div class="wbar-bg"><div class="wbar-fill" style="width:{_score_w:.0f}%;background:{_sig_color}"></div></div>
+              <div class="pc-grid" style="margin-top:10px;">
+                <div class="pc-kv"><span class="pc-kv-label">停損</span><span class="pc-kv-value" style="color:var(--red)">${_r['stop_loss']}</span></div>
+                <div class="pc-kv"><span class="pc-kv-label">目標 TP1</span><span class="pc-kv-value" style="color:var(--green)">${_r['tp1']}</span></div>
+                <div class="pc-kv"><span class="pc-kv-label">RSI / ADX</span><span class="pc-kv-value">{_r['rsi']:.0f} / {_r['adx']:.0f}</span></div>
+                <div class="pc-kv"><span class="pc-kv-label">日均成交</span><span class="pc-kv-value">${_r['dv20_m']:.0f}M</span></div>
+                <div class="pc-kv" style="grid-column:span 2;"><span class="pc-kv-label">因子</span><span class="pc-kv-value" style="font-size:.75rem">{_reasons}</span></div>
+              </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+                with st.expander(f"📈 查看 {_r['ticker']} 技術圖表", expanded=False):
+                    render_ticker_technical_summary(_r["ticker"])
+                    render_ticker_technical_chart(_r["ticker"], days=180)
 
             st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
             st.markdown('<div class="qsec">完整結果表格</div>', unsafe_allow_html=True)
@@ -1460,9 +1464,7 @@ with tab6:
                 "因子": "、".join(r["reasons"][:3]),
             } for r in _all])
             st.dataframe(_df_show, use_container_width=True, hide_index=True)
-            with st.expander(f"📈 查看 {_r['ticker']} 技術圖表", expanded=False):
-                render_ticker_technical_summary(p["Ticker"])
-                render_ticker_technical_chart(_r["ticker"], days=180)
+
             with st.expander("📨 Telegram 訊息預覽", expanded=False):
                 _tg_res = dict(_res_data)
                 _tg_res["scan_date"] = datetime.now().strftime("%Y-%m-%d")
