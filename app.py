@@ -427,7 +427,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180, chart_key: str =
         st.warning(f"{ticker} 無足夠歷史資料")
         return
 
-    # KDJ
     low_n = plot_df["Low"].rolling(9).min()
     high_n = plot_df["High"].rolling(9).max()
     rsv = (plot_df["Close"] - low_n) / (high_n - low_n + 1e-9) * 100
@@ -676,19 +675,19 @@ with tab1:
 
         st.markdown('<div class="qsec">持倉明細</div>', unsafe_allow_html=True)
 
-        for p in sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True):
-            sig = p.get("Signal", "WATCH")
-            pl = p.get("Unrealized", 0)
-            pl_p = p.get("PL_Pct", 0)
-
+        for i, p in enumerate(sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True)):
+            sig = str(p.get("Signal", "WATCH")).upper()
+            pl = float(p.get("Unrealized", 0) or 0)
+            pl_p = float(p.get("PL_Pct", 0) or 0)
+        
             sl_val = p.get("StopLoss")
             sl_str = f"${sl_val:.2f}" if sl_val and pd.notna(sl_val) else "—"
             tp_val = p.get("TakeProfit1")
             tp_str = f"${tp_val:.2f}" if tp_val and pd.notna(tp_val) else "—"
-            rs_val = p.get("RS20vsSPY", 0)
+            rs_val = float(p.get("RS20vsSPY", 0) or 0)
             rs_str = f"{rs_val:+.1f}%" if rs_val else "—"
-            sc_val = p.get("SignalScore", 0)
-
+            sc_val = float(p.get("SignalScore", 0) or 0)
+        
             if "BUY_NOW" in sig:
                 accent = "#00E5A0"
             elif "BUY_ADD" in sig:
@@ -697,49 +696,98 @@ with tab1:
                 accent = "#FF3366"
             else:
                 accent = "#636B80"
-
+        
             bucket_label = "Large" if p.get("Bucket", "LARGE_CAP") == "LARGE_CAP" else "Small"
-
-            st.markdown(f"""
-<div class="pc">
-  <div class="pc-accent" style="background:{accent}"></div>
-  <div class="pc-header">
-    <div>
-      <div class="pc-ticker">{p['Ticker']} <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_label}</span></div>
-      <div class="pc-meta">
-        {p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}
-        {' · ' + p.get('Industry', '') if p.get('Industry') else ''}
-      </div>
-    </div>
-    <div style="text-align:right">
-      {signal_badge(sig)}
-      <div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">分數 {sc_val:.1f}</div>
-    </div>
-  </div>
-
-  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
-    <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">${p['LastPrice']:.2f}</span>
-    <span class="{pl_class(pl)}" style="font-size:0.88rem">{fmt_pct(pl_p)}&nbsp;&nbsp;{fmt_dollar(pl)}</span>
-  </div>
-
-  {weight_bar(p.get('WeightPct', 0))}
-
-  <div class="pc-grid">
-    <div class="pc-kv"><span class="pc-kv-label">未實現</span><span class="pc-kv-value">{fmt_dollar(p.get('Unrealized', 0))}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">已實現</span><span class="pc-kv-value">{fmt_dollar(p.get('RealizedPL', 0))}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">停損</span><span class="pc-kv-value">{sl_str}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">目標1</span><span class="pc-kv-value">{tp_str}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">RS vs SPY</span><span class="pc-kv-value" style="color:{'var(--green)' if (rs_val or 0)>0 else 'var(--red)'}">{rs_str}</span></div>
-    <div class="pc-kv"><span class="pc-kv-label">部位權重</span><span class="pc-kv-value">{p.get('WeightPct',0):.1f}%</span></div>
-  </div>
-
-  <div class="action-strip">{action_tip(p)}</div>
-</div>
-""", unsafe_allow_html=True)
-
-            with st.expander(f"📈 查看 {p['Ticker']} 技術圖表", expanded=False):
+        
+            # ---- 安全字串處理：避免資料內容破壞 HTML 結構 ----
+            ticker_safe = html.escape(str(p.get("Ticker", "")))
+            bucket_safe = html.escape(str(bucket_label))
+            industry_raw = str(p.get("Industry", "") or "").strip()
+            industry_safe = html.escape(industry_raw)
+        
+            signal_html = signal_badge(sig)  # 此函式本身回傳受控 HTML，可保留
+            action_tip_safe = html.escape(
+                str(action_tip(p))
+                .replace("<b>", "")
+                .replace("</b>", "")
+            )
+        
+            meta_suffix = f" · {industry_safe}" if industry_safe else ""
+            rs_color = "var(--green)" if rs_val > 0 else "var(--red)" if rs_val < 0 else "var(--muted)"
+        
+            card_html = f"""
+        <div class="pc">
+          <div class="pc-accent" style="background:{accent}"></div>
+        
+          <div class="pc-header">
+            <div>
+              <div class="pc-ticker">
+                {ticker_safe}
+                <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_safe}</span>
+              </div>
+              <div class="pc-meta">
+                {p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}{meta_suffix}
+              </div>
+            </div>
+        
+            <div style="text-align:right">
+              {signal_html}
+              <div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">
+                分數 {sc_val:.1f}
+              </div>
+            </div>
+          </div>
+        
+          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
+            <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">
+              ${p['LastPrice']:.2f}
+            </span>
+            <span class="{pl_class(pl)}" style="font-size:0.88rem">
+              {fmt_pct(pl_p)}&nbsp;&nbsp;{fmt_dollar(pl)}
+            </span>
+          </div>
+        
+          {weight_bar(float(p.get('WeightPct', 0) or 0))}
+        
+          <div class="pc-grid">
+            <div class="pc-kv">
+              <span class="pc-kv-label">未實現</span>
+              <span class="pc-kv-value">{fmt_dollar(float(p.get('Unrealized', 0) or 0))}</span>
+            </div>
+            <div class="pc-kv">
+              <span class="pc-kv-label">已實現</span>
+              <span class="pc-kv-value">{fmt_dollar(float(p.get('RealizedPL', 0) or 0))}</span>
+            </div>
+            <div class="pc-kv">
+              <span class="pc-kv-label">停損</span>
+              <span class="pc-kv-value">{sl_str}</span>
+            </div>
+            <div class="pc-kv">
+              <span class="pc-kv-label">目標1</span>
+              <span class="pc-kv-value">{tp_str}</span>
+            </div>
+            <div class="pc-kv">
+              <span class="pc-kv-label">RS vs SPY</span>
+              <span class="pc-kv-value" style="color:{rs_color}">{rs_str}</span>
+            </div>
+            <div class="pc-kv">
+              <span class="pc-kv-label">部位權重</span>
+              <span class="pc-kv-value">{float(p.get('WeightPct', 0) or 0):.1f}%</span>
+            </div>
+          </div>
+        
+          <div class="action-strip">{action_tip_safe}</div>
+        </div>
+        """
+            st.markdown(card_html, unsafe_allow_html=True)
+        
+            with st.expander(f"📈 查看 {ticker_safe} 技術圖表", expanded=False):
                 render_ticker_technical_summary(p["Ticker"])
-                render_ticker_technical_chart(p["Ticker"], days=180)
+                render_ticker_technical_chart(
+                    p["Ticker"],
+                    days=180,
+                    chart_key=f"portfolio_chart_{ticker_safe}_{i}"
+                )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Scanner
