@@ -1210,7 +1210,7 @@ with tab6:
             }
             _rank_emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
-            for _i, _r in enumerate(_all[:20]):
+            for _i, _r in enumerate(_all):
                 _sig_color, _sig_label = _SIG_LABEL.get(_r["signal"], ("var(--muted)", "—"))
                 _stars = "⭐" * min(5, max(1, round(_r["score"] / 1.5)))
                 _reasons = "、".join(_r["reasons"][:3]) if _r["reasons"] else "—"
