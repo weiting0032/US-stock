@@ -4,6 +4,7 @@ Mobile-first · Bloomberg Terminal aesthetic · Dark precision UI
 """
 from datetime import datetime
 import concurrent.futures as _cf_ui
+import html
 
 import pandas as pd
 import plotly.graph_objects as go
