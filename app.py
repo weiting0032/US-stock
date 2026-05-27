@@ -411,7 +411,8 @@ portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capi
 market_value = sum(x["MarketValue"] for x in portfolio_raw)
 total_assets = cash + market_value
 total_unrealized_pl = sum(x["Unrealized"] for x in portfolio_raw)
-total_pl = total_assets - initial_capital
+total_pl = total_realized_pl + total_unrealized_pl
+nav_pl = total_assets - initial_capital
 
 market_regime = get_market_regime()
 portfolio = enrich_portfolio_with_weight_and_risk(portfolio_raw, total_assets, cash, market_regime) if portfolio_raw else []
@@ -436,12 +437,13 @@ st.markdown(f"""
 # ─────────────────────────────────────────────────────────────────────────────
 # NAV summary
 # ─────────────────────────────────────────────────────────────────────────────
-c1, c2, c3, c4 = st.columns(4)
+c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("NAV 總資產", fmt_dollar(total_assets))
-delta_pct = f"{(total_pl / initial_capital * 100):+.2f}%"
-c2.metric("總損益", fmt_dollar(total_pl), delta_pct)
-c3.metric("現金", fmt_dollar(cash))
-c4.metric("Portfolio Heat", f"{heat_info['heat_pct']:.1f}%")
+c2.metric("總損益", fmt_dollar(total_pl), f"{(total_pl / initial_capital * 100):+.2f}%")
+c3.metric("已實現", fmt_dollar(total_realized_pl))
+c4.metric("未實現", fmt_dollar(total_unrealized_pl))
+c5.metric("現金", fmt_dollar(cash))
+c6.metric("Portfolio Heat", f"{heat_info['heat_pct']:.1f}%")
 
 st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
 
@@ -481,7 +483,10 @@ with tab1:
                 legend=dict(font=dict(family="DM Sans", size=11), orientation="h", yanchor="bottom", y=-0.2),
             )
             st.plotly_chart(pie, use_container_width=True, config={"displayModeBar": False})
-
+            
+        <div class="pc-kv"><span class="pc-kv-label">未實現</span><span class="pc-kv-value">{fmt_dollar(p.get('Unrealized', 0))}</span></div>
+        <div class="pc-kv"><span class="pc-kv-label">已實現</span><span class="pc-kv-value">{fmt_dollar(p.get('RealizedPL', 0))}</span></div>
+        
         st.markdown('<div class="qsec">持倉明細</div>', unsafe_allow_html=True)
 
         for p in sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True):
