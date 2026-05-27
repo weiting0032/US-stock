@@ -5,6 +5,7 @@ Mobile-first · Bloomberg Terminal aesthetic · Dark precision UI
 from datetime import datetime
 import concurrent.futures as _cf_ui
 import html
+import textwrap
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -716,70 +717,71 @@ with tab1:
             meta_suffix = f" · {industry_safe}" if industry_safe else ""
             rs_color = "var(--green)" if rs_val > 0 else "var(--red)" if rs_val < 0 else "var(--muted)"
         
-            card_html = f"""
-        <div class="pc">
-          <div class="pc-accent" style="background:{accent}"></div>
-        
-          <div class="pc-header">
-            <div>
-              <div class="pc-ticker">
-                {ticker_safe}
-                <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_safe}</span>
-              </div>
-              <div class="pc-meta">
-                {p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}{meta_suffix}
-              </div>
-            </div>
-        
-            <div style="text-align:right">
-              {signal_html}
-              <div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">
-                分數 {sc_val:.1f}
-              </div>
-            </div>
-          </div>
-        
-          <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
-            <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">
-              ${p['LastPrice']:.2f}
-            </span>
-            <span class="{pl_class(pl)}" style="font-size:0.88rem">
-              {fmt_pct(pl_p)}&nbsp;&nbsp;{fmt_dollar(pl)}
-            </span>
-          </div>
-        
-          {weight_bar(float(p.get('WeightPct', 0) or 0))}
-        
-          <div class="pc-grid">
-            <div class="pc-kv">
-              <span class="pc-kv-label">未實現</span>
-              <span class="pc-kv-value">{fmt_dollar(float(p.get('Unrealized', 0) or 0))}</span>
-            </div>
-            <div class="pc-kv">
-              <span class="pc-kv-label">已實現</span>
-              <span class="pc-kv-value">{fmt_dollar(float(p.get('RealizedPL', 0) or 0))}</span>
-            </div>
-            <div class="pc-kv">
-              <span class="pc-kv-label">停損</span>
-              <span class="pc-kv-value">{sl_str}</span>
-            </div>
-            <div class="pc-kv">
-              <span class="pc-kv-label">目標1</span>
-              <span class="pc-kv-value">{tp_str}</span>
-            </div>
-            <div class="pc-kv">
-              <span class="pc-kv-label">RS vs SPY</span>
-              <span class="pc-kv-value" style="color:{rs_color}">{rs_str}</span>
-            </div>
-            <div class="pc-kv">
-              <span class="pc-kv-label">部位權重</span>
-              <span class="pc-kv-value">{float(p.get('WeightPct', 0) or 0):.1f}%</span>
-            </div>
-          </div>
-        
-          <div class="action-strip">{action_tip_safe}</div>
-        </div>
-        """
+            card_html = textwrap.dedent(f"""
+                <div class="pc">
+                  <div class="pc-accent" style="background:{accent}"></div>
+                
+                  <div class="pc-header">
+                    <div>
+                      <div class="pc-ticker">
+                        {ticker_safe}
+                        <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_safe}</span>
+                      </div>
+                      <div class="pc-meta">
+                        {p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}{meta_suffix}
+                      </div>
+                    </div>
+                
+                    <div style="text-align:right">
+                      {signal_html}
+                      <div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">
+                        分數 {sc_val:.1f}
+                      </div>
+                    </div>
+                  </div>
+                
+                  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
+                    <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">
+                      ${p['LastPrice']:.2f}
+                    </span>
+                    <span class="{pl_class(pl)}" style="font-size:0.88rem">
+                      {fmt_pct(pl_p)}&nbsp;&nbsp;{fmt_dollar(pl)}
+                    </span>
+                  </div>
+                
+                  {weight_bar(float(p.get('WeightPct', 0) or 0))}
+                
+                  <div class="pc-grid">
+                    <div class="pc-kv">
+                      <span class="pc-kv-label">未實現</span>
+                      <span class="pc-kv-value">{fmt_dollar(float(p.get('Unrealized', 0) or 0))}</span>
+                    </div>
+                    <div class="pc-kv">
+                      <span class="pc-kv-label">已實現</span>
+                      <span class="pc-kv-value">{fmt_dollar(float(p.get('RealizedPL', 0) or 0))}</span>
+                    </div>
+                    <div class="pc-kv">
+                      <span class="pc-kv-label">停損</span>
+                      <span class="pc-kv-value">{sl_str}</span>
+                    </div>
+                    <div class="pc-kv">
+                      <span class="pc-kv-label">目標1</span>
+                      <span class="pc-kv-value">{tp_str}</span>
+                    </div>
+                    <div class="pc-kv">
+                      <span class="pc-kv-label">RS vs SPY</span>
+                      <span class="pc-kv-value" style="color:{rs_color}">{rs_str}</span>
+                    </div>
+                    <div class="pc-kv">
+                      <span class="pc-kv-label">部位權重</span>
+                      <span class="pc-kv-value">{float(p.get('WeightPct', 0) or 0):.1f}%</span>
+                    </div>
+                  </div>
+                
+                  <div class="action-strip">{action_tip_safe}</div>
+                </div>
+                """).strip()
+                
             st.markdown(card_html, unsafe_allow_html=True)
         
             with st.expander(f"📈 查看 {ticker_safe} 技術圖表", expanded=False):
@@ -1283,27 +1285,27 @@ with tab6:
     st.markdown('<div class="qsec">🔬 美股半導體宇宙掃描器</div>', unsafe_allow_html=True)
 
     _semi_n = len(set(US_SEMI_UNIVERSE))
-    st.markdown(f"""
-<div class="pc" style="margin-bottom:14px;">
-  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
-    <div style="text-align:center;">
-      <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">掃描宇宙</div>
-      <div style="font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--cyan)">{_semi_n} 檔</div>
-      <div style="font-size:.65rem;color:var(--muted)">SOX + AI 基礎建設</div>
-    </div>
-    <div style="text-align:center;">
-      <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">強力買進門檻</div>
-      <div style="font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--red)">≥ {US_SEMI_SCORE_STRONG:.1f}</div>
-      <div style="font-size:.65rem;color:var(--muted)">/ 10 分</div>
-    </div>
-    <div style="text-align:center;">
-      <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">自動執行</div>
-      <div style="font-family:var(--mono);font-size:1.1rem;font-weight:700;color:var(--gold)">09:00</div>
-      <div style="font-size:.65rem;color:var(--muted)">台灣時間（GitHub Actions）</div>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
+    st.markdown(textwrap.dedent(f"""
+        <div class="pc" style="margin-bottom:14px;">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;">
+            <div style="text-align:center;">
+              <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">掃描宇宙</div>
+              <div style="font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--cyan)">{_semi_n} 檔</div>
+              <div style="font-size:.65rem;color:var(--muted)">SOX + AI 基礎建設</div>
+            </div>
+            <div style="text-align:center;">
+              <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">強力買進門檻</div>
+              <div style="font-family:var(--mono);font-size:1.3rem;font-weight:700;color:var(--red)">≥ {US_SEMI_SCORE_STRONG:.1f}</div>
+              <div style="font-size:.65rem;color:var(--muted)">/ 10 分</div>
+            </div>
+            <div style="text-align:center;">
+              <div style="font-size:.65rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">自動執行</div>
+              <div style="font-family:var(--mono);font-size:1.1rem;font-weight:700;color:var(--gold)">09:00</div>
+              <div style="font-size:.65rem;color:var(--muted)">台灣時間（GitHub Actions）</div>
+            </div>
+          </div>
+        </div>
+        """).strip(), unsafe_allow_html=True)
 
     with st.expander("📐 策略過濾器說明", expanded=False):
         st.markdown(f"""
