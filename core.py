@@ -1194,28 +1194,80 @@ def build_trade_preview(trades_df, initial_capital, ticker, trade_type, price, s
 import concurrent.futures as _cf
 import threading as _thr
 
-# ── 美股半導體宇宙（SOX 成分 + AI 基礎建設 + 設備材料）────────────────────
+# ── 美股半導體宇宙（75 檔，涵蓋 SOX/SOXX/SMH 成分 + AI 基礎建設 + 設備）──
+# 子族群：GPU/AI、晶圓代工、類比/電源、RF/5G、記憶體、
+#         前段設備、後段設備/封測、材料/零組件、EDA/IP、光子/光纖
 US_SEMI_UNIVERSE: List[str] = [
-    # ── AI / GPU / 高效能運算 ──────────────────────────────────────────────
-    "NVDA", "AMD", "INTC", "QCOM",
-    # ── 晶圓代工 ADR ──────────────────────────────────────────────────────
-    "TSM", "GFS", "UMC",
-    # ── 類比 / 混合訊號 / 電源管理 ────────────────────────────────────────
-    "TXN", "ADI", "MPWR", "MCHP", "ON", "NXPI", "SWKS", "QRVO",
-    "WOLF", "SMTC", "MTSI", "ALGM", "CRUS",
-    # ── 網路 / 資料中心 IC ─────────────────────────────────────────────────
-    "AVGO", "MRVL", "RMBS", "AMBA", "SLAB",
-    # ── 記憶體 ────────────────────────────────────────────────────────────
-    "MU", "WDC",
-    # ── 半導體設備 ────────────────────────────────────────────────────────
-    "AMAT", "LRCX", "KLAC", "TER", "ONTO", "FORM", "ICHR", "ACMR",
-    # ── EDA / IP / 測試 ────────────────────────────────────────────────────
-    "CDNS", "SNPS", "COHU", "MKSI",
-    # ── 封裝 / 特殊製程 ───────────────────────────────────────────────────
-    "AMKR", "ASX", "AOSL", "DIOD", "IXYS",
-    # ── 光學 / 光子 ────────────────────────────────────────────────────────
-    "II-VI", "IIVI", "LITE", "AAOI",
+    # ── AI / GPU / HPC ───────────────────────────────────────────────────
+    "NVDA","AMD","INTC","QCOM","MRVL",
+    # ── 無晶圓廠 IC 設計 ────────────────────────────────────────────────
+    "AVGO","ADI","TXN","MPWR","MCHP","SWKS","QRVO","NXPI","ON",
+    "SMTC","RMBS","AMBA","SLAB","CRUS","MTSI","ALGM","AOSL",
+    "LSCC","SITM","CRDO","MXL","CEVA","POWI","DIOD","VSH",
+    "OSIS","PLAB","SIMO","WOLF","AXTI","AEHR","PDFS","VICR",
+    "CLFD","MACOM","ARM",
+    # ── 晶圓代工 / IDM ───────────────────────────────────────────────
+    "TSM","GFS","UMC",
+    # ── 記憶體 ───────────────────────────────────────────────────────
+    "MU","WDC",
+    # ── 半導體設備 ───────────────────────────────────────────────────
+    "AMAT","LRCX","KLAC","TER","ONTO","FORM","ICHR","ACMR",
+    "COHU","KLIC","ENTG","ACLS","AEIS","ESIO","NANO","MKSI",
+    "CCMP","IPGP","VIAV","BRKS","UCTT","CAMT","KEYS",
+    # ── EDA / 設計工具 ───────────────────────────────────────────────
+    "CDNS","SNPS",
+    # ── 封裝測試 ─────────────────────────────────────────────────────
+    "AMKR","ASX",
+    # ── 化合物半導體 / 光子 ──────────────────────────────────────────
+    "LITE","AAOI","IIVI","COHR",
+    # ── AI 伺服器 / 基礎建設 ─────────────────────────────────────────
+    "SMCI",
+    # ── 車用半導體 / LiDAR ───────────────────────────────────────────
+    "MBLY","LAZR","INVZ","OUST",
 ]
+
+
+@lru_cache(maxsize=1)
+def _fetch_etf_holdings(etf: str = "SOXX") -> List[str]:
+    """
+    動態從 ETF 持股中補充宇宙（yfinance 取得 SOXX/SMH 前 50 大持股）。
+    失敗時靜默回傳空列表，不影響主流程。
+    """
+    try:
+        tk = yf.Ticker(etf)
+        holdings = tk.funds_data.top_holdings if hasattr(tk, "funds_data") else None
+        if holdings is None or holdings.empty:
+            return []
+        tickers_from_etf = [
+            normalize_ticker(str(t))
+            for t in holdings.index.tolist()
+            if str(t).strip() and len(str(t).strip()) <= 6
+        ]
+        return tickers_from_etf[:50]
+    except Exception:
+        return []
+
+
+def get_us_semi_universe(include_etf: bool = True) -> List[str]:
+    """
+    取得完整美股半導體掃描宇宙。
+    = 預設靜態列表 (75 檔) + ETF 動態持股補充 (SOXX + SMH)
+    去重後排序，確保每次結果一致。
+
+    Args:
+        include_etf: True 時額外從 SOXX/SMH 動態補充，False 僅用靜態列表
+    """
+    base = [normalize_ticker(t) for t in US_SEMI_UNIVERSE]
+    if not include_etf:
+        return sorted(list(dict.fromkeys(base)))
+
+    # 從 SOXX 和 SMH 補充（兩個 ETF 覆蓋不同子族群）
+    etf_extra: List[str] = []
+    for etf in ["SOXX", "SMH"]:
+        etf_extra.extend(_fetch_etf_holdings(etf))
+
+    combined = list(dict.fromkeys(base + etf_extra))   # 去重保序
+    return sorted(combined)
 
 # ── 掃描策略參數 ──────────────────────────────────────────────────────────────
 US_SEMI_SCORE_STRONG  = get_env_float("US_SEMI_SCORE_STRONG", 5.5)  # 強力買進門檻
@@ -1408,6 +1460,84 @@ def _us_semi_score_one(ticker: str, sox_regime: Dict) -> Optional[Dict]:
         return None
 
 
+
+
+def migrate_trades_v1_to_v2() -> Tuple[bool, str]:
+    """
+    一次性遷移：將 Google Sheets Trades 工作表中的 V1 格式舊資料（7欄）
+    原地轉換為 V2 格式（12欄），同步更新 header，修正欄位錯位問題。
+
+    V1 → V2 欄位對應：
+      Date       → TradeDateTime (補 00:00:00)
+      Ticker     → Ticker
+      Type       → Type  (中文 買入/賣出 自動轉換 BUY/SELL)
+      Price      → Price / GrossTotal / NetTotal
+      Shares     → Shares
+      Total      → GrossTotal / NetTotal (Fee=0, Slippage=0)
+      Note       → Note
+      [新增]     → CreatedAt, Fee, Slippage, OrderID
+    """
+    try:
+        ws     = get_trades_worksheet(readonly=True)
+        values = gsheet_retry(lambda: ws.get_all_values())
+
+        if not values:
+            return False, "工作表為空"
+
+        first = [str(x).strip() for x in values[0]]
+        is_hdr = (first[:len(TRADE_HEADERS_V1)] == TRADE_HEADERS_V1 or
+                  first[:len(TRADE_HEADERS_V2)] == TRADE_HEADERS_V2)
+        rows = values[1:] if is_hdr else values
+
+        migrated, skipped = [], 0
+        for row in rows:
+            row = list(row)
+            if not any(str(c).strip() for c in row):
+                skipped += 1
+                continue
+
+            # Already V2 (12 cols with datetime+time)
+            if len(row) >= 10:
+                migrated.append(row[:12] + [""] * max(0, 12 - len(row)))
+                continue
+
+            # V1 row → convert to V2
+            row7  = row[:7] + [""] * max(0, 7 - len(row))
+            raw_dt = str(row7[0]).strip()
+            # Ensure datetime has time component
+            if raw_dt and ":" not in raw_dt:
+                raw_dt = raw_dt + " 00:00:00"
+
+            ticker = normalize_ticker(str(row7[1]).strip())
+            ttype  = normalize_trade_type(str(row7[2]).strip())
+            try:
+                price  = float(row7[3]) if row7[3] else 0.0
+                shares = float(row7[4]) if row7[4] else 0.0
+                total  = float(row7[5]) if row7[5] else round(price * shares, 4)
+            except ValueError:
+                price = shares = total = 0.0
+            note = str(row7[6]).strip() if len(row7) > 6 else ""
+
+            migrated.append([
+                raw_dt, raw_dt, ticker, ttype,
+                price, shares, total, 0.0, 0.0, total, note, ""
+            ])
+
+        if not migrated:
+            return False, "無可遷移的資料列"
+
+        # Rewrite entire sheet (header + data)
+        new_data = [TRADE_HEADERS_V2] + migrated
+        gsheet_retry(lambda: ws.clear())
+        gsheet_retry(lambda: ws.update("A1", new_data))
+        clear_app_caches()
+
+        _msg = "✅ 遷移完成：" + str(len(migrated)) + " 列已轉 V2，跳過空白：" + str(skipped) + " 列"
+        return True, _msg
+    except Exception as e:
+        return False, f"❌ 遷移失敗：{e}"
+
+
 def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
     """
     掃描美股半導體宇宙，回傳按分數排序的強勢標的。
@@ -1427,8 +1557,10 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
     """
     sox_regime = _get_sox_regime()
 
+    # 使用 get_us_semi_universe() 取得完整宇宙（靜態 75 檔 + ETF 動態補充）
+    base_universe = get_us_semi_universe(include_etf=True)
     universe = list(dict.fromkeys(
-        [normalize_ticker(t) for t in US_SEMI_UNIVERSE] +
+        base_universe +
         [normalize_ticker(t) for t in (extra_tickers or [])]
     ))
 
