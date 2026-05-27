@@ -1379,8 +1379,12 @@ def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: f
     heat = calc_portfolio_heat(portfolio, total_assets).get("heat_pct", 0)
     for p in portfolio:
         hist = get_unified_analysis(p["Ticker"])
+        prof = get_symbol_profile(p["Ticker"])
         row = p.copy()
         row["WeightPct"] = (p["MarketValue"] / total_assets * 100) if total_assets > 0 else 0
+        row["Sector"] = prof.get("sector", "")
+        row["Industry"] = prof.get("industry", "")
+
         if hist is not None and not hist.empty:
             sc, act, det, _ = evaluate_strategy(
                 p["Ticker"], hist, p["Shares"], p["MarketValue"], total_assets, cash, market_regime, heat, portfolio
