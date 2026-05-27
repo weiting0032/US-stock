@@ -1460,9 +1460,9 @@ with tab6:
                 "因子": "、".join(r["reasons"][:3]),
             } for r in _all])
             st.dataframe(_df_show, use_container_width=True, hide_index=True)
-                with st.expander(f"📈 查看 {_r['ticker']} 技術圖表", expanded=False):
-                    render_ticker_technical_summary(p["Ticker"])
-                    render_ticker_technical_chart(_r["ticker"], days=180)
+            with st.expander(f"📈 查看 {_r['ticker']} 技術圖表", expanded=False):
+                render_ticker_technical_summary(p["Ticker"])
+                render_ticker_technical_chart(_r["ticker"], days=180)
             with st.expander("📨 Telegram 訊息預覽", expanded=False):
                 _tg_res = dict(_res_data)
                 _tg_res["scan_date"] = datetime.now().strftime("%Y-%m-%d")
