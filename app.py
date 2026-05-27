@@ -701,87 +701,52 @@ with tab1:
         
             bucket_label = "Large" if p.get("Bucket", "LARGE_CAP") == "LARGE_CAP" else "Small"
         
-            # ---- 安全字串處理：避免資料內容破壞 HTML 結構 ----
             ticker_safe = html.escape(str(p.get("Ticker", "")))
             bucket_safe = html.escape(str(bucket_label))
             industry_raw = str(p.get("Industry", "") or "").strip()
             industry_safe = html.escape(industry_raw)
         
-            signal_html = signal_badge(sig)  # 此函式本身回傳受控 HTML，可保留
+            signal_html = signal_badge(sig)
             action_tip_safe = html.escape(
-                str(action_tip(p))
-                .replace("<b>", "")
-                .replace("</b>", "")
+                str(action_tip(p)).replace("<b>", "").replace("</b>", "")
             )
         
             meta_suffix = f" · {industry_safe}" if industry_safe else ""
             rs_color = "var(--green)" if rs_val > 0 else "var(--red)" if rs_val < 0 else "var(--muted)"
+            weight_html = weight_bar(float(p.get("WeightPct", 0) or 0))
         
-            card_html = textwrap.dedent(f"""
-                <div class="pc">
-                  <div class="pc-accent" style="background:{accent}"></div>
-                
-                  <div class="pc-header">
-                    <div>
-                      <div class="pc-ticker">
-                        {ticker_safe}
-                        <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_safe}</span>
-                      </div>
-                      <div class="pc-meta">
-                        {p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}{meta_suffix}
-                      </div>
-                    </div>
-                
-                    <div style="text-align:right">
-                      {signal_html}
-                      <div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">
-                        分數 {sc_val:.1f}
-                      </div>
-                    </div>
-                  </div>
-                
-                  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">
-                    <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">
-                      ${p['LastPrice']:.2f}
-                    </span>
-                    <span class="{pl_class(pl)}" style="font-size:0.88rem">
-                      {fmt_pct(pl_p)}&nbsp;&nbsp;{fmt_dollar(pl)}
-                    </span>
-                  </div>
-                
-                  {weight_bar(float(p.get('WeightPct', 0) or 0))}
-                
-                  <div class="pc-grid">
-                    <div class="pc-kv">
-                      <span class="pc-kv-label">未實現</span>
-                      <span class="pc-kv-value">{fmt_dollar(float(p.get('Unrealized', 0) or 0))}</span>
-                    </div>
-                    <div class="pc-kv">
-                      <span class="pc-kv-label">已實現</span>
-                      <span class="pc-kv-value">{fmt_dollar(float(p.get('RealizedPL', 0) or 0))}</span>
-                    </div>
-                    <div class="pc-kv">
-                      <span class="pc-kv-label">停損</span>
-                      <span class="pc-kv-value">{sl_str}</span>
-                    </div>
-                    <div class="pc-kv">
-                      <span class="pc-kv-label">目標1</span>
-                      <span class="pc-kv-value">{tp_str}</span>
-                    </div>
-                    <div class="pc-kv">
-                      <span class="pc-kv-label">RS vs SPY</span>
-                      <span class="pc-kv-value" style="color:{rs_color}">{rs_str}</span>
-                    </div>
-                    <div class="pc-kv">
-                      <span class="pc-kv-label">部位權重</span>
-                      <span class="pc-kv-value">{float(p.get('WeightPct', 0) or 0):.1f}%</span>
-                    </div>
-                  </div>
-                
-                  <div class="action-strip">{action_tip_safe}</div>
-                </div>
-                """).strip()
-                
+            card_html = "\n".join([
+                '<div class="pc">',
+                f'  <div class="pc-accent" style="background:{accent}"></div>',
+                '',
+                '  <div class="pc-header">',
+                '    <div>',
+                f'      <div class="pc-ticker">{ticker_safe} <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_safe}</span></div>',
+                f'      <div class="pc-meta">{p["Shares"]:.4f} 股 · 成本 ${p["AvgCost"]:.2f}{meta_suffix}</div>',
+                '    </div>',
+                f'    <div style="text-align:right">{signal_html}<div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">分數 {sc_val:.1f}</div></div>',
+                '  </div>',
+                '',
+                '  <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2px;">',
+                f'    <span style="font-family:var(--mono);font-size:1.15rem;font-weight:700;color:var(--text)">${p["LastPrice"]:.2f}</span>',
+                f'    <span class="{pl_class(pl)}" style="font-size:0.88rem">{fmt_pct(pl_p)}&nbsp;&nbsp;{fmt_dollar(pl)}</span>',
+                '  </div>',
+                '',
+                weight_html,
+                '',
+                '  <div class="pc-grid">',
+                f'    <div class="pc-kv"><span class="pc-kv-label">未實現</span><span class="pc-kv-value">{fmt_dollar(float(p.get("Unrealized", 0) or 0))}</span></div>',
+                f'    <div class="pc-kv"><span class="pc-kv-label">已實現</span><span class="pc-kv-value">{fmt_dollar(float(p.get("RealizedPL", 0) or 0))}</span></div>',
+                f'    <div class="pc-kv"><span class="pc-kv-label">停損</span><span class="pc-kv-value">{sl_str}</span></div>',
+                f'    <div class="pc-kv"><span class="pc-kv-label">目標1</span><span class="pc-kv-value">{tp_str}</span></div>',
+                f'    <div class="pc-kv"><span class="pc-kv-label">RS vs SPY</span><span class="pc-kv-value" style="color:{rs_color}">{rs_str}</span></div>',
+                f'    <div class="pc-kv"><span class="pc-kv-label">部位權重</span><span class="pc-kv-value">{float(p.get("WeightPct", 0) or 0):.1f}%</span></div>',
+                '  </div>',
+                '',
+                f'  <div class="action-strip">{action_tip_safe}</div>',
+                '</div>',
+            ])
+        
             st.markdown(card_html, unsafe_allow_html=True)
         
             with st.expander(f"📈 查看 {ticker_safe} 技術圖表", expanded=False):
