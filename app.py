@@ -516,7 +516,10 @@ with tab1:
   <div class="pc-header">
     <div>
       <div class="pc-ticker">{p['Ticker']} <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_label}</span></div>
-      <div class="pc-meta">{p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}</div>
+      <div class="pc-meta">
+        {p['Shares']:.4f} 股 · 成本 ${p['AvgCost']:.2f}
+        {' · ' + p.get('Industry', '') if p.get('Industry') else ''}
+      </div>
     </div>
     <div style="text-align:right">
       {signal_badge(sig)}
