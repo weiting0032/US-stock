@@ -19,6 +19,7 @@ from core import (
     save_trade, save_watchlist, send_telegram_msg,
     delete_watchlist_ticker, set_watchlist_enabled,
     run_us_semi_scanner, format_us_semi_tg_messages, send_us_semi_tg,
+    migrate_trades_v1_to_v2,
     US_SEMI_UNIVERSE, US_SEMI_SCORE_STRONG, US_SEMI_SCORE_BUY, US_SEMI_SCORE_WATCH,
 )
 
@@ -784,6 +785,27 @@ with tab4:
                 st.success(f"✅ {msg}")
             else:
                 st.error(f"❌ {msg}")
+
+    # ── V1→V2 資料遷移工具 ────────────────────────────────────────────────
+    with st.expander("🔧 歷史資料修復工具（V1→V2 格式遷移）", expanded=False):
+        st.markdown("""
+**問題說明**：舊版代碼寫入 7 欄格式（Date / Ticker / Type / Price / Shares / Total / Note），
+新版表頭升級為 12 欄（TradeDateTime / CreatedAt / Ticker ...），導致欄位錯位。
+
+**修復動作**：一次性將所有舊格式列轉換為新格式，Google Sheets 欄位將正確對齊。
+> ⚠️ 建議先至 Google Sheets 手動備份 Trades 工作表後再執行。
+""")
+        _migrate_col1, _migrate_col2 = st.columns([3, 1])
+        _migrate_col1.caption("點擊右側按鈕開始遷移，執行時間約 10–30 秒。")
+        if _migrate_col2.button("🛠️ 立即修復", use_container_width=True):
+            with st.spinner("遷移中，請勿關閉頁面 …"):
+                _ok, _msg = migrate_trades_v1_to_v2()
+            if _ok:
+                st.success(_msg)
+                clear_market_cache()
+                st.rerun()
+            else:
+                st.error(_msg)
 
     # Recent trades table
     if not trades_df.empty:
