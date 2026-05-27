@@ -1503,173 +1503,234 @@ import concurrent.futures as _cf
 # 備註：這裡採「美股上市可交易」口徑，不限是否為美國本土公司
 # ═══════════════════════════════════════════════════════════════════════════════
 
-US_SEMI_CATEGORY_MAP: Dict[str, str] = {
-    # ── AI / GPU / HPC / CPU ─────────────────────────────────────────────
-    "NVDA": "AI / GPU / HPC",
-    "AMD": "AI / GPU / HPC",
-    "INTC": "CPU / IDM",
-    "QCOM": "Mobile / Communication Chips",
-    "MRVL": "Data Center / Networking",
-    "AVGO": "Broadline / Infrastructure Semis",
-    "ARM": "IP / CPU Architecture",
+# ═══════════════════════════════════════════════════════════════════════════════
+# 美股半導體完整宇宙（100+ 檔，不使用 ETF）
+# 口徑：美股可交易的半導體 / 設備 / 材料 / EDA / 封測 / 光子 / 關聯基礎元件
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    # ── Analog / Power / Mixed Signal ───────────────────────────────────
+US_SEMI_CATEGORY_MAP: Dict[str, str] = {
+    # ── AI / GPU / CPU / Datacenter / Networking ─────────────────────────
+    "NVDA": "AI / GPU / HPC",
+    "AMD": "AI / GPU / CPU",
+    "INTC": "CPU / IDM",
+    "AVGO": "Broadline / Infrastructure Semis",
+    "MRVL": "Data Center / Networking",
+    "QCOM": "Mobile / Communication Chips",
+    "CRDO": "Datacenter Connectivity",
+    "ALAB": "Datacenter Networking",
+    "ARM": "CPU IP / Architecture",
+
+    # ── Analog / Power / Mixed Signal / MCU ──────────────────────────────
     "ADI": "Analog / Mixed Signal",
     "TXN": "Analog / Power",
     "MCHP": "MCU / Analog",
     "MPWR": "Power Management",
     "NXPI": "Auto / Analog / MCU",
     "ON": "Power / Auto Semis",
+    "STM": "IDM / Analog / MCU",
+    "SLAB": "IoT / Mixed Signal",
+    "SMTC": "Analog / IoT",
+    "CRUS": "Mixed Signal / Audio",
     "ALGM": "Power / Motion Control",
     "AOSL": "Power Semiconductors",
     "POWI": "Power Management",
     "DIOD": "Discrete / Analog",
     "VSH": "Discrete / Power",
     "VICR": "Power Modules",
-    "SMTC": "Analog / IoT",
-    "SLAB": "IoT / Analog",
-    "CRUS": "Mixed Signal / Audio",
     "MTSI": "RF / Analog",
-    "RMBS": "Memory / Interface IP",
+    "AZTA": "Specialty Components",
+    "WOLF": "SiC / Power",
+    "IPGP": "Power / Photonics",
+    "AEHR": "Burn-in / Test",
+    "ATOM": "Power / Embedded",
+    "NVEI": "Adjacency / Ignore if needed",
 
-    # ── RF / Wireless / Connectivity ────────────────────────────────────
+    # ── RF / Wireless / Connectivity / Broadband ─────────────────────────
     "SWKS": "RF / Mobile",
     "QRVO": "RF / Mobile",
-    "SIMO": "Controller IC",
-    "MXL": "Connectivity / Broadband",
-    "CEVA": "Wireless / Edge IP",
     "MACOM": "RF / Optical / Analog",
-    "WOLF": "SiC / Power / RF",
-
-    # ── Automotive / Vision / Edge AI / Sensors ─────────────────────────
-    "MBLY": "Auto / ADAS",
-    "INDI": "Auto Semiconductors",
-    "HIMX": "Display Driver / Vision AI",
+    "MXL": "Broadband / Connectivity",
+    "SIMO": "Controller IC",
+    "CEVA": "Wireless / Edge IP",
+    "SITM": "Timing / Clock",
+    "RMBS": "Interface / Memory IP",
     "SYNA": "Human Interface / Edge AI",
+    "HIMX": "Display Driver / Vision",
     "AMBA": "Vision / Edge AI",
     "LSCC": "FPGA / Edge",
-    "SITM": "Timing / Clock",
-    "OSIS": "Sensors / Security / Imaging",
+    "INDI": "Auto / Edge Semis",
 
-    # ── Memory / Storage / Controllers ──────────────────────────────────
+    # ── Memory / Storage / Controllers ───────────────────────────────────
     "MU": "Memory",
     "WDC": "Storage / NAND",
     "RMBS": "Memory / Interface IP",
+    "IMMR": "Memory / Haptics / IP",
 
-    # ── Foundry / IDM / Manufacturing ───────────────────────────────────
+    # ── Foundry / IDM / Manufacturing ────────────────────────────────────
     "TSM": "Foundry",
     "GFS": "Foundry",
     "UMC": "Foundry",
-    "STM": "IDM / Analog / MCU",
     "ASX": "Foundry / Specialty",
-    "IFNNY": "Power / Auto / IDM",   # 若未在美股主板交易可移除
-    "FSLR": "Power / Adjacent",      # 若你要嚴格半導體可移除
+    "UCTT": "Equipment Subsystems",
+    "IFNNY": "Power / IDM",
 
-    # ── EDA / IP / Design Tools ─────────────────────────────────────────
+    # ── EDA / IP / Design Tools / Masks ──────────────────────────────────
     "CDNS": "EDA / Design Tools",
     "SNPS": "EDA / Design Tools",
     "PDFS": "EDA / Yield Software",
     "PLAB": "Photomask",
+    "RMBS": "Semiconductor IP",
+    "CEVA": "Semiconductor IP",
+    "ARM": "Semiconductor IP",
 
-    # ── Semiconductor Equipment ─────────────────────────────────────────
+    # ── Wafer Fab Equipment / Test / Metrology ───────────────────────────
     "AMAT": "Wafer Fab Equipment",
     "LRCX": "Wafer Fab Equipment",
     "KLAC": "Process Control / Inspection",
+    "ASML": "Lithography",
     "TER": "Test Equipment",
     "ONTO": "Inspection / Metrology",
     "FORM": "Test / Inspection",
     "ACMR": "Cleaning Equipment",
     "ACLS": "Ion Implant Equipment",
-    "AEHR": "Burn-in / Test",
     "KLIC": "Packaging Equipment",
     "COHU": "Test / Handler",
     "CAMT": "Metrology / Inspection",
-    "NANO": "PCB / Inspection Equipment",
-    "MKSI": "Sub-systems / Process Control",
-    "ICHR": "Subsidiary Equipment / Delivery",
-    "UCTT": "Sub-systems / Equipment",
+    "NANO": "Inspection Equipment",
+    "MKSI": "Process / Vacuum / Control",
+    "ICHR": "Fluid Delivery / Subsystems",
     "BRKS": "Equipment Subsystems",
-    "KEYS": "Electronic Test / Measurement",
-    "VECO": "Lithography / Process Equipment",
-
-    # ── Materials / Gas / Components / Consumables ──────────────────────
-    "ENTG": "Materials / Filters / FOUP",
+    "VECO": "Process Equipment",
+    "ENTG": "Materials / Contamination Control",
     "AEIS": "Power Systems / Equipment Components",
     "CCMP": "Precision Components",
-    "AXTI": "Compound Semiconductor Materials",
-
-    # ── Packaging / Assembly / OSAT ─────────────────────────────────────
+    "ESIO": "Laser Microfabrication",
+    "MVIS": "Optical Components / Adjacent",
+    "OSIS": "Imaging / Detection / Sensors",
+    "KEYS": "Electronic Test / Measurement",
     "AMKR": "OSAT / Packaging",
+    "HSTM": "Ignore if needed",
+
+    # ── Materials / Wafers / Compound Semiconductors ─────────────────────
+    "AXTI": "Compound Semiconductor Materials",
+    "IIVI": "Compound Semis / Photonics",
+    "COHR": "Photonics / Laser",
+    "LITE": "Optical / Datacom",
+    "AAOI": "Optical / Datacom",
+    "VIAV": "Optical Components / Test",
+    "LASR": "Laser / Photonics",
+    "OEPN": "Optical / Adjacent",
+    "AEHR": "SiC / Burn-in / Test",
+    "WOLF": "SiC / Materials",
+
+    # ── Packaging / Assembly / OSAT / Back-end ───────────────────────────
+    "AMKR": "OSAT / Packaging",
+    "KLIC": "Wire Bond / Packaging Equipment",
+    "FORM": "Back-end Test / Inspection",
+    "COHU": "Back-end Test / Handler",
     "ASX": "Foundry / Packaging Adjacent",
 
-    # ── Optical / Photonics / Compound Semis ────────────────────────────
+    # ── Optical / Photonics / Laser / Datacom ────────────────────────────
     "LITE": "Optical / Datacom",
     "AAOI": "Optical / Datacom",
     "COHR": "Photonics / Laser",
     "IIVI": "Photonics / Compound Semis",
     "IPGP": "Fiber Laser / Photonics",
     "VIAV": "Optical Test / Components",
+    "LASR": "Laser / Photonics",
+    "OI": "Optical Adjacent",
+    "MTSI": "RF / Microwave",
+    "MACOM": "Optical / RF",
 
-    # ── AI Server / Semiconductor Adjacent Infrastructure ───────────────
+    # ── Auto / ADAS / Vision / Sensing ───────────────────────────────────
+    "MBLY": "Auto / ADAS",
+    "INDI": "Auto Semiconductors",
+    "AMBA": "Vision / Auto / Edge AI",
+    "HIMX": "Display / Vision",
+    "OUST": "LiDAR / Sensing",
+    "INVZ": "LiDAR / Sensing",
+    "LAZR": "LiDAR / Sensing",
+    "MVIS": "LiDAR / Optical Sensing",
+    "AEVA": "LiDAR / Sensing",
+    "CGNX": "Machine Vision / Sensors",
+
+    # ── FPGA / Specialized / Edge / Security / Timing ────────────────────
+    "LSCC": "FPGA / Edge",
+    "SITM": "Timing / Clocks",
+    "AMBA": "Vision / Edge AI",
+    "OSIS": "Security / Sensors",
+    "CRUS": "Mixed Signal",
+    "SYNA": "Edge / Interface",
+    "CEVA": "IP / Wireless",
+    "RMBS": "IP / Interface",
+    "LPL": "Ignore if needed",
+
+    # ── Semiconductor-adjacent compute / infrastructure ──────────────────
     "SMCI": "AI Server / Infrastructure",
-    "CRDO": "Datacenter Connectivity",
-    "MTSI": "RF / Analog",
-    "CLFD": "Fiber / Connectivity",
-    "OUST": "LiDAR / Sensors",
-    "INVZ": "LiDAR / Sensors",
-    "LAZR": "LiDAR / Sensors",
-
-    # ── Small / Specialty / Niche ───────────────────────────────────────
-    "AEIS": "Power Systems / Components",
-    "ESIO": "Laser Microfabrication",
-    "SMTC": "Analog / IoT",
-    "AIP": "Semiconductor Adjacent",
+    "DELL": "AI Server / Infrastructure",
+    "ANET": "Datacenter Networking",
+    "CIEN": "Optical Networking",
+    "FN": "Electronics Manufacturing / Hardware",
+    "SANM": "Electronics Manufacturing",
 }
 
-# 更完整的半導體宇宙（手動維護版）
+# 100+ 檔半導體宇宙
 US_SEMI_UNIVERSE: List[str] = sorted(list(dict.fromkeys([
-    # AI / GPU / CPU / HPC / networking
-    "NVDA", "AMD", "INTC", "QCOM", "MRVL", "AVGO", "ARM", "CRDO",
+    # AI / GPU / CPU / Networking
+    "NVDA", "AMD", "INTC", "AVGO", "MRVL", "QCOM", "CRDO", "ALAB", "ARM",
 
-    # Analog / power / mixed signal / MCU
-    "ADI", "TXN", "MCHP", "MPWR", "NXPI", "ON", "ALGM", "AOSL",
-    "POWI", "DIOD", "VSH", "VICR", "SMTC", "SLAB", "CRUS",
+    # Analog / Power / Mixed signal / MCU
+    "ADI", "TXN", "MCHP", "MPWR", "NXPI", "ON", "STM", "SLAB", "SMTC",
+    "CRUS", "ALGM", "AOSL", "POWI", "DIOD", "VSH", "VICR", "MTSI", "ATOM",
 
-    # RF / connectivity / controllers
-    "SWKS", "QRVO", "SIMO", "MXL", "CEVA", "MACOM", "MTSI",
+    # RF / Wireless / Connectivity
+    "SWKS", "QRVO", "MACOM", "MXL", "SIMO", "CEVA", "SITM", "RMBS", "SYNA",
+    "HIMX", "AMBA", "LSCC", "INDI",
 
-    # Auto / vision / edge / sensor
-    "MBLY", "INDI", "HIMX", "SYNA", "AMBA", "LSCC", "SITM", "OSIS",
+    # Memory / Storage
+    "MU", "WDC", "IMMR",
 
-    # Memory / storage
-    "MU", "WDC", "RMBS",
-
-    # Foundry / IDM
-    "TSM", "GFS", "UMC", "STM", "ASX",
+    # Foundry / IDM / manufacturing
+    "TSM", "GFS", "UMC", "ASX", "IFNNY",
 
     # EDA / IP / masks
     "CDNS", "SNPS", "PDFS", "PLAB",
 
-    # Equipment
-    "AMAT", "LRCX", "KLAC", "TER", "ONTO", "FORM", "ACMR", "ACLS",
-    "AEHR", "KLIC", "COHU", "CAMT", "NANO", "MKSI", "ICHR", "UCTT",
-    "BRKS", "KEYS", "VECO",
+    # Equipment / metrology / test
+    "AMAT", "LRCX", "KLAC", "ASML", "TER", "ONTO", "FORM", "ACMR", "ACLS",
+    "AEHR", "KLIC", "COHU", "CAMT", "NANO", "MKSI", "ICHR", "UCTT", "BRKS",
+    "VECO", "ENTG", "AEIS", "CCMP", "ESIO", "KEYS",
 
-    # Materials / components / consumables
-    "ENTG", "AEIS", "CCMP", "AXTI",
+    # Materials / compound semiconductors / photonics
+    "AXTI", "IIVI", "COHR", "LITE", "AAOI", "VIAV", "IPGP", "LASR", "WOLF",
 
     # Packaging / OSAT
     "AMKR",
 
-    # Optical / photonics / compound semis
-    "LITE", "AAOI", "COHR", "IIVI", "IPGP", "VIAV",
+    # Auto / ADAS / sensing / vision
+    "MBLY", "OUST", "INVZ", "LAZR", "MVIS", "AEVA", "CGNX",
 
-    # AI infra / adjacent
-    "SMCI",
+    # Adjacent but tradable semi ecosystem
+    "SMCI", "ANET", "CIEN", "DELL", "FN", "SANM",
 
-    # LiDAR / sensing (可視需求保留)
-    "LAZR", "INVZ", "OUST",
+    # Additional niche / specialty names
+    "ALAB", "AZTA", "ATOM", "OSIS", "MACOM", "MTSI", "SYNA", "HIMX",
+    "INDI", "LSCC", "SITM", "PLAB", "PDFS", "SIMO", "MXL", "CEVA",
 ])))
+
+US_SEMI_GROUPS: Dict[str, List[str]] = {
+    "AI / GPU / CPU": ["NVDA", "AMD", "INTC", "AVGO", "MRVL", "QCOM", "CRDO", "ALAB", "ARM"],
+    "Analog / Power / MCU": ["ADI", "TXN", "MCHP", "MPWR", "NXPI", "ON", "STM", "SLAB", "SMTC", "CRUS", "ALGM", "AOSL", "POWI", "DIOD", "VSH", "VICR"],
+    "RF / Connectivity": ["SWKS", "QRVO", "MACOM", "MXL", "SIMO", "CEVA", "SITM", "RMBS"],
+    "Memory / Storage": ["MU", "WDC", "IMMR"],
+    "Foundry / IDM": ["TSM", "GFS", "UMC", "ASX", "IFNNY"],
+    "EDA / IP": ["CDNS", "SNPS", "PDFS", "PLAB", "ARM", "RMBS", "CEVA"],
+    "Equipment / Test / Metrology": ["AMAT", "LRCX", "KLAC", "ASML", "TER", "ONTO", "FORM", "ACMR", "ACLS", "AEHR", "KLIC", "COHU", "CAMT", "NANO", "MKSI", "ICHR", "UCTT", "BRKS", "VECO", "KEYS"],
+    "Materials / Compound / Photonics": ["ENTG", "AEIS", "CCMP", "AXTI", "IIVI", "COHR", "LITE", "AAOI", "VIAV", "IPGP", "LASR", "WOLF"],
+    "Packaging / OSAT": ["AMKR"],
+    "Auto / ADAS / Vision": ["MBLY", "INDI", "AMBA", "HIMX", "OUST", "INVZ", "LAZR", "MVIS", "AEVA", "CGNX"],
+    "Infrastructure / Adjacent": ["SMCI", "ANET", "CIEN", "DELL", "FN", "SANM"],
+}
 
 
 @lru_cache(maxsize=1)
@@ -1691,25 +1752,16 @@ def _fetch_etf_holdings(etf: str = "SOXX") -> List[str]:
 
 def get_us_semi_universe(include_etf: bool = False) -> List[str]:
     """
-    取得完整美股半導體掃描宇宙（不使用 ETF）。
+    取得完整美股半導體宇宙（不使用 ETF）。
     """
     return sorted(list(dict.fromkeys([normalize_ticker(t) for t in US_SEMI_UNIVERSE])))
 
-
-US_SEMI_SCORE_STRONG = get_env_float("US_SEMI_SCORE_STRONG", 5.5)
-US_SEMI_SCORE_BUY = get_env_float("US_SEMI_SCORE_BUY", 3.5)
-US_SEMI_SCORE_WATCH = get_env_float("US_SEMI_SCORE_WATCH", 2.0)
-US_SEMI_MIN_DOLLAR_VOL = get_env_float("US_SEMI_MIN_DOLLAR_VOL", 20_000_000)
-US_SEMI_MIN_PRICE = get_env_float("US_SEMI_MIN_PRICE", 10.0)
-US_SEMI_SCAN_WORKERS = get_env_int("US_SEMI_SCAN_WORKERS", 10)
-US_SEMI_TOP_N = get_env_int("US_SEMI_TOP_N", 15)
 
 def get_us_semi_category(ticker: str) -> str:
     ticker = normalize_ticker(ticker)
     if ticker in US_SEMI_CATEGORY_MAP:
         return US_SEMI_CATEGORY_MAP[ticker]
 
-    # 後備：用 yfinance profile 補分類
     prof = get_symbol_profile(ticker)
     industry = str(prof.get("industry") or "").strip()
     sector = str(prof.get("sector") or "").strip()
@@ -1719,6 +1771,15 @@ def get_us_semi_category(ticker: str) -> str:
     if sector:
         return sector
     return "Semiconductor / Other"
+
+
+US_SEMI_SCORE_STRONG = get_env_float("US_SEMI_SCORE_STRONG", 5.5)
+US_SEMI_SCORE_BUY = get_env_float("US_SEMI_SCORE_BUY", 3.5)
+US_SEMI_SCORE_WATCH = get_env_float("US_SEMI_SCORE_WATCH", 2.0)
+US_SEMI_MIN_DOLLAR_VOL = get_env_float("US_SEMI_MIN_DOLLAR_VOL", 20_000_000)
+US_SEMI_MIN_PRICE = get_env_float("US_SEMI_MIN_PRICE", 10.0)
+US_SEMI_SCAN_WORKERS = get_env_int("US_SEMI_SCAN_WORKERS", 10)
+US_SEMI_TOP_N = get_env_int("US_SEMI_TOP_N", 15)
 
 def _get_sox_regime() -> Dict:
     try:
