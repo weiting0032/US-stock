@@ -658,7 +658,30 @@ def _normalize_trade_row_to_v2(row: List[str]) -> Optional[Dict]:
     if not any(row):
         return None
 
-    # Case 1: 標準 V2
+    # 去掉尾端空白，保留中間空格
+    while row and row[-1] == "":
+        row.pop()
+
+    # ── Case 0: 舊資料整列右移 3 格 ─────────────────────────────
+    # 例如:
+    # ["", "", "", "2025-11-21", "NVDA", "買入 (Buy)", "180.8", "13", "2350.4"]
+    if len(row) >= 9 and row[0] == "" and row[1] == "" and row[2] == "":
+        shifted = row[3:]
+        # 若右移後是 header，直接跳過
+        if len(shifted) >= 6 and shifted[:6] == ["TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares"]:
+            return None
+        # 若右移後像 legacy row，就用 shifted 再解析
+        row = shifted
+
+    # ── Case 0.5: 任何位置出現殘留 header row，一律跳過 ──────────
+    header_join = "|".join(row).upper()
+    if "TRADEDATETIME" in header_join and "TICKER" in header_join and "TYPE" in header_join:
+        # 避免把 header 當資料
+        dt_try = pd.to_datetime(row[0], errors="coerce") if row else pd.NaT
+        if pd.isna(dt_try):
+            return None
+
+    # ── Case 1: 標準 V2 ─────────────────────────────────────────
     if len(row) >= 10:
         c1 = row[1] if len(row) > 1 else ""
         c2 = row[2] if len(row) > 2 else ""
@@ -669,7 +692,7 @@ def _normalize_trade_row_to_v2(row: List[str]) -> Optional[Dict]:
             row12 = row[:12] + [""] * max(0, 12 - len(row))
             return dict(zip(TRADE_HEADERS_V2, row12))
 
-    # Case 2: Legacy-6 / Legacy-7
+    # ── Case 2: Legacy-6 / Legacy-7 ────────────────────────────
     if len(row) >= 6:
         c0, c1, c2, c3, c4, c5 = row[:6]
         dt0 = pd.to_datetime(c0, errors="coerce")
@@ -690,24 +713,26 @@ def _normalize_trade_row_to_v2(row: List[str]) -> Optional[Dict]:
                 "OrderID": "",
             }
 
-    # Case 3: 舊 V1 fallback
+    # ── Case 3: 舊 V1 fallback ─────────────────────────────────
     if len(row) >= 5:
         row7 = row[:7] + [""] * max(0, 7 - len(row))
         raw_dt = row7[0] if ":" in row7[0] else f"{row7[0]} 00:00:00"
-        return {
-            "TradeDateTime": raw_dt,
-            "CreatedAt": raw_dt,
-            "Ticker": row7[1],
-            "Type": row7[2],
-            "Price": row7[3],
-            "Shares": row7[4],
-            "GrossTotal": row7[5],
-            "Fee": 0.0,
-            "Slippage": 0.0,
-            "NetTotal": row7[5],
-            "Note": row7[6],
-            "OrderID": "",
-        }
+        dt0 = pd.to_datetime(raw_dt, errors="coerce")
+        if pd.notna(dt0):
+            return {
+                "TradeDateTime": raw_dt,
+                "CreatedAt": raw_dt,
+                "Ticker": row7[1],
+                "Type": row7[2],
+                "Price": row7[3],
+                "Shares": row7[4],
+                "GrossTotal": row7[5],
+                "Fee": 0.0,
+                "Slippage": 0.0,
+                "NetTotal": row7[5],
+                "Note": row7[6],
+                "OrderID": "",
+            }
 
     return None
 
@@ -1714,8 +1739,34 @@ def migrate_trades_v1_to_v2() -> Tuple[bool, str]:
 
         migrated = []
         skipped = 0
+        skipped_headers = 0
 
         for row in rows:
+            row = [str(c).strip() for c in list(row)]
+
+            if not any(row):
+                skipped += 1
+                continue
+
+            # 先移除尾端空白
+            while row and row[-1] == "":
+                row.pop()
+
+            # 特判：右移 3 格的殘留 header row
+            if len(row) >= 9 and row[0] == "" and row[1] == "" and row[2] == "":
+                shifted = row[3:]
+                if len(shifted) >= 6 and shifted[:6] == ["TradeDateTime", "CreatedAt", "Ticker", "Type", "Price", "Shares"]:
+                    skipped_headers += 1
+                    continue
+
+            # 一般 header row 殘留直接跳過
+            joined = "|".join(row).upper()
+            if "TRADEDATETIME" in joined and "TICKER" in joined and "TYPE" in joined:
+                dt_try = pd.to_datetime(row[0], errors="coerce") if row else pd.NaT
+                if pd.isna(dt_try):
+                    skipped_headers += 1
+                    continue
+
             item = _normalize_trade_row_to_v2(row)
             if item is None:
                 skipped += 1
@@ -1739,12 +1790,15 @@ def migrate_trades_v1_to_v2() -> Tuple[bool, str]:
         if not migrated:
             return False, "無可遷移資料"
 
+        # 依交易時間排序，避免修復後順序混亂
+        migrated.sort(key=lambda x: pd.to_datetime(x[0], errors="coerce"))
+
         new_data = [TRADE_HEADERS_V2] + migrated
         gsheet_retry(lambda: ws.clear())
         gsheet_retry(lambda: ws.update("A1", new_data))
         clear_app_caches()
 
-        return True, f"✅ 遷移完成：{len(migrated)} 列，跳過空白 {skipped} 列"
+        return True, f"✅ 遷移完成：{len(migrated)} 列，跳過空白 {skipped} 列，跳過表頭殘留 {skipped_headers} 列"
     except Exception as e:
         return False, f"❌ 遷移失敗：{e}"
 
