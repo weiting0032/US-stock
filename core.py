@@ -2059,7 +2059,7 @@ def format_us_semi_tg_messages(scan_result: Dict) -> List[str]:
     sep = "\n"
     msgs, cur = [], list(header)
     is_first = True
-    all_stocks = (strong + buys + watches)[:US_SEMI_TOP_N]
+    all_stocks = strong + buys + watches
 
     for i, r in enumerate(all_stocks):
         blk = sep.join(_stock_block(i, r))
