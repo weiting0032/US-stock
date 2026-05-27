@@ -1216,7 +1216,7 @@ with tab6:
   <div class="pc-header">
     <div>
       <div class="pc-ticker">{_rank} {_r['ticker']} <span style="font-size:.7rem;color:var(--muted);font-weight:400">{_stars}</span></div>
-      <div class="pc-meta">{_r['reasons'][0] if _r['reasons'] else ''}</div>
+      <div class="pc-meta">{_r.get('category', 'Semiconductor / Other')} · {_r['reasons'][0] if _r['reasons'] else ''}</div>
     </div>
     <div style="text-align:right">
       <span class="pc-signal" style="background:rgba(255,255,255,.05);color:{_sig_color};border:1px solid {_sig_color}40">{_sig_label}</span>
@@ -1242,6 +1242,7 @@ with tab6:
             st.markdown('<div class="qsec">完整結果表格</div>', unsafe_allow_html=True)
             _df_show = pd.DataFrame([{
                 "代碼": r["ticker"],
+                "類別": r.get("category", "Semiconductor / Other"),
                 "訊號": r["signal"],
                 "分數": r["score"],
                 "現價": r["close"],
