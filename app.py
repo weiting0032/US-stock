@@ -3,24 +3,52 @@
 Mobile-first · Bloomberg Terminal aesthetic · Dark precision UI
 """
 from datetime import datetime
+import concurrent.futures as _cf_ui
+
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
 from core import (
-    DEFAULT_COMMISSION, DEFAULT_INITIAL_CAPITAL, DEFAULT_SLIPPAGE_PCT,
-    build_portfolio, build_trade_preview, calculate_performance_metrics,
-    calc_portfolio_heat, clear_market_cache, color_pl, display_market_regime,
-    enrich_portfolio_with_weight_and_risk, evaluate_strategy,
-    get_market_regime, get_market_session, get_unified_analysis,
-    load_alerts, load_history, load_signals, load_trades, load_watchlist,
-    maybe_log_daily_history, normalize_ticker, run_auto_scanner,
-    save_trade, save_watchlist, send_telegram_msg,
-    delete_watchlist_ticker, set_watchlist_enabled,
-    run_us_semi_scanner, format_us_semi_tg_messages, send_us_semi_tg,
+    DEFAULT_COMMISSION,
+    DEFAULT_INITIAL_CAPITAL,
+    DEFAULT_SLIPPAGE_PCT,
+    US_SEMI_SCORE_BUY,
+    US_SEMI_SCORE_STRONG,
+    US_SEMI_SCORE_WATCH,
+    US_SEMI_UNIVERSE,
+    _get_sox_regime,
+    _us_semi_score_one,
+    build_portfolio,
+    build_trade_preview,
+    calc_portfolio_heat,
+    calculate_performance_metrics,
+    clear_market_cache,
+    color_pl,
+    delete_watchlist_ticker,
+    display_market_regime,
+    enrich_portfolio_with_weight_and_risk,
+    evaluate_strategy,
+    format_us_semi_tg_messages,
+    get_market_regime,
+    get_market_session,
+    get_unified_analysis,
+    load_alerts,
+    load_history,
+    load_signals,
+    load_trades,
+    load_watchlist,
+    maybe_log_daily_history,
     migrate_trades_v1_to_v2,
-    US_SEMI_UNIVERSE, US_SEMI_SCORE_STRONG, US_SEMI_SCORE_BUY, US_SEMI_SCORE_WATCH,
+    normalize_ticker,
+    run_auto_scanner,
+    run_us_semi_scanner,
+    save_trade,
+    save_watchlist,
+    send_telegram_msg,
+    send_us_semi_tg,
+    set_watchlist_enabled,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -34,13 +62,12 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Global CSS — Bloomberg Terminal × iOS precision
+# Global CSS
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
 
-/* ── Reset & base ───────────────────────────────────────────────────────── */
 :root {
   --bg:         #07080D;
   --surface:    #0F1118;
@@ -64,20 +91,16 @@ html, body, [data-testid="stAppViewContainer"] {
   font-family: var(--sans);
 }
 
-/* hide default streamlit chrome */
 #MainMenu, footer, header { visibility: hidden; }
 [data-testid="stSidebarNav"] { display: none; }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
 
-/* ── Typography ─────────────────────────────────────────────────────────── */
 h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--text); }
 .mono { font-family: var(--mono); }
 
-/* ── Streamlit overrides ────────────────────────────────────────────────── */
 [data-testid="stMetricValue"] {
   font-family: var(--mono) !important;
   font-size: 1.35rem !important;
@@ -92,7 +115,10 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
   letter-spacing: 0.06em;
   font-family: var(--sans) !important;
 }
-[data-testid="stMetricDelta"] { font-size: 0.78rem !important; font-family: var(--mono) !important; }
+[data-testid="stMetricDelta"] {
+  font-size: 0.78rem !important;
+  font-family: var(--mono) !important;
+}
 
 .stMetric {
   background: var(--surface) !important;
@@ -101,7 +127,6 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
   padding: 14px 16px !important;
 }
 
-/* Tab bar */
 [data-baseweb="tab-list"] {
   background: var(--surface) !important;
   border-radius: 12px !important;
@@ -124,7 +149,6 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
   color: #000 !important;
 }
 
-/* Buttons */
 .stButton > button {
   background: var(--surface2) !important;
   border: 1px solid var(--border2) !important;
@@ -140,7 +164,6 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
   color: var(--cyan) !important;
 }
 
-/* Inputs */
 .stTextInput > div > div > input,
 .stNumberInput > div > div > input,
 .stSelectbox > div > div {
@@ -152,16 +175,12 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
   font-size: 0.9rem !important;
 }
 
-/* Expanders */
 [data-testid="stExpander"] {
   background: var(--surface) !important;
   border: 1px solid var(--border) !important;
   border-radius: 12px !important;
 }
 
-/* ── Custom components ──────────────────────────────────────────────────── */
-
-/* Top header bar */
 .qp-header {
   display: flex; align-items: center; justify-content: space-between;
   padding: 12px 0 20px;
@@ -176,7 +195,6 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
 }
 .qp-logo span { color: var(--muted); font-weight: 400; }
 
-/* Regime + session badges */
 .badge {
   display: inline-flex; align-items: center; gap: 5px;
   padding: 4px 10px;
@@ -191,8 +209,10 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
 .badge-neu { background: rgba(255,184,0,0.12);  color: var(--gold);  border: 1px solid rgba(255,184,0,0.25); }
 .badge-session { background: rgba(0,212,255,0.1); color: var(--cyan); border: 1px solid rgba(0,212,255,0.25); }
 .badge-closed  { background: rgba(99,107,128,0.15); color: var(--muted); border: 1px solid var(--border2); }
+.badge-up   { background: rgba(0,229,160,0.15); color: var(--green); border: 1px solid rgba(0,229,160,0.3); }
+.badge-down { background: rgba(255,51,102,0.15); color: var(--red); border: 1px solid rgba(255,51,102,0.3); }
+.badge-flat { background: rgba(255,184,0,0.12); color: var(--gold); border: 1px solid rgba(255,184,0,0.25); }
 
-/* Portfolio card */
 .pc {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -240,11 +260,9 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
 .pc-kv-label { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--sans); }
 .pc-kv-value { font-size: 0.88rem; font-family: var(--mono); color: var(--text); font-weight: 600; }
 
-/* Weight bar */
 .wbar-bg { background: var(--surface2); border-radius: 999px; height: 4px; margin-top: 10px; }
 .wbar-fill { height: 4px; border-radius: 999px; transition: width 0.4s; }
 
-/* Action strip */
 .action-strip {
   margin-top: 12px; padding: 10px 12px;
   background: var(--surface2); border-radius: 10px;
@@ -253,7 +271,6 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
   font-family: var(--sans);
 }
 
-/* Scanner card */
 .sc-card {
   background: var(--surface); border: 1px solid var(--border);
   border-radius: 14px; padding: 14px 16px; margin-bottom: 8px;
@@ -271,11 +288,9 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
 }
 .sc-reason { font-size: 0.75rem; color: var(--muted); margin-top: 2px; font-family: var(--sans); }
 
-/* Score bar */
 .sbar { background: var(--surface2); border-radius: 999px; height: 3px; flex: 1; }
 .sbar-fill { height: 3px; border-radius: 999px; background: linear-gradient(90deg, var(--cyan), var(--green)); }
 
-/* Perf stat grid */
 .pstat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .pstat {
   background: var(--surface); border: 1px solid var(--border);
@@ -284,19 +299,9 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
 .pstat-label { font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-family: var(--sans); }
 .pstat-value { font-family: var(--mono); font-size: 1.2rem; font-weight: 700; margin-top: 4px; }
 
-/* Divider */
 .qdiv { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
-
-/* Section heading */
 .qsec { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: var(--sans); font-weight: 700; margin: 18px 0 10px; }
 
-/* VIX meter */
-.vix-bar { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-.vix-label { font-family: var(--mono); font-size: 0.8rem; color: var(--muted); min-width: 36px; }
-.vix-track { flex: 1; background: var(--surface2); border-radius: 999px; height: 6px; }
-.vix-fill { height: 6px; border-radius: 999px; }
-
-/* Mobile breakpoints */
 @media (max-width: 600px) {
   [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
   .pc { padding: 14px; }
@@ -305,51 +310,70 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
 </style>
 """, unsafe_allow_html=True)
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def signal_badge(signal: str) -> str:
     signal = str(signal).upper()
-    if "BUY_NOW"    in signal: return f'<span class="pc-signal sig-buy">▲ 買進</span>'
-    if "BUY_ADD"    in signal: return f'<span class="pc-signal sig-add">＋ 加碼</span>'
-    if "SELL_EXIT"  in signal: return f'<span class="pc-signal sig-sell">▼ 出場</span>'
-    if "SELL_PART"  in signal: return f'<span class="pc-signal sig-part">◑ 減碼</span>'
-    return f'<span class="pc-signal sig-watch">— 觀望</span>'
+    if "BUY_NOW" in signal:
+        return '<span class="pc-signal sig-buy">▲ 買進</span>'
+    if "BUY_ADD" in signal:
+        return '<span class="pc-signal sig-add">＋ 加碼</span>'
+    if "SELL_EXIT" in signal:
+        return '<span class="pc-signal sig-sell">▼ 出場</span>'
+    if "SELL_PART" in signal:
+        return '<span class="pc-signal sig-part">◑ 減碼</span>'
+    return '<span class="pc-signal sig-watch">— 觀望</span>'
+
 
 def regime_badge(regime: str, vix) -> str:
     label = display_market_regime(regime)
     vix_str = f" VIX {vix:.1f}" if vix else ""
-    if regime == "RISK_ON":  return f'<span class="badge badge-on">🟢 {label}{vix_str}</span>'
-    if regime == "RISK_OFF": return f'<span class="badge badge-off">🔴 {label}{vix_str}</span>'
+    if regime == "RISK_ON":
+        return f'<span class="badge badge-on">🟢 {label}{vix_str}</span>'
+    if regime == "RISK_OFF":
+        return f'<span class="badge badge-off">🔴 {label}{vix_str}</span>'
     return f'<span class="badge badge-neu">🟡 {label}{vix_str}</span>'
 
+
 def session_badge(session: str) -> str:
-    labels = {"REGULAR": ("正常盤", "badge-session"), "PREMARKET": ("盤前", "badge-session"),
-              "AFTERMARKET": ("盤後", "badge-session"), "CLOSED": ("休市", "badge-closed")}
+    labels = {
+        "REGULAR": ("正常盤", "badge-session"),
+        "PREMARKET": ("盤前", "badge-session"),
+        "AFTERMARKET": ("盤後", "badge-session"),
+        "CLOSED": ("休市", "badge-closed"),
+    }
     lbl, cls = labels.get(session, (session, "badge-closed"))
     return f'<span class="badge {cls}">{lbl}</span>'
 
+
 def pl_class(val: float) -> str:
-    if val > 0: return "pc-pl-positive"
-    if val < 0: return "pc-pl-negative"
+    if val > 0:
+        return "pc-pl-positive"
+    if val < 0:
+        return "pc-pl-negative"
     return "pc-pl-zero"
+
 
 def fmt_dollar(v: float) -> str:
     return f"${v:,.2f}"
+
 
 def fmt_pct(v: float) -> str:
     sign = "+" if v > 0 else ""
     return f"{sign}{v:.2f}%"
 
+
 def weight_bar(pct: float, max_pct: float = 25) -> str:
     fill = min(100, pct / max_pct * 100)
     colour = "#FF3366" if pct > max_pct * 0.9 else "#00D4FF"
-    return f'''<div class="wbar-bg"><div class="wbar-fill" style="width:{fill:.0f}%;background:{colour}"></div></div>'''
+    return f'<div class="wbar-bg"><div class="wbar-fill" style="width:{fill:.0f}%;background:{colour}"></div></div>'
+
 
 def score_bar(score: float, max_score: float = 8) -> str:
     fill = min(100, score / max_score * 100)
-    return f'''<div class="sbar"><div class="sbar-fill" style="width:{fill:.0f}%"></div></div>'''
+    return f'<div class="sbar"><div class="sbar-fill" style="width:{fill:.0f}%"></div></div>'
+
 
 def action_tip(p: dict) -> str:
     sig = p.get("Signal", "WATCH")
@@ -373,23 +397,26 @@ if "init_capital" not in st.session_state:
 initial_capital = st.session_state.init_capital
 
 try:
-    trades_df    = load_trades()
+    trades_df = load_trades()
     watchlist_df = load_watchlist()
-    history_df   = load_history()
-    alerts_df    = load_alerts()
+    history_df = load_history()
+    alerts_df = load_alerts()
 except Exception:
-    trades_df = watchlist_df = history_df = alerts_df = pd.DataFrame()
+    trades_df = pd.DataFrame()
+    watchlist_df = pd.DataFrame()
+    history_df = pd.DataFrame()
+    alerts_df = pd.DataFrame()
 
 portfolio_raw, cash, total_realized_pl = build_portfolio(trades_df, initial_capital)
-market_value         = sum(x["MarketValue"] for x in portfolio_raw)
-total_assets         = cash + market_value
-total_unrealized_pl  = sum(x["Unrealized"]   for x in portfolio_raw)
-total_pl             = total_assets - initial_capital
+market_value = sum(x["MarketValue"] for x in portfolio_raw)
+total_assets = cash + market_value
+total_unrealized_pl = sum(x["Unrealized"] for x in portfolio_raw)
+total_pl = total_assets - initial_capital
 
 market_regime = get_market_regime()
-portfolio     = enrich_portfolio_with_weight_and_risk(portfolio_raw, total_assets, cash, market_regime) if portfolio_raw else []
-heat_info     = calc_portfolio_heat(portfolio, total_assets)
-perf          = calculate_performance_metrics(history_df)
+portfolio = enrich_portfolio_with_weight_and_risk(portfolio_raw, total_assets, cash, market_regime) if portfolio_raw else []
+heat_info = calc_portfolio_heat(portfolio, total_assets)
+perf = calculate_performance_metrics(history_df)
 
 session = get_market_session()
 
@@ -407,7 +434,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NAV summary bar (4 metrics)
+# NAV summary
 # ─────────────────────────────────────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("NAV 總資產", fmt_dollar(total_assets))
@@ -419,12 +446,11 @@ c4.metric("Portfolio Heat", f"{heat_info['heat_pct']:.1f}%")
 st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main tabs
+# Tabs
 # ─────────────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效", "🔬 美股半導體"
 ])
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Portfolio Dashboard
@@ -433,19 +459,21 @@ with tab1:
     if not portfolio:
         st.info("目前無持倉。在「交易」頁籤新增第一筆買進紀錄。")
     else:
-        # Pie chart in expander to save space
         with st.expander("資產配置圖", expanded=False):
             labels = [p["Ticker"] for p in portfolio]
             values = [p["MarketValue"] for p in portfolio]
             colours = ["#00D4FF", "#00E5A0", "#FFB800", "#9B6DFF", "#FF3366",
                        "#FF8C42", "#4CC9F0", "#7BFF6A", "#F72585"][:len(labels)]
             pie = go.Figure(go.Pie(
-                labels=labels, values=values, hole=0.6,
+                labels=labels,
+                values=values,
+                hole=0.6,
                 marker=dict(colors=colours, line=dict(color="#07080D", width=2)),
                 textfont=dict(family="JetBrains Mono", size=11),
             ))
             pie.update_layout(
-                template="plotly_dark", height=260,
+                template="plotly_dark",
+                height=260,
                 margin=dict(l=0, r=0, t=10, b=0),
                 paper_bgcolor="rgba(0,0,0,0)",
                 plot_bgcolor="rgba(0,0,0,0)",
@@ -457,20 +485,26 @@ with tab1:
         st.markdown('<div class="qsec">持倉明細</div>', unsafe_allow_html=True)
 
         for p in sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True):
-            sig   = p.get("Signal", "WATCH")
-            pl    = p.get("Unrealized", 0)
-            pl_p  = p.get("PL_Pct", 0)
+            sig = p.get("Signal", "WATCH")
+            pl = p.get("Unrealized", 0)
+            pl_p = p.get("PL_Pct", 0)
 
-            sl_val = p.get("StopLoss");  sl_str = f"${sl_val:.2f}" if sl_val and pd.notna(sl_val) else "—"
-            tp_val = p.get("TakeProfit1"); tp_str = f"${tp_val:.2f}" if tp_val and pd.notna(tp_val) else "—"
-            rs_val = p.get("RS20vsSPY", 0); rs_str = f"{rs_val:+.1f}%" if rs_val else "—"
+            sl_val = p.get("StopLoss")
+            sl_str = f"${sl_val:.2f}" if sl_val and pd.notna(sl_val) else "—"
+            tp_val = p.get("TakeProfit1")
+            tp_str = f"${tp_val:.2f}" if tp_val and pd.notna(tp_val) else "—"
+            rs_val = p.get("RS20vsSPY", 0)
+            rs_str = f"{rs_val:+.1f}%" if rs_val else "—"
             sc_val = p.get("SignalScore", 0)
 
-            # Accent colour
-            if "BUY_NOW" in sig:  accent = "#00E5A0"
-            elif "BUY_ADD" in sig: accent = "#00D4FF"
-            elif "SELL" in sig:    accent = "#FF3366"
-            else:                  accent = "#636B80"
+            if "BUY_NOW" in sig:
+                accent = "#00E5A0"
+            elif "BUY_ADD" in sig:
+                accent = "#00D4FF"
+            elif "SELL" in sig:
+                accent = "#FF3366"
+            else:
+                accent = "#636B80"
 
             bucket_label = "Large" if p.get("Bucket", "LARGE_CAP") == "LARGE_CAP" else "Small"
 
@@ -506,9 +540,8 @@ with tab1:
 </div>
 """, unsafe_allow_html=True)
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 2 — Auto Scanner
+# TAB 2 — Scanner
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab2:
     st.markdown('<div class="qsec">自動掃描器</div>', unsafe_allow_html=True)
@@ -525,9 +558,12 @@ with tab2:
     if st.button("🔄 執行完整掃描", use_container_width=True):
         with st.spinner("掃描中 …"):
             result = run_auto_scanner(
-                portfolio=portfolio, trades_df=trades_df,
-                cash=cash, total_assets=total_assets,
-                market_regime=market_regime, watchlist_df=watchlist_df,
+                portfolio=portfolio,
+                trades_df=trades_df,
+                cash=cash,
+                total_assets=total_assets,
+                market_regime=market_regime,
+                watchlist_df=watchlist_df,
             )
         st.session_state["scan_result"] = result
         st.rerun()
@@ -540,7 +576,6 @@ with tab2:
         mb.metric("買進訊號", m.get("buy_signals", 0))
         mc.metric("出場訊號", m.get("sell_signals", 0))
 
-        # Exit alerts (priority)
         exits = result.get("top_exits", [])
         if exits:
             st.markdown('<div class="qsec" style="color:var(--red)">⚠️ 出場訊號</div>', unsafe_allow_html=True)
@@ -558,7 +593,6 @@ with tab2:
   </div>
 </div>""", unsafe_allow_html=True)
 
-        # Buy signals ranked
         buys = result.get("top_buys", [])
         if buys:
             st.markdown('<div class="qsec">🟢 買進機會 (依強度排序)</div>', unsafe_allow_html=True)
@@ -583,7 +617,6 @@ with tab2:
   </div>
 </div>""", unsafe_allow_html=True)
     else:
-        # Watchlist table when no scan run
         if not watchlist_df.empty:
             st.markdown('<div class="qsec">Watchlist</div>', unsafe_allow_html=True)
             wl = watchlist_df[["Ticker", "Enabled", "Category", "Note"]].copy()
@@ -592,9 +625,8 @@ with tab2:
         else:
             st.info("Watchlist 空白。輸入代碼後按「＋ 加入」。")
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 3 — Strategy Analysis (single stock deep-dive)
+# TAB 3 — Strategy Analysis
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab3:
     st.markdown('<div class="qsec">單股策略分析</div>', unsafe_allow_html=True)
@@ -613,20 +645,24 @@ with tab3:
             held = next((p["Shares"] for p in portfolio if p["Ticker"] == analyze_ticker), 0)
             mkt_val = next((p["MarketValue"] for p in portfolio if p["Ticker"] == analyze_ticker), 0)
             score, action, det, note = evaluate_strategy(
-                analyze_ticker, hist, held, mkt_val,
-                total_assets, cash, market_regime,
-                heat_info["heat_pct"], portfolio,
+                analyze_ticker,
+                hist,
+                held,
+                mkt_val,
+                total_assets,
+                cash,
+                market_regime,
+                heat_info["heat_pct"],
+                portfolio,
             )
-            last = hist.iloc[-1]
 
-            # ── Score + action pill ──────────────────────────────────────────
             score_colour = "#00E5A0" if score >= 5 else "#00D4FF" if score >= 3 else "#FFB800" if score >= 1.5 else "#FF3366"
             action_map = {
-                "BUY_NOW":      ("🛒 立即買進", "var(--green)"),
-                "BUY_ADD":      ("➕ 加碼買進", "var(--cyan)"),
-                "SELL_EXIT":    ("⚠️ 立即出場", "var(--red)"),
+                "BUY_NOW": ("🛒 立即買進", "var(--green)"),
+                "BUY_ADD": ("➕ 加碼買進", "var(--cyan)"),
+                "SELL_EXIT": ("⚠️ 立即出場", "var(--red)"),
                 "SELL_PARTIAL": ("◑ 部分獲利", "var(--gold)"),
-                "WATCH":        ("👁 觀望", "var(--muted)"),
+                "WATCH": ("👁 觀望", "var(--muted)"),
             }
             act_label, act_colour = action_map.get(action, ("— 觀望", "var(--muted)"))
 
@@ -646,20 +682,18 @@ with tab3:
 </div>
 """, unsafe_allow_html=True)
 
-            # ── Key stats ──────────────────────────────────────────────────
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("現價",   f"${det['close']:.2f}")
-            k2.metric("RSI",   f"{det['rsi']:.1f}")
-            k3.metric("ATR",   f"${det['atr']:.2f}")
-            k4.metric("ADX",   f"{det.get('adx', 0):.1f}")
+            k1.metric("現價", f"${det['close']:.2f}")
+            k2.metric("RSI", f"{det['rsi']:.1f}")
+            k3.metric("ATR", f"${det['atr']:.2f}")
+            k4.metric("ADX", f"{det.get('adx', 0):.1f}")
 
             k5, k6, k7, k8 = st.columns(4)
-            k5.metric("停損",   f"${det['stop_loss']:.2f}")
+            k5.metric("停損", f"${det['stop_loss']:.2f}")
             k6.metric("目標 1", f"${det['take_profit_1']:.2f}")
             k7.metric("目標 2", f"${det['take_profit_2']:.2f}")
             k8.metric("RS vs SPY", f"{det.get('rs20_vs_spy', 0):+.1f}%")
 
-            # ── Action recommendation ──────────────────────────────────────
             if "BUY" in action:
                 st.success(f"🛒 建議 **{action}** — 參考數量：**{det['suggested_buy_qty']} 股** @ ${det['close']:.2f}")
             elif "SELL" in action:
@@ -673,7 +707,6 @@ with tab3:
             if det.get("earnings_blocked"):
                 st.error("⚠️ **財報封鎖期** — 距離財報 ≤2 天，策略建議暫停操作。")
 
-            # ── Technical chart ────────────────────────────────────────────
             st.markdown('<div class="qsec">技術圖表 (近 90 日)</div>', unsafe_allow_html=True)
             plot_df = hist.tail(90)
             fig = make_subplots(
@@ -683,63 +716,81 @@ with tab3:
                 subplot_titles=("", "MACD", "RSI"),
             )
 
-            # Candlestick
             fig.add_trace(go.Candlestick(
-                x=plot_df.index, open=plot_df["Open"], high=plot_df["High"],
-                low=plot_df["Low"], close=plot_df["Close"], name="K線",
-                increasing_fillcolor="#00E5A0", increasing_line_color="#00E5A0",
-                decreasing_fillcolor="#FF3366", decreasing_line_color="#FF3366",
+                x=plot_df.index,
+                open=plot_df["Open"],
+                high=plot_df["High"],
+                low=plot_df["Low"],
+                close=plot_df["Close"],
+                name="K線",
+                increasing_fillcolor="#00E5A0",
+                increasing_line_color="#00E5A0",
+                decreasing_fillcolor="#FF3366",
+                decreasing_line_color="#FF3366",
             ), row=1, col=1)
 
             for sma_col, sma_col_name, sma_colour in [
-                ("SMA20", "SMA20", "#FFB800"), ("SMA50", "SMA50", "#00D4FF"), ("SMA200", "SMA200", "#9B6DFF")
+                ("SMA20", "SMA20", "#FFB800"),
+                ("SMA50", "SMA50", "#00D4FF"),
+                ("SMA200", "SMA200", "#9B6DFF"),
             ]:
                 fig.add_trace(go.Scatter(
-                    x=plot_df.index, y=plot_df[sma_col], name=sma_col_name,
-                    line=dict(color=sma_colour, width=1.2, dash="dot"), opacity=0.7,
+                    x=plot_df.index,
+                    y=plot_df[sma_col],
+                    name=sma_col_name,
+                    line=dict(color=sma_colour, width=1.2, dash="dot"),
+                    opacity=0.7,
                 ), row=1, col=1)
 
-            # Bollinger Bands
             fig.add_trace(go.Scatter(
-                x=plot_df.index, y=plot_df["BB_upper"],
+                x=plot_df.index,
+                y=plot_df["BB_upper"],
                 line=dict(color="rgba(255,255,255,0.15)", width=1),
                 showlegend=False,
             ), row=1, col=1)
             fig.add_trace(go.Scatter(
-                x=plot_df.index, y=plot_df["BB_lower"],
-                fill="tonexty", fillcolor="rgba(0,212,255,0.04)",
+                x=plot_df.index,
+                y=plot_df["BB_lower"],
+                fill="tonexty",
+                fillcolor="rgba(0,212,255,0.04)",
                 line=dict(color="rgba(255,255,255,0.15)", width=1),
                 showlegend=False,
             ), row=1, col=1)
 
-            # MACD
             hist_colours = ["#00E5A0" if v > 0 else "#FF3366" for v in plot_df["MACD_Hist"]]
             fig.add_trace(go.Bar(
-                x=plot_df.index, y=plot_df["MACD_Hist"],
-                marker_color=hist_colours, name="MACD Hist",
+                x=plot_df.index,
+                y=plot_df["MACD_Hist"],
+                marker_color=hist_colours,
+                name="MACD Hist",
             ), row=2, col=1)
             fig.add_trace(go.Scatter(
-                x=plot_df.index, y=plot_df["MACD"],
-                line=dict(color="#00D4FF", width=1.2), name="MACD",
+                x=plot_df.index,
+                y=plot_df["MACD"],
+                line=dict(color="#00D4FF", width=1.2),
+                name="MACD",
             ), row=2, col=1)
 
-            # RSI
             fig.add_trace(go.Scatter(
-                x=plot_df.index, y=plot_df["RSI"],
-                line=dict(color="#9B6DFF", width=1.4), name="RSI",
+                x=plot_df.index,
+                y=plot_df["RSI"],
+                line=dict(color="#9B6DFF", width=1.4),
+                name="RSI",
             ), row=3, col=1)
             for lvl, col in [(70, "rgba(255,51,102,0.3)"), (50, "rgba(255,255,255,0.1)"), (30, "rgba(0,229,160,0.3)")]:
                 fig.add_hline(y=lvl, line_color=col, line_dash="dot", row=3, col=1)
 
             fig.update_layout(
-                template="plotly_dark", height=480,
+                template="plotly_dark",
+                height=480,
                 margin=dict(l=0, r=0, t=20, b=0),
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                xaxis_rangeslider_visible=False, showlegend=False,
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                xaxis_rangeslider_visible=False,
+                showlegend=False,
                 font=dict(family="JetBrains Mono", size=10),
             )
             st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False, "scrollZoom": False})
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 4 — Trade Terminal
@@ -755,16 +806,15 @@ with tab4:
         col_pr, col_sh = st.columns(2)
         pr_input = col_pr.number_input("成交價", value=100.0, min_value=0.01, format="%.2f")
         sh_input = col_sh.number_input("股數", value=1.0, min_value=0.0001, format="%.4f")
-        
-        fee_input  = st.number_input("手續費 (USD)", value=float(DEFAULT_COMMISSION), min_value=0.0, format="%.2f")
+
+        fee_input = st.number_input("手續費 (USD)", value=float(DEFAULT_COMMISSION), min_value=0.0, format="%.2f")
         note_input = st.text_input("備註", value="", placeholder="選填")
 
-        # Real-time preview
         gross = pr_input * sh_input
-        slip  = gross * DEFAULT_SLIPPAGE_PCT
-        net   = gross + fee_input + slip if dir_input == "BUY" else gross - fee_input - slip
+        slip = gross * DEFAULT_SLIPPAGE_PCT
+        net = gross + fee_input + slip if dir_input == "BUY" else gross - fee_input - slip
         after = cash - net if dir_input == "BUY" else cash + net
-        wt    = (pr_input * sh_input / total_assets * 100) if total_assets > 0 else 0
+        wt = (pr_input * sh_input / total_assets * 100) if total_assets > 0 else 0
 
         st.markdown(f"""
 <div class="pc" style="margin:10px 0;">
@@ -785,15 +835,16 @@ with tab4:
                 st.success(f"✅ {msg}")
             else:
                 st.error(f"❌ {msg}")
-
-    # ── V1→V2 資料遷移工具 ────────────────────────────────────────────────
+                
     with st.expander("🔧 歷史資料修復工具（V1→V2 格式遷移）", expanded=False):
         st.markdown("""
-**問題說明**：舊版代碼寫入 7 欄格式（Date / Ticker / Type / Price / Shares / Total / Note），
-新版表頭升級為 12 欄（TradeDateTime / CreatedAt / Ticker ...），導致欄位錯位。
+**問題說明**：舊版代碼可能寫入 6 欄或 7 欄格式，與新版 12 欄格式不一致，會造成交易表欄位錯位、最近交易紀錄顯示異常、持倉計算錯誤。
 
-**修復動作**：一次性將所有舊格式列轉換為新格式，Google Sheets 欄位將正確對齊。
-> ⚠️ 建議先至 Google Sheets 手動備份 Trades 工作表後再執行。
+**修復動作**：將 Google Sheets 的 `Trades` 工作表內容統一轉為新版 12 欄格式：
+
+`TradeDateTime / CreatedAt / Ticker / Type / Price / Shares / GrossTotal / Fee / Slippage / NetTotal / Note / OrderID`
+
+> ⚠️ 建議先手動備份 Google Sheets 的 `Trades` 工作表後再執行。
 """)
         _migrate_col1, _migrate_col2 = st.columns([3, 1])
         _migrate_col1.caption("點擊右側按鈕開始遷移，執行時間約 10–30 秒。")
@@ -807,22 +858,24 @@ with tab4:
             else:
                 st.error(_msg)
 
-    # Recent trades table
     if not trades_df.empty:
         st.markdown('<div class="qsec">最近交易紀錄</div>', unsafe_allow_html=True)
-        # 相容 V1 舊資料（NetTotal 等於 GrossTotal）與 V2 新資料
         _rcols = ["TradeDateTime", "Ticker", "Type", "Price", "Shares", "GrossTotal", "Fee", "NetTotal"]
         _rcols_exist = [c for c in _rcols if c in trades_df.columns]
         recent = trades_df.tail(20)[_rcols_exist].copy()
         recent["TradeDateTime"] = pd.to_datetime(recent["TradeDateTime"], errors="coerce").dt.strftime("%m/%d %H:%M")
         _rename = {
-            "TradeDateTime": "時間", "Ticker": "代碼", "Type": "方向",
-            "Price": "價格", "Shares": "股數",
-            "GrossTotal": "毛額", "Fee": "手續費", "NetTotal": "淨額",
+            "TradeDateTime": "時間",
+            "Ticker": "代碼",
+            "Type": "方向",
+            "Price": "價格",
+            "Shares": "股數",
+            "GrossTotal": "毛額",
+            "Fee": "手續費",
+            "NetTotal": "淨額",
         }
         recent = recent.rename(columns={k: v for k, v in _rename.items() if k in recent.columns})
         st.dataframe(recent[::-1], use_container_width=True, hide_index=True)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 5 — Performance & Analytics
@@ -830,11 +883,10 @@ with tab4:
 with tab5:
     st.markdown('<div class="qsec">績效分析</div>', unsafe_allow_html=True)
 
-    # Perf stats
-    max_dd   = perf.get("max_drawdown_pct")
-    sharpe   = perf.get("sharpe")
+    max_dd = perf.get("max_drawdown_pct")
+    sharpe = perf.get("sharpe")
     win_rate = perf.get("win_rate")
-    tot_ret  = perf.get("total_return_pct")
+    tot_ret = perf.get("total_return_pct")
 
     st.markdown(f"""
 <div class="pstat-grid">
@@ -865,7 +917,6 @@ with tab5:
 </div>
 """, unsafe_allow_html=True)
 
-    # NAV chart with SPY benchmark
     if not history_df.empty and len(history_df) >= 2:
         st.markdown('<div class="qsec">NAV vs SPY 曲線</div>', unsafe_allow_html=True)
         hdf = history_df.copy()
@@ -874,34 +925,43 @@ with tab5:
 
         fig_nav = go.Figure()
         fig_nav.add_trace(go.Scatter(
-            x=hdf["Date"], y=hdf["NAV_idx"], name="Portfolio NAV",
+            x=hdf["Date"],
+            y=hdf["NAV_idx"],
+            name="Portfolio NAV",
             line=dict(color="#00D4FF", width=2),
-            fill="tozeroy", fillcolor="rgba(0,212,255,0.06)",
+            fill="tozeroy",
+            fillcolor="rgba(0,212,255,0.06)",
         ))
 
-        # SPY rebased benchmark
         if "BenchmarkSPY" in hdf.columns and hdf["BenchmarkSPY"].notna().any():
             base_spy = hdf["BenchmarkSPY"].iloc[0]
-            hdf["SPY_idx"] = hdf["BenchmarkSPY"] / base_spy * 100
-            fig_nav.add_trace(go.Scatter(
-                x=hdf["Date"], y=hdf["SPY_idx"], name="SPY",
-                line=dict(color="#9B6DFF", width=1.5, dash="dot"),
-            ))
+            if base_spy and base_spy > 0:
+                hdf["SPY_idx"] = hdf["BenchmarkSPY"] / base_spy * 100
+                fig_nav.add_trace(go.Scatter(
+                    x=hdf["Date"],
+                    y=hdf["SPY_idx"],
+                    name="SPY",
+                    line=dict(color="#9B6DFF", width=1.5, dash="dot"),
+                ))
 
-        # Drawdown background
         nav_series = hdf["TotalAssets"]
         drawdown_pct = (nav_series / nav_series.cummax() - 1) * 100
         fig_nav.add_trace(go.Scatter(
-            x=hdf["Date"], y=drawdown_pct, name="Drawdown",
+            x=hdf["Date"],
+            y=drawdown_pct,
+            name="Drawdown",
             line=dict(color="#FF3366", width=0),
-            fill="tozeroy", fillcolor="rgba(255,51,102,0.07)",
+            fill="tozeroy",
+            fillcolor="rgba(255,51,102,0.07)",
             yaxis="y2",
         ))
 
         fig_nav.update_layout(
-            template="plotly_dark", height=320,
+            template="plotly_dark",
+            height=320,
             margin=dict(l=0, r=0, t=10, b=0),
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
             font=dict(family="JetBrains Mono", size=10),
             legend=dict(orientation="h", yanchor="bottom", y=1.01, font=dict(size=10)),
             yaxis=dict(title="Index (100=Start)", gridcolor="rgba(255,255,255,0.05)"),
@@ -910,17 +970,19 @@ with tab5:
         )
         st.plotly_chart(fig_nav, use_container_width=True, config={"displayModeBar": False})
 
-        # Drawdown stats
-        if "DrawdownPct" in hdf.columns:
-            st.markdown('<div class="qsec">每日報酬分佈</div>', unsafe_allow_html=True)
-            if "DailyReturnPct" in hdf.columns:
-                rets = pd.to_numeric(hdf["DailyReturnPct"], errors="coerce").dropna()
+        st.markdown('<div class="qsec">每日報酬分佈</div>', unsafe_allow_html=True)
+        if "DailyReturnPct" in hdf.columns:
+            rets = pd.to_numeric(hdf["DailyReturnPct"], errors="coerce").dropna()
+            if not rets.empty:
                 fig_hist = go.Figure(go.Histogram(
-                    x=rets, nbinsx=40,
-                    marker_color="#00D4FF", opacity=0.75,
+                    x=rets,
+                    nbinsx=40,
+                    marker_color="#00D4FF",
+                    opacity=0.75,
                 ))
                 fig_hist.update_layout(
-                    template="plotly_dark", height=200,
+                    template="plotly_dark",
+                    height=200,
                     margin=dict(l=0, r=0, t=10, b=0),
                     paper_bgcolor="rgba(0,0,0,0)",
                     plot_bgcolor="rgba(0,0,0,0)",
@@ -932,11 +994,16 @@ with tab5:
     else:
         st.info("歷史資料不足，累積每日 NAV 後圖表將自動顯示。")
 
-    # Sidebar-style settings panel at bottom of perf tab
     st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
     st.markdown('<div class="qsec">快速設定</div>', unsafe_allow_html=True)
-    new_cap = st.number_input("初始資金 (USD)", value=st.session_state.init_capital,
-                               min_value=1000.0, step=1000.0, format="%.0f")
+
+    new_cap = st.number_input(
+        "初始資金 (USD)",
+        value=st.session_state.init_capital,
+        min_value=1000.0,
+        step=1000.0,
+        format="%.0f"
+    )
     if new_cap != st.session_state.init_capital:
         st.session_state.init_capital = new_cap
         st.rerun()
@@ -945,26 +1012,26 @@ with tab5:
     if col_ref.button("🔄 刷新快取", use_container_width=True):
         clear_market_cache()
         st.rerun()
+
     if col_sync.button("📡 記錄今日 NAV", use_container_width=True):
         ok, msg = maybe_log_daily_history(
-            total_assets=total_assets, cash=cash, market_value=market_value,
-            realized_pl=total_realized_pl, unrealized_pl=total_unrealized_pl,
+            total_assets=total_assets,
+            cash=cash,
+            market_value=market_value,
+            realized_pl=total_realized_pl,
+            unrealized_pl=total_unrealized_pl,
         )
         st.toast(msg, icon="✅" if ok else "ℹ️")
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# TAB 6 — 美股半導體宇宙掃描器
+# TAB 6 — US Semiconductor Scanner
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab6:
-    # ── Session state init ──────────────────────────────────────────────────
-    if "semi_result"    not in st.session_state: st.session_state.semi_result    = None
-    if "semi_scan_prog" not in st.session_state: st.session_state.semi_scan_prog = ""
+    if "semi_result" not in st.session_state:
+        st.session_state.semi_result = None
 
-    # ── Header status ───────────────────────────────────────────────────────
     st.markdown('<div class="qsec">🔬 美股半導體宇宙掃描器</div>', unsafe_allow_html=True)
 
-    # Quick info bar
     _semi_n = len(set(US_SEMI_UNIVERSE))
     st.markdown(f"""
 <div class="pc" style="margin-bottom:14px;">
@@ -988,9 +1055,8 @@ with tab6:
 </div>
 """, unsafe_allow_html=True)
 
-    # ── Strategy explanation ─────────────────────────────────────────────────
     with st.expander("📐 策略過濾器說明", expanded=False):
-        st.markdown("""
+        st.markdown(f"""
 **8 層多因子評分（滿分 ~10 分）**
 
 | 層 | 因子 | 分值 | 說明 |
@@ -999,110 +1065,114 @@ with tab6:
 | B | MACD 翻多加速 | +0.8 | 柱狀圖翻正且持續放大 |
 | B | RSI 健康帶 50–72 | +0.8 | 動能健康，非超買 |
 | B | ADX ≥ 18 | +0.8 | 趨勢強度足夠 |
-| C | RS vs SPY > +2% | +1.0 | 強於大盤（20日相對強度）|
+| C | RS vs SPY > +2% | +1.0 | 強於大盤（20日相對強度） |
 | C | 優於 SOX 指數 | +0.8 | 領先半導體板塊 |
 | D | OBV 法人吸籌 | +0.5 | OBV 斜率向上 + 站上 SMA20 |
 | D | 放量上漲日 | +0.5 | 成交量 > 均量 1.5x 且收漲 |
 | E | BB 壓縮放量突破 | +1.5 | 低波動率壓縮後量價齊揚 |
-| F | 接近 52W 年高 | +0.8 | 距年高 10% 內（強勢領頭羊）|
-| G | SOX 趨勢乘數 | ×1.0/0.85/0.65 | BULL/NEUTRAL/BEAR 調整整體得分 |
+| F | 接近 52W 年高 | +0.8 | 距年高 10% 內（強勢領頭羊） |
+| G | SOX 趨勢乘數 | ×1.0/0.85/0.65 | BULL / NEUTRAL / BEAR 調整整體得分 |
 | H | 流動性門檻 | 必要條件 | 日均成交值 > $20M，非財報封鎖期 |
 
-**訊號門檻**：🔴 強力買進 ≥ {strong} ｜ 🟢 積極買進 ≥ {buy} ｜ 🟡 留意候補 ≥ {watch}
-""".format(strong=US_SEMI_SCORE_STRONG, buy=US_SEMI_SCORE_BUY, watch=US_SEMI_SCORE_WATCH))
+**訊號門檻**：🔴 強力買進 ≥ {US_SEMI_SCORE_STRONG} ｜ 🟢 積極買進 ≥ {US_SEMI_SCORE_BUY} ｜ 🟡 留意候補 ≥ {US_SEMI_SCORE_WATCH}
+""")
 
     st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
-
-    # ── Scan controls ────────────────────────────────────────────────────────
     st.markdown('<div class="qsec">手動掃描設定</div>', unsafe_allow_html=True)
 
     _ctl1, _ctl2 = st.columns(2)
-    _workers  = _ctl1.slider("平行 Worker 數", min_value=3, max_value=20, value=10,
-                              help="越多越快，但易觸發 yfinance 限流")
-    _dry_run  = _ctl2.checkbox("Dry Run（掃描但不發 Telegram）", value=True)
+    _workers = _ctl1.slider("平行 Worker 數", min_value=3, max_value=20, value=10, help="越多越快，但易觸發 yfinance 限流")
+    _dry_run = _ctl2.checkbox("Dry Run（掃描但不發 Telegram）", value=True)
 
     _extra_input = st.text_input(
         "額外加入掃描的標的（逗號分隔）",
-        placeholder="SMCI, PLTR, ARM …",
+        placeholder="SMCI, ARM …",
         help="除預設宇宙外額外加入，例如你的持倉中有半導體股",
     )
     _extra_tickers = [t.strip().upper() for t in _extra_input.split(",") if t.strip()]
 
     if st.button("🚀 立即執行美股半導體掃描", use_container_width=True, type="primary"):
-        import concurrent.futures as _cf_ui
-        from core import _us_semi_score_one, _get_sox_regime, normalize_ticker as _nt
-        import math as _math
-
         _universe = list(dict.fromkeys(
-            [_nt(t) for t in US_SEMI_UNIVERSE] + [_nt(t) for t in _extra_tickers]
+            [normalize_ticker(t) for t in US_SEMI_UNIVERSE] + [normalize_ticker(t) for t in _extra_tickers]
         ))
 
-        _prog_bar  = st.progress(0, text="取得 SOX 指數狀態 …")
-        _prog_text = st.empty()
-
-        # SOX regime first
+        _prog_bar = st.progress(0, text="取得 SOX 指數狀態 …")
         _sox = _get_sox_regime()
         _sox_trend = _sox.get("trend", "NEUTRAL")
         _sox_emoji = {"BULL": "🐂", "NEUTRAL": "➡️", "BEAR": "🐻"}
-        _prog_bar.progress(0, text=f"SOX {_sox_emoji.get(_sox_trend)} {_sox_trend}  "
-                                    f"vs SPY {_sox.get('rs_vs_spy', 0):+.1f}% ｜ 開始掃描 {len(_universe)} 檔 …")
 
-        _results, _done = [], [0]
+        _prog_bar.progress(
+            0,
+            text=f"SOX {_sox_emoji.get(_sox_trend)} {_sox_trend} vs SPY {_sox.get('rs_vs_spy', 0):+.1f}% ｜ 開始掃描 {len(_universe)} 檔 …"
+        )
+
+        _results = []
+        _done = 0
         _total = len(_universe)
 
         def _scan_ticker(tk):
-            r = _us_semi_score_one(tk, _sox)
-            _done[0] += 1
-            pct = _done[0] / _total
-            _prog_bar.progress(pct, text=f"掃描 {_done[0]}/{_total} ({pct*100:.0f}%) — "
-                                          f"發現 {len(_results)} 個入選標的")
-            return r
+            return _us_semi_score_one(tk, _sox)
 
         with _cf_ui.ThreadPoolExecutor(max_workers=_workers) as _ex:
-            for _r in _cf_ui.as_completed({_ex.submit(_scan_ticker, tk): tk for tk in _universe}):
-                _res = _r.result()
-                if _res: _results.append(_res)
+            futures = {_ex.submit(_scan_ticker, tk): tk for tk in _universe}
+            for _future in _cf_ui.as_completed(futures):
+                _done += 1
+                try:
+                    _res = _future.result()
+                    if _res:
+                        _results.append(_res)
+                except Exception:
+                    pass
+
+                pct = _done / _total if _total else 1.0
+                _prog_bar.progress(
+                    pct,
+                    text=f"掃描 {_done}/{_total} ({pct*100:.0f}%) — 發現 {len(_results)} 個入選標的"
+                )
 
         _prog_bar.empty()
-        _prog_text.empty()
 
         _results.sort(key=lambda x: -x["score"])
         _strong = [r for r in _results if r["signal"] == "STRONG_BUY"]
-        _buys   = [r for r in _results if r["signal"] == "BUY"]
-        _watch  = [r for r in _results if r["signal"] == "WATCH"]
+        _buys = [r for r in _results if r["signal"] == "BUY"]
+        _watch = [r for r in _results if r["signal"] == "WATCH"]
 
         st.session_state.semi_result = {
-            "strong_buy": _strong, "buy": _buys, "watch": _watch,
-            "all_results": _results, "sox_regime": _sox,
-            "total_scanned": _total, "total_hits": len(_results),
+            "strong_buy": _strong,
+            "buy": _buys,
+            "watch": _watch,
+            "all_results": _results,
+            "sox_regime": _sox,
+            "total_scanned": _total,
+            "total_hits": len(_results),
             "scan_date": datetime.now().strftime("%Y-%m-%d %H:%M"),
         }
 
-        # Telegram
         if not _dry_run and _results:
-            from core import format_us_semi_tg_messages, send_us_semi_tg
             _scan_res_for_tg = dict(st.session_state.semi_result)
             _scan_res_for_tg["scan_date"] = datetime.now().strftime("%Y-%m-%d")
             _msgs = format_us_semi_tg_messages(_scan_res_for_tg)
-            _ok   = send_us_semi_tg(_msgs)
+            _ok = send_us_semi_tg(_msgs)
             st.toast("✅ Telegram 推播成功！" if _ok else "❌ Telegram 推播失敗", icon="📡")
         elif _dry_run:
             st.toast("Dry Run 模式：未發送 Telegram", icon="🔕")
 
-    # ── Results display ──────────────────────────────────────────────────────
     _res_data = st.session_state.get("semi_result")
     if _res_data:
-        _sox_r     = _res_data["sox_regime"]
-        _all       = _res_data["all_results"]
-        _strong    = _res_data["strong_buy"]
-        _buys      = _res_data["buy"]
-        _watches   = _res_data["watch"]
+        _sox_r = _res_data["sox_regime"]
+        _all = _res_data["all_results"]
+        _strong = _res_data["strong_buy"]
+        _buys = _res_data["buy"]
+        _watches = _res_data["watch"]
         _scan_time = _res_data.get("scan_date", "—")
         _sox_trend = _sox_r.get("trend", "NEUTRAL")
-        _SOX_BADGE = {"BULL": ("badge-up", "🐂 多頭"), "NEUTRAL": ("badge-flat", "➡️ 中性"), "BEAR": ("badge-down", "🐻 空頭")}
+        _SOX_BADGE = {
+            "BULL": ("badge-up", "🐂 多頭"),
+            "NEUTRAL": ("badge-flat", "➡️ 中性"),
+            "BEAR": ("badge-down", "🐻 空頭"),
+        }
         _sox_cls, _sox_lbl = _SOX_BADGE.get(_sox_trend, ("badge-flat", "—"))
 
-        # Summary bar
         st.markdown(f"""
 <div class="pc" style="margin-bottom:12px;">
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
@@ -1126,19 +1196,18 @@ with tab6:
         if not _all:
             st.info("本次掃描無符合條件標的，市場環境可能偏弱。")
         else:
-            # Render cards
             _SIG_LABEL = {
-                "STRONG_BUY": ("var(--red)",   "🔴 強力買進"),
-                "BUY":        ("var(--green)",  "🟢 積極買進"),
-                "WATCH":      ("var(--gold)",   "🟡 留意候補"),
+                "STRONG_BUY": ("var(--red)", "🔴 強力買進"),
+                "BUY": ("var(--green)", "🟢 積極買進"),
+                "WATCH": ("var(--gold)", "🟡 留意候補"),
             }
-            _rank_emoji = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+            _rank_emoji = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
 
             for _i, _r in enumerate(_all[:20]):
                 _sig_color, _sig_label = _SIG_LABEL.get(_r["signal"], ("var(--muted)", "—"))
-                _stars   = "⭐" * min(5, max(1, round(_r["score"] / 1.5)))
+                _stars = "⭐" * min(5, max(1, round(_r["score"] / 1.5)))
                 _reasons = "、".join(_r["reasons"][:3]) if _r["reasons"] else "—"
-                _rank    = _rank_emoji[_i] if _i < len(_rank_emoji) else f"{_i+1}."
+                _rank = _rank_emoji[_i] if _i < len(_rank_emoji) else f"{_i+1}."
                 _score_w = min(100, _r["score"] / 8 * 100)
 
                 st.markdown(f"""
@@ -1169,22 +1238,26 @@ with tab6:
 </div>
 """, unsafe_allow_html=True)
 
-            # Full results table
             st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
             st.markdown('<div class="qsec">完整結果表格</div>', unsafe_allow_html=True)
             _df_show = pd.DataFrame([{
-                "代碼": r["ticker"], "訊號": r["signal"], "分數": r["score"],
-                "現價": r["close"], "停損": r["stop_loss"],
-                "TP1": r["tp1"], "TP2": r["tp2"],
-                "RSI": r["rsi"], "ADX": r["adx"],
-                "RS%SPY": r["rs20_vs_spy"], "日均量$M": r["dv20_m"],
+                "代碼": r["ticker"],
+                "訊號": r["signal"],
+                "分數": r["score"],
+                "現價": r["close"],
+                "停損": r["stop_loss"],
+                "TP1": r["tp1"],
+                "TP2": r["tp2"],
+                "RSI": r["rsi"],
+                "ADX": r["adx"],
+                "RS%SPY": r["rs20_vs_spy"],
+                "日均量$M": r["dv20_m"],
                 "建議股數": r["suggested_qty"],
                 "因子": "、".join(r["reasons"][:3]),
             } for r in _all])
             st.dataframe(_df_show, use_container_width=True, hide_index=True)
 
-            # TG preview
-            with st.expander(f"📨 Telegram 訊息預覽", expanded=False):
+            with st.expander("📨 Telegram 訊息預覽", expanded=False):
                 _tg_res = dict(_res_data)
                 _tg_res["scan_date"] = datetime.now().strftime("%Y-%m-%d")
                 _tg_msgs = format_us_semi_tg_messages(_tg_res)
@@ -1192,11 +1265,9 @@ with tab6:
                     st.caption(f"第 {_mi} 則（{len(_m)} 字元）")
                     st.code(_m, language=None)
 
-            # Clear button
             if st.button("✖ 清除掃描結果", use_container_width=True):
                 st.session_state.semi_result = None
                 st.rerun()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Footer
