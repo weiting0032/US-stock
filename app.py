@@ -346,6 +346,35 @@ def session_badge(session: str) -> str:
     lbl, cls = labels.get(session, (session, "badge-closed"))
     return f'<span class="badge {cls}">{lbl}</span>'
 
+def render_ticker_technical_summary(ticker: str):
+    hist = get_unified_analysis(ticker)
+    if hist is None or hist.empty or len(hist) < 10:
+        return
+
+    df = hist.tail(30).copy()
+    low_n = df["Low"].rolling(9).min()
+    high_n = df["High"].rolling(9).max()
+    rsv = (df["Close"] - low_n) / (high_n - low_n + 1e-9) * 100
+    df["K"] = rsv.ewm(com=2).mean()
+    df["D"] = df["K"].ewm(com=2).mean()
+
+    last = df.iloc[-1]
+    close = float(last["Close"])
+    k = float(last["K"])
+    d = float(last["D"])
+    rsi = float(last["RSI"])
+    vol_ratio = float(last["Volume"]) / max(float(last.get("VOL_SMA20", 1)), 1)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("現價", f"${close:,.2f}")
+    c2.metric("K / D", f"{k:.0f} / {d:.0f}")
+    c3.metric("RSI", f"{rsi:.1f}")
+    c4.metric("量比", f"{vol_ratio:.1f}x")
+
+    if k >= 85 and d >= 80 and rsi >= 75:
+        st.warning(f"⚠️ 技術面高檔過熱（KD {k:.0f}/{d:.0f} · RSI {rsi:.0f}）")
+    elif k >= 80 or rsi >= 70:
+        st.info(f"⚠️ KD高檔超買；RSI偏高（{rsi:.0f}）")
 
 def pl_class(val: float) -> str:
     if val > 0:
@@ -387,7 +416,170 @@ def action_tip(p: dict) -> str:
         return f'💰 到達 TP1，建議獲利了結 <b>{p.get("SuggestedSellQty", 0)} 股</b> (約 50%)'
     return '👁 無強烈訊號，持續觀察。'
 
+def render_ticker_technical_chart(ticker: str, days: int = 180):
+    hist = get_unified_analysis(ticker)
+    if hist is None or hist.empty:
+        st.warning(f"無法取得 {ticker} 技術圖資料")
+        return
 
+    plot_df = hist.tail(days).copy()
+    if plot_df.empty:
+        st.warning(f"{ticker} 無足夠歷史資料")
+        return
+
+    # KDJ
+    low_n = plot_df["Low"].rolling(9).min()
+    high_n = plot_df["High"].rolling(9).max()
+    rsv = (plot_df["Close"] - low_n) / (high_n - low_n + 1e-9) * 100
+    plot_df["K"] = rsv.ewm(com=2).mean()
+    plot_df["D"] = plot_df["K"].ewm(com=2).mean()
+
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.46, 0.18, 0.18, 0.18],
+        subplot_titles=(f"{ticker} — K線 + BB", "成交量", "KDJ 隨機指標", "MACD"),
+    )
+
+    # K線
+    fig.add_trace(go.Candlestick(
+        x=plot_df.index,
+        open=plot_df["Open"],
+        high=plot_df["High"],
+        low=plot_df["Low"],
+        close=plot_df["Close"],
+        name="K線",
+        increasing_fillcolor="#00E5A0",
+        increasing_line_color="#00E5A0",
+        decreasing_fillcolor="#FF3366",
+        decreasing_line_color="#FF3366",
+    ), row=1, col=1)
+
+    # SMA
+    sma_specs = [
+        ("SMA20", "#F7B500", "SMA20"),
+        ("SMA50", "#1E90FF", "SMA50"),
+        ("SMA200", "#9B6DFF", "SMA200"),
+    ]
+    for col_name, color, label in sma_specs:
+        if col_name in plot_df.columns:
+            fig.add_trace(go.Scatter(
+                x=plot_df.index,
+                y=plot_df[col_name],
+                mode="lines",
+                line=dict(color=color, width=1.5, dash="dot"),
+                name=label,
+            ), row=1, col=1)
+
+    # BB
+    if "BB_upper" in plot_df.columns and "BB_lower" in plot_df.columns:
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df["BB_upper"],
+            mode="lines",
+            line=dict(color="rgba(255,255,255,0.18)", width=1),
+            name="BB Upper",
+            showlegend=False,
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df["BB_lower"],
+            mode="lines",
+            fill="tonexty",
+            fillcolor="rgba(0,212,255,0.05)",
+            line=dict(color="rgba(255,255,255,0.18)", width=1),
+            name="BB Lower",
+            showlegend=False,
+        ), row=1, col=1)
+
+    # 停損 / TP 線
+    last = plot_df.iloc[-1]
+    close = float(last["Close"])
+    atr = float(last.get("ATR", 0) or 0)
+    stop_loss = max(0.01, close - 2.0 * atr) if atr > 0 else close * 0.93
+    tp1 = close + 2.0 * atr if atr > 0 else close * 1.08
+
+    fig.add_hline(y=stop_loss, line_color="#00E5A0", line_dash="dot", row=1, col=1)
+    fig.add_hline(y=tp1, line_color="#FF3366", line_dash="dot", row=1, col=1)
+
+    # 成交量
+    vol_colors = ["#00E5A0" if c >= o else "#FF3366" for c, o in zip(plot_df["Close"], plot_df["Open"])]
+    fig.add_trace(go.Bar(
+        x=plot_df.index,
+        y=plot_df["Volume"],
+        marker_color=vol_colors,
+        name="Volume",
+    ), row=2, col=1)
+
+    if "VOL_SMA20" in plot_df.columns:
+        fig.add_trace(go.Scatter(
+            x=plot_df.index,
+            y=plot_df["VOL_SMA20"],
+            mode="lines",
+            line=dict(color="#F7B500", width=1.2),
+            name="VOL SMA20",
+        ), row=2, col=1)
+
+    # KDJ
+    fig.add_trace(go.Scatter(
+        x=plot_df.index,
+        y=plot_df["K"],
+        mode="lines",
+        line=dict(color="#1E90FF", width=1.4),
+        name="K",
+    ), row=3, col=1)
+    fig.add_trace(go.Scatter(
+        x=plot_df.index,
+        y=plot_df["D"],
+        mode="lines",
+        line=dict(color="#F7B500", width=1.4),
+        name="D",
+    ), row=3, col=1)
+    fig.add_hline(y=80, line_color="rgba(255,51,102,0.35)", line_dash="dot", row=3, col=1)
+    fig.add_hline(y=20, line_color="rgba(0,229,160,0.35)", line_dash="dot", row=3, col=1)
+
+    # MACD
+    macd_colors = ["#00E5A0" if v >= 0 else "#FF3366" for v in plot_df["MACD_Hist"]]
+    fig.add_trace(go.Bar(
+        x=plot_df.index,
+        y=plot_df["MACD_Hist"],
+        marker_color=macd_colors,
+        name="MACD Hist",
+    ), row=4, col=1)
+    fig.add_trace(go.Scatter(
+        x=plot_df.index,
+        y=plot_df["MACD"],
+        mode="lines",
+        line=dict(color="#1E90FF", width=1.4),
+        name="MACD",
+    ), row=4, col=1)
+    fig.add_trace(go.Scatter(
+        x=plot_df.index,
+        y=plot_df["MACD_Signal"],
+        mode="lines",
+        line=dict(color="#F7B500", width=1.2),
+        name="Signal",
+    ), row=4, col=1)
+
+    fig.update_layout(
+        template="plotly_dark",
+        height=760,
+        margin=dict(l=10, r=10, t=40, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="JetBrains Mono", size=10),
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", yanchor="bottom", y=1.01, x=0),
+    )
+
+    for r in [1, 2, 3, 4]:
+        fig.update_xaxes(gridcolor="rgba(255,255,255,0.04)", row=r, col=1)
+        fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)", row=r, col=1)
+
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    
 # ─────────────────────────────────────────────────────────────────────────────
 # Data init
 # ─────────────────────────────────────────────────────────────────────────────
@@ -546,6 +738,10 @@ with tab1:
   <div class="action-strip">{action_tip(p)}</div>
 </div>
 """, unsafe_allow_html=True)
+
+            with st.expander(f"📈 查看 {p['Ticker']} 技術圖表", expanded=False):
+                render_ticker_technical_summary(p["Ticker"])
+                render_ticker_technical_chart(p["Ticker"], days=180)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Scanner
@@ -1264,7 +1460,9 @@ with tab6:
                 "因子": "、".join(r["reasons"][:3]),
             } for r in _all])
             st.dataframe(_df_show, use_container_width=True, hide_index=True)
-
+                with st.expander(f"📈 查看 {_r['ticker']} 技術圖表", expanded=False):
+                    render_ticker_technical_summary(p["Ticker"])
+                    render_ticker_technical_chart(_r["ticker"], days=180)
             with st.expander("📨 Telegram 訊息預覽", expanded=False):
                 _tg_res = dict(_res_data)
                 _tg_res["scan_date"] = datetime.now().strftime("%Y-%m-%d")
