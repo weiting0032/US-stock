@@ -1493,24 +1493,179 @@ def build_trade_preview(trades_df, initial_capital, ticker, trade_type, price, s
 # ═══════════════════════════════════════════════════════════════════════════════
 import concurrent.futures as _cf
 
-US_SEMI_UNIVERSE: List[str] = [
-    "NVDA", "AMD", "INTC", "QCOM", "MRVL",
-    "AVGO", "ADI", "TXN", "MPWR", "MCHP", "SWKS", "QRVO", "NXPI", "ON",
-    "SMTC", "RMBS", "AMBA", "SLAB", "CRUS", "MTSI", "ALGM", "AOSL",
-    "LSCC", "SITM", "CRDO", "MXL", "CEVA", "POWI", "DIOD", "VSH",
-    "OSIS", "PLAB", "SIMO", "WOLF", "AXTI", "AEHR", "PDFS", "VICR",
-    "CLFD", "MACOM", "ARM",
-    "TSM", "GFS", "UMC",
-    "MU", "WDC",
-    "AMAT", "LRCX", "KLAC", "TER", "ONTO", "FORM", "ICHR", "ACMR",
-    "COHU", "KLIC", "ENTG", "ACLS", "AEIS", "ESIO", "NANO", "MKSI",
-    "CCMP", "IPGP", "VIAV", "BRKS", "UCTT", "CAMT", "KEYS",
-    "CDNS", "SNPS",
-    "AMKR", "ASX",
-    "LITE", "AAOI", "IIVI", "COHR",
+# ═══════════════════════════════════════════════════════════════════════════════
+# 美股半導體完整宇宙（不使用 ETF）
+# 目標：盡量完整覆蓋美股可交易的半導體 / 半導體設備 / 材料 / EDA / IP / 封測 / 光子相關公司
+# 備註：這裡採「美股上市可交易」口徑，不限是否為美國本土公司
+# ═══════════════════════════════════════════════════════════════════════════════
+
+US_SEMI_CATEGORY_MAP: Dict[str, str] = {
+    # ── AI / GPU / HPC / CPU ─────────────────────────────────────────────
+    "NVDA": "AI / GPU / HPC",
+    "AMD": "AI / GPU / HPC",
+    "INTC": "CPU / IDM",
+    "QCOM": "Mobile / Communication Chips",
+    "MRVL": "Data Center / Networking",
+    "AVGO": "Broadline / Infrastructure Semis",
+    "ARM": "IP / CPU Architecture",
+
+    # ── Analog / Power / Mixed Signal ───────────────────────────────────
+    "ADI": "Analog / Mixed Signal",
+    "TXN": "Analog / Power",
+    "MCHP": "MCU / Analog",
+    "MPWR": "Power Management",
+    "NXPI": "Auto / Analog / MCU",
+    "ON": "Power / Auto Semis",
+    "ALGM": "Power / Motion Control",
+    "AOSL": "Power Semiconductors",
+    "POWI": "Power Management",
+    "DIOD": "Discrete / Analog",
+    "VSH": "Discrete / Power",
+    "VICR": "Power Modules",
+    "SMTC": "Analog / IoT",
+    "SLAB": "IoT / Analog",
+    "CRUS": "Mixed Signal / Audio",
+    "MTSI": "RF / Analog",
+    "RMBS": "Memory / Interface IP",
+
+    # ── RF / Wireless / Connectivity ────────────────────────────────────
+    "SWKS": "RF / Mobile",
+    "QRVO": "RF / Mobile",
+    "SIMO": "Controller IC",
+    "MXL": "Connectivity / Broadband",
+    "CEVA": "Wireless / Edge IP",
+    "MACOM": "RF / Optical / Analog",
+    "WOLF": "SiC / Power / RF",
+
+    # ── Automotive / Vision / Edge AI / Sensors ─────────────────────────
+    "MBLY": "Auto / ADAS",
+    "INDI": "Auto Semiconductors",
+    "HIMX": "Display Driver / Vision AI",
+    "SYNA": "Human Interface / Edge AI",
+    "AMBA": "Vision / Edge AI",
+    "LSCC": "FPGA / Edge",
+    "SITM": "Timing / Clock",
+    "OSIS": "Sensors / Security / Imaging",
+
+    # ── Memory / Storage / Controllers ──────────────────────────────────
+    "MU": "Memory",
+    "WDC": "Storage / NAND",
+    "RMBS": "Memory / Interface IP",
+
+    # ── Foundry / IDM / Manufacturing ───────────────────────────────────
+    "TSM": "Foundry",
+    "GFS": "Foundry",
+    "UMC": "Foundry",
+    "STM": "IDM / Analog / MCU",
+    "ASX": "Foundry / Specialty",
+    "IFNNY": "Power / Auto / IDM",   # 若未在美股主板交易可移除
+    "FSLR": "Power / Adjacent",      # 若你要嚴格半導體可移除
+
+    # ── EDA / IP / Design Tools ─────────────────────────────────────────
+    "CDNS": "EDA / Design Tools",
+    "SNPS": "EDA / Design Tools",
+    "PDFS": "EDA / Yield Software",
+    "PLAB": "Photomask",
+
+    # ── Semiconductor Equipment ─────────────────────────────────────────
+    "AMAT": "Wafer Fab Equipment",
+    "LRCX": "Wafer Fab Equipment",
+    "KLAC": "Process Control / Inspection",
+    "TER": "Test Equipment",
+    "ONTO": "Inspection / Metrology",
+    "FORM": "Test / Inspection",
+    "ACMR": "Cleaning Equipment",
+    "ACLS": "Ion Implant Equipment",
+    "AEHR": "Burn-in / Test",
+    "KLIC": "Packaging Equipment",
+    "COHU": "Test / Handler",
+    "CAMT": "Metrology / Inspection",
+    "NANO": "PCB / Inspection Equipment",
+    "MKSI": "Sub-systems / Process Control",
+    "ICHR": "Subsidiary Equipment / Delivery",
+    "UCTT": "Sub-systems / Equipment",
+    "BRKS": "Equipment Subsystems",
+    "KEYS": "Electronic Test / Measurement",
+    "VECO": "Lithography / Process Equipment",
+
+    # ── Materials / Gas / Components / Consumables ──────────────────────
+    "ENTG": "Materials / Filters / FOUP",
+    "AEIS": "Power Systems / Equipment Components",
+    "CCMP": "Precision Components",
+    "AXTI": "Compound Semiconductor Materials",
+
+    # ── Packaging / Assembly / OSAT ─────────────────────────────────────
+    "AMKR": "OSAT / Packaging",
+    "ASX": "Foundry / Packaging Adjacent",
+
+    # ── Optical / Photonics / Compound Semis ────────────────────────────
+    "LITE": "Optical / Datacom",
+    "AAOI": "Optical / Datacom",
+    "COHR": "Photonics / Laser",
+    "IIVI": "Photonics / Compound Semis",
+    "IPGP": "Fiber Laser / Photonics",
+    "VIAV": "Optical Test / Components",
+
+    # ── AI Server / Semiconductor Adjacent Infrastructure ───────────────
+    "SMCI": "AI Server / Infrastructure",
+    "CRDO": "Datacenter Connectivity",
+    "MTSI": "RF / Analog",
+    "CLFD": "Fiber / Connectivity",
+    "OUST": "LiDAR / Sensors",
+    "INVZ": "LiDAR / Sensors",
+    "LAZR": "LiDAR / Sensors",
+
+    # ── Small / Specialty / Niche ───────────────────────────────────────
+    "AEIS": "Power Systems / Components",
+    "ESIO": "Laser Microfabrication",
+    "SMTC": "Analog / IoT",
+    "AIP": "Semiconductor Adjacent",
+}
+
+# 更完整的半導體宇宙（手動維護版）
+US_SEMI_UNIVERSE: List[str] = sorted(list(dict.fromkeys([
+    # AI / GPU / CPU / HPC / networking
+    "NVDA", "AMD", "INTC", "QCOM", "MRVL", "AVGO", "ARM", "CRDO",
+
+    # Analog / power / mixed signal / MCU
+    "ADI", "TXN", "MCHP", "MPWR", "NXPI", "ON", "ALGM", "AOSL",
+    "POWI", "DIOD", "VSH", "VICR", "SMTC", "SLAB", "CRUS",
+
+    # RF / connectivity / controllers
+    "SWKS", "QRVO", "SIMO", "MXL", "CEVA", "MACOM", "MTSI",
+
+    # Auto / vision / edge / sensor
+    "MBLY", "INDI", "HIMX", "SYNA", "AMBA", "LSCC", "SITM", "OSIS",
+
+    # Memory / storage
+    "MU", "WDC", "RMBS",
+
+    # Foundry / IDM
+    "TSM", "GFS", "UMC", "STM", "ASX",
+
+    # EDA / IP / masks
+    "CDNS", "SNPS", "PDFS", "PLAB",
+
+    # Equipment
+    "AMAT", "LRCX", "KLAC", "TER", "ONTO", "FORM", "ACMR", "ACLS",
+    "AEHR", "KLIC", "COHU", "CAMT", "NANO", "MKSI", "ICHR", "UCTT",
+    "BRKS", "KEYS", "VECO",
+
+    # Materials / components / consumables
+    "ENTG", "AEIS", "CCMP", "AXTI",
+
+    # Packaging / OSAT
+    "AMKR",
+
+    # Optical / photonics / compound semis
+    "LITE", "AAOI", "COHR", "IIVI", "IPGP", "VIAV",
+
+    # AI infra / adjacent
     "SMCI",
-    "MBLY", "LAZR", "INVZ", "OUST",
-]
+
+    # LiDAR / sensing (可視需求保留)
+    "LAZR", "INVZ", "OUST",
+])))
 
 
 @lru_cache(maxsize=1)
@@ -1530,17 +1685,11 @@ def _fetch_etf_holdings(etf: str = "SOXX") -> List[str]:
         return []
 
 
-def get_us_semi_universe(include_etf: bool = True) -> List[str]:
-    base = [normalize_ticker(t) for t in US_SEMI_UNIVERSE]
-    if not include_etf:
-        return sorted(list(dict.fromkeys(base)))
-
-    etf_extra: List[str] = []
-    for etf in ["SOXX", "SMH"]:
-        etf_extra.extend(_fetch_etf_holdings(etf))
-
-    combined = list(dict.fromkeys(base + etf_extra))
-    return sorted(combined)
+def get_us_semi_universe(include_etf: bool = False) -> List[str]:
+    """
+    取得完整美股半導體掃描宇宙（不使用 ETF）。
+    """
+    return sorted(list(dict.fromkeys([normalize_ticker(t) for t in US_SEMI_UNIVERSE])))
 
 
 US_SEMI_SCORE_STRONG = get_env_float("US_SEMI_SCORE_STRONG", 5.5)
@@ -1551,6 +1700,21 @@ US_SEMI_MIN_PRICE = get_env_float("US_SEMI_MIN_PRICE", 10.0)
 US_SEMI_SCAN_WORKERS = get_env_int("US_SEMI_SCAN_WORKERS", 10)
 US_SEMI_TOP_N = get_env_int("US_SEMI_TOP_N", 15)
 
+def get_us_semi_category(ticker: str) -> str:
+    ticker = normalize_ticker(ticker)
+    if ticker in US_SEMI_CATEGORY_MAP:
+        return US_SEMI_CATEGORY_MAP[ticker]
+
+    # 後備：用 yfinance profile 補分類
+    prof = get_symbol_profile(ticker)
+    industry = str(prof.get("industry") or "").strip()
+    sector = str(prof.get("sector") or "").strip()
+
+    if industry:
+        return industry
+    if sector:
+        return sector
+    return "Semiconductor / Other"
 
 def _get_sox_regime() -> Dict:
     try:
@@ -1703,6 +1867,7 @@ def _us_semi_score_one(ticker: str, sox_regime: Dict) -> Optional[Dict]:
 
         return {
             "ticker": ticker,
+            "category": get_us_semi_category(ticker),
             "score": score,
             "signal": signal,
             "close": round(close, 2),
@@ -1806,7 +1971,7 @@ def migrate_trades_v1_to_v2() -> Tuple[bool, str]:
 def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
     sox_regime = _get_sox_regime()
 
-    base_universe = get_us_semi_universe(include_etf=True)
+    base_universe = get_us_semi_universe(include_etf=False)
     universe = list(dict.fromkeys(
         base_universe + [normalize_ticker(t) for t in (extra_tickers or [])]
     ))
@@ -1867,12 +2032,15 @@ def format_us_semi_tg_messages(scan_result: Dict) -> List[str]:
     ]
 
     def _stock_block(i: int, r: dict) -> List[str]:
-        rank = RANK[i] if i < len(RANK) else f"{i + 1}."
+        rank = RANK[i] if i < len(RANK) else f"{i+1}."
         stars = "⭐" * min(5, max(1, round(r["score"] / 1.5)))
         sig_lbl = {"STRONG_BUY": "🔴 強力買進", "BUY": "🟢 積極買進", "WATCH": "🟡 留意"}.get(r["signal"], "")
         reasons = "、".join(r["reasons"][:3]) if r["reasons"] else "—"
+        category = r.get("category", "Semiconductor / Other")
+    
         return [
             f"{rank} *{r['ticker']}*  {stars}  {sig_lbl}",
+            f"   類別: `{category}`",
             f"   分數 *{r['score']:.1f}*  |  RSI {r['rsi']:.0f}  ADX {r['adx']:.0f}",
             f"   現價 ${r['close']}  |  RS vs SPY {r['rs20_vs_spy']:+.1f}%",
             f"   📈 {reasons}",
