@@ -416,7 +416,7 @@ def action_tip(p: dict) -> str:
         return f'💰 到達 TP1，建議獲利了結 <b>{p.get("SuggestedSellQty", 0)} 股</b> (約 50%)'
     return '👁 無強烈訊號，持續觀察。'
 
-def render_ticker_technical_chart(ticker: str, days: int = 180):
+def render_ticker_technical_chart(ticker: str, days: int = 180, chart_key: str = None):
     hist = get_unified_analysis(ticker)
     if hist is None or hist.empty:
         st.warning(f"無法取得 {ticker} 技術圖資料")
@@ -443,7 +443,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
         subplot_titles=(f"{ticker} — K線 + BB", "成交量", "KDJ 隨機指標", "MACD"),
     )
 
-    # K線
     fig.add_trace(go.Candlestick(
         x=plot_df.index,
         open=plot_df["Open"],
@@ -457,7 +456,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
         decreasing_line_color="#FF3366",
     ), row=1, col=1)
 
-    # SMA
     sma_specs = [
         ("SMA20", "#F7B500", "SMA20"),
         ("SMA50", "#1E90FF", "SMA50"),
@@ -473,7 +471,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
                 name=label,
             ), row=1, col=1)
 
-    # BB
     if "BB_upper" in plot_df.columns and "BB_lower" in plot_df.columns:
         fig.add_trace(go.Scatter(
             x=plot_df.index,
@@ -494,7 +491,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
             showlegend=False,
         ), row=1, col=1)
 
-    # 停損 / TP 線
     last = plot_df.iloc[-1]
     close = float(last["Close"])
     atr = float(last.get("ATR", 0) or 0)
@@ -504,7 +500,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
     fig.add_hline(y=stop_loss, line_color="#00E5A0", line_dash="dot", row=1, col=1)
     fig.add_hline(y=tp1, line_color="#FF3366", line_dash="dot", row=1, col=1)
 
-    # 成交量
     vol_colors = ["#00E5A0" if c >= o else "#FF3366" for c, o in zip(plot_df["Close"], plot_df["Open"])]
     fig.add_trace(go.Bar(
         x=plot_df.index,
@@ -522,7 +517,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
             name="VOL SMA20",
         ), row=2, col=1)
 
-    # KDJ
     fig.add_trace(go.Scatter(
         x=plot_df.index,
         y=plot_df["K"],
@@ -540,7 +534,6 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
     fig.add_hline(y=80, line_color="rgba(255,51,102,0.35)", line_dash="dot", row=3, col=1)
     fig.add_hline(y=20, line_color="rgba(0,229,160,0.35)", line_dash="dot", row=3, col=1)
 
-    # MACD
     macd_colors = ["#00E5A0" if v >= 0 else "#FF3366" for v in plot_df["MACD_Hist"]]
     fig.add_trace(go.Bar(
         x=plot_df.index,
@@ -578,7 +571,12 @@ def render_ticker_technical_chart(ticker: str, days: int = 180):
         fig.update_xaxes(gridcolor="rgba(255,255,255,0.04)", row=r, col=1)
         fig.update_yaxes(gridcolor="rgba(255,255,255,0.05)", row=r, col=1)
 
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    st.plotly_chart(
+        fig,
+        use_container_width=True,
+        config={"displayModeBar": False},
+        key=chart_key or f"tech_chart_{ticker}_{days}"
+    )
     
 # ─────────────────────────────────────────────────────────────────────────────
 # Data init
@@ -1443,7 +1441,11 @@ with tab6:
             
                 with st.expander(f"📈 查看 {_r['ticker']} 技術圖表", expanded=False):
                     render_ticker_technical_summary(_r["ticker"])
-                    render_ticker_technical_chart(_r["ticker"], days=180)
+                    render_ticker_technical_chart(
+                        _r["ticker"],
+                        days=180,
+                        chart_key=f"semi_chart_{_r['ticker']}_{_i}"
+                    )
 
             st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
             st.markdown('<div class="qsec">完整結果表格</div>', unsafe_allow_html=True)
