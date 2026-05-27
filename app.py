@@ -483,10 +483,7 @@ with tab1:
                 legend=dict(font=dict(family="DM Sans", size=11), orientation="h", yanchor="bottom", y=-0.2),
             )
             st.plotly_chart(pie, use_container_width=True, config={"displayModeBar": False})
-            
-        <div class="pc-kv"><span class="pc-kv-label">未實現</span><span class="pc-kv-value">{fmt_dollar(p.get('Unrealized', 0))}</span></div>
-        <div class="pc-kv"><span class="pc-kv-label">已實現</span><span class="pc-kv-value">{fmt_dollar(p.get('RealizedPL', 0))}</span></div>
-        
+
         st.markdown('<div class="qsec">持倉明細</div>', unsafe_allow_html=True)
 
         for p in sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True):
@@ -535,6 +532,8 @@ with tab1:
   {weight_bar(p.get('WeightPct', 0))}
 
   <div class="pc-grid">
+    <div class="pc-kv"><span class="pc-kv-label">未實現</span><span class="pc-kv-value">{fmt_dollar(p.get('Unrealized', 0))}</span></div>
+    <div class="pc-kv"><span class="pc-kv-label">已實現</span><span class="pc-kv-value">{fmt_dollar(p.get('RealizedPL', 0))}</span></div>
     <div class="pc-kv"><span class="pc-kv-label">停損</span><span class="pc-kv-value">{sl_str}</span></div>
     <div class="pc-kv"><span class="pc-kv-label">目標1</span><span class="pc-kv-value">{tp_str}</span></div>
     <div class="pc-kv"><span class="pc-kv-label">RS vs SPY</span><span class="pc-kv-value" style="color:{'var(--green)' if (rs_val or 0)>0 else 'var(--red)'}">{rs_str}</span></div>
