@@ -304,6 +304,91 @@ h1,h2,h3,h4 { font-family: var(--sans); letter-spacing: -0.02em; color: var(--te
 .qdiv { border: none; border-top: 1px solid var(--border); margin: 18px 0; }
 .qsec { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-family: var(--sans); font-weight: 700; margin: 18px 0 10px; }
 
+.ts-wrap {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ts-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 14px;
+}
+
+.ts-label {
+  font-size: 0.68rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+  font-family: var(--sans);
+}
+
+.ts-value {
+  font-family: var(--mono);
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: var(--text);
+  line-height: 1.1;
+}
+
+.ts-sub {
+  margin-top: 6px;
+  font-size: 0.76rem;
+  font-family: var(--sans);
+  font-weight: 600;
+}
+
+.ts-head {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  padding:12px 14px;
+  border:1px solid var(--border);
+  border-radius:14px;
+  background: linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));
+  margin-bottom: 10px;
+}
+
+.ts-badge {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  padding:5px 10px;
+  border-radius:999px;
+  font-size:0.74rem;
+  font-weight:700;
+  font-family: var(--sans);
+  border:1px solid rgba(255,255,255,0.08);
+}
+
+.ts-note {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--surface2);
+  border-left: 3px solid var(--cyan);
+  font-size: 0.8rem;
+  color: var(--text);
+  font-family: var(--sans);
+}
+
+@media (max-width: 900px) {
+  .ts-wrap {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .ts-wrap {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 600px) {
   [data-testid="stMetricValue"] { font-size: 1.1rem !important; }
   .pc { padding: 14px; }
@@ -348,12 +433,97 @@ def session_badge(session: str) -> str:
     lbl, cls = labels.get(session, (session, "badge-closed"))
     return f'<span class="badge {cls}">{lbl}</span>'
 
-def render_ticker_technical_summary(ticker: str):
+def classify_kd_status(k: float, d: float) -> Tuple[str, str]:
+    if k >= 80 and d >= 80:
+        return "高檔偏熱", "#FF3366"
+    if k <= 20 and d <= 20:
+        return "低檔區", "#00E5A0"
+    if k > d:
+        return "短線轉強", "#00E5A0"
+    if k < d:
+        return "短線偏弱", "#FFB800"
+    return "中性", "#636B80"
+
+
+def classify_rsi_status(rsi: float) -> Tuple[str, str]:
+    if rsi >= 70:
+        return "偏熱", "#FF3366"
+    if rsi >= 60:
+        return "偏強", "#00E5A0"
+    if rsi >= 45:
+        return "中性", "#FFB800"
+    if rsi >= 30:
+        return "偏弱", "#FF8C42"
+    return "超賣區", "#00D4FF"
+
+
+def classify_volume_ratio_status(vol_ratio: float) -> Tuple[str, str]:
+    if vol_ratio >= 1.8:
+        return "明顯放量", "#00E5A0"
+    if vol_ratio >= 1.2:
+        return "溫和放量", "#00D4FF"
+    if vol_ratio >= 0.8:
+        return "正常量", "#FFB800"
+    return "量縮", "#636B80"
+
+
+def classify_rs_status(rs_val: float) -> Tuple[str, str]:
+    if rs_val >= 5:
+        return "強於大盤", "#00E5A0"
+    if rs_val > 0:
+        return "略強於大盤", "#00D4FF"
+    if rs_val <= -5:
+        return "明顯弱於大盤", "#FF3366"
+    return "略弱於大盤", "#FFB800"
+
+
+def classify_adx_status(adx: float) -> Tuple[str, str]:
+    if adx >= 30:
+        return "強趨勢", "#00E5A0"
+    if adx >= 20:
+        return "趨勢形成", "#00D4FF"
+    if adx >= 15:
+        return "弱趨勢", "#FFB800"
+    return "盤整為主", "#636B80"
+
+
+def get_technical_summary_signal(k: float, d: float, rsi: float, rs_vs_spy: float, adx: float, vol_ratio: float) -> Tuple[str, str, str]:
+    score = 0
+
+    if k > d:
+        score += 1
+    elif k < d:
+        score -= 1
+
+    if rsi >= 60:
+        score += 1
+    elif rsi < 40:
+        score -= 1
+
+    if rs_vs_spy > 0:
+        score += 1
+    elif rs_vs_spy < 0:
+        score -= 1
+
+    if adx >= 20:
+        score += 1
+
+    if vol_ratio >= 1.2:
+        score += 0.5
+
+    if score >= 2.5:
+        return "🟢 偏多", "#00E5A0", "多項動能指標同步偏強"
+    if score <= -1:
+        return "🔴 偏弱", "#FF3366", "短線動能與相對強弱偏弱"
+    return "🟡 中性", "#FFB800", "動能中性，等待更明確方向"
+
+def get_ticker_brief_technical_signal(ticker: str) -> Tuple[str, str]:
     hist = get_unified_analysis(ticker)
-    if hist is None or hist.empty or len(hist) < 10:
-        return
+    if hist is None or hist.empty or len(hist) < 30:
+        return "⚪ 未知", "#636B80"
 
     df = hist.tail(30).copy()
+
     low_n = df["Low"].rolling(9).min()
     high_n = df["High"].rolling(9).max()
     rsv = (df["Close"] - low_n) / (high_n - low_n + 1e-9) * 100
@@ -361,22 +531,157 @@ def render_ticker_technical_summary(ticker: str):
     df["D"] = df["K"].ewm(com=2).mean()
 
     last = df.iloc[-1]
+
+    k = float(last["K"])
+    d = float(last["D"])
+    rsi = float(last["RSI"])
+    adx = float(last.get("ADX", 0) or 0)
+    vol_ratio = float(last["Volume"]) / max(float(last.get("VOL_SMA20", 1) or 1), 1)
+    rs_vs_spy = float(last.get("RS20_vs_SPY", 0) or 0)
+
+    label, color, _ = get_technical_summary_signal(
+        k=k,
+        d=d,
+        rsi=rsi,
+        rs_vs_spy=rs_vs_spy,
+        adx=adx,
+        vol_ratio=vol_ratio,
+    )
+    return label, color
+
+def technical_bias_badge(label: str, color: str) -> str:
+    safe_label = html.escape(str(label))
+    return (
+        f'<span style="display:inline-flex;align-items:center;gap:6px;'
+        f'padding:4px 10px;border-radius:999px;font-size:0.68rem;'
+        f'font-weight:700;font-family:var(--sans);'
+        f'color:{color};background:{color}18;border:1px solid {color}55;">'
+        f'{safe_label}</span>'
+    )
+
+def render_ticker_technical_summary(ticker: str):
+    hist = get_unified_analysis(ticker)
+    if hist is None or hist.empty or len(hist) < 30:
+        st.info("技術摘要資料不足")
+        return
+
+    df = hist.tail(30).copy()
+
+    low_n = df["Low"].rolling(9).min()
+    high_n = df["High"].rolling(9).max()
+    rsv = (df["Close"] - low_n) / (high_n - low_n + 1e-9) * 100
+    df["K"] = rsv.ewm(com=2).mean()
+    df["D"] = df["K"].ewm(com=2).mean()
+
+    last = df.iloc[-1]
+
     close = float(last["Close"])
     k = float(last["K"])
     d = float(last["D"])
     rsi = float(last["RSI"])
-    vol_ratio = float(last["Volume"]) / max(float(last.get("VOL_SMA20", 1)), 1)
+    adx = float(last.get("ADX", 0) or 0)
+    vol_ratio = float(last["Volume"]) / max(float(last.get("VOL_SMA20", 1) or 1), 1)
+    rs_vs_spy = float(last.get("RS20_vs_SPY", 0) or 0)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("現價", f"${close:,.2f}")
-    c2.metric("K / D", f"{k:.0f} / {d:.0f}")
-    c3.metric("RSI", f"{rsi:.1f}")
-    c4.metric("量比", f"{vol_ratio:.1f}x")
+    kd_txt, kd_color = classify_kd_status(k, d)
+    rsi_txt, rsi_color = classify_rsi_status(rsi)
+    vol_txt, vol_color = classify_volume_ratio_status(vol_ratio)
+    rs_txt, rs_color = classify_rs_status(rs_vs_spy)
+    adx_txt, adx_color = classify_adx_status(adx)
+
+    head_label, head_color, head_desc = get_technical_summary_signal(
+        k=k,
+        d=d,
+        rsi=rsi,
+        rs_vs_spy=rs_vs_spy,
+        adx=adx,
+        vol_ratio=vol_ratio,
+    )
+
+    summary_tags = []
+    summary_tags.append("KD偏多" if k > d else "KD偏弱" if k < d else "KD中性")
+
+    if rsi >= 70:
+        summary_tags.append("RSI偏熱")
+    elif rsi >= 60:
+        summary_tags.append("RSI偏強")
+    elif rsi < 40:
+        summary_tags.append("RSI偏弱")
+    else:
+        summary_tags.append("RSI中性")
+
+    if vol_ratio >= 1.5:
+        summary_tags.append("量能放大")
+    elif vol_ratio < 0.8:
+        summary_tags.append("量能偏低")
+    else:
+        summary_tags.append("量能正常")
+
+    summary_tags.append("強於大盤" if rs_vs_spy > 0 else "弱於大盤")
+    summary_tags.append("趨勢明確" if adx >= 20 else "趨勢不明")
+
+    summary_html = f"""
+<div class="ts-head">
+  <div>
+    <div style="font-size:0.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:0.08em;">Technical Summary</div>
+    <div style="font-family:var(--mono);font-size:1.1rem;font-weight:700;color:{head_color};margin-top:4px;">{head_label}</div>
+    <div style="font-size:0.78rem;color:var(--muted);margin-top:4px;">{head_desc}</div>
+  </div>
+  <div class="ts-badge" style="color:{head_color};border-color:{head_color}55;background:{head_color}12;">
+    {ticker}
+  </div>
+</div>
+
+<div class="ts-wrap">
+  <div class="ts-card">
+    <div class="ts-label">現價</div>
+    <div class="ts-value">${close:,.2f}</div>
+    <div class="ts-sub" style="color:#9AA4BF;">最新收盤</div>
+  </div>
+
+  <div class="ts-card">
+    <div class="ts-label">K / D</div>
+    <div class="ts-value">{k:.0f} / {d:.0f}</div>
+    <div class="ts-sub" style="color:{kd_color};">{kd_txt}</div>
+  </div>
+
+  <div class="ts-card">
+    <div class="ts-label">RSI</div>
+    <div class="ts-value">{rsi:.1f}</div>
+    <div class="ts-sub" style="color:{rsi_color};">{rsi_txt}</div>
+  </div>
+
+  <div class="ts-card">
+    <div class="ts-label">量比</div>
+    <div class="ts-value">{vol_ratio:.1f}x</div>
+    <div class="ts-sub" style="color:{vol_color};">{vol_txt}</div>
+  </div>
+
+  <div class="ts-card">
+    <div class="ts-label">RS vs SPY</div>
+    <div class="ts-value">{rs_vs_spy:+.1f}%</div>
+    <div class="ts-sub" style="color:{rs_color};">{rs_txt}</div>
+  </div>
+
+  <div class="ts-card">
+    <div class="ts-label">ADX</div>
+    <div class="ts-value">{adx:.1f}</div>
+    <div class="ts-sub" style="color:{adx_color};">{adx_txt}</div>
+  </div>
+</div>
+
+<div class="ts-note">
+  技術摘要：{" ｜ ".join(summary_tags)}
+</div>
+"""
+    st.markdown(summary_html, unsafe_allow_html=True)
 
     if k >= 85 and d >= 80 and rsi >= 75:
         st.warning(f"⚠️ 技術面高檔過熱（KD {k:.0f}/{d:.0f} · RSI {rsi:.0f}）")
     elif k >= 80 or rsi >= 70:
-        st.info(f"⚠️ KD高檔超買；RSI偏高（{rsi:.0f}）")
+        st.info(f"⚠️ 偏高檔區，留意追價風險（KD {k:.0f}/{d:.0f} · RSI {rsi:.0f}）")
+    elif k <= 20 and d <= 20 and rsi <= 35:
+        st.success(f"✅ 進入低檔區，可觀察是否出現反彈訊號（KD {k:.0f}/{d:.0f} · RSI {rsi:.0f}）")
 
 def pl_class(val: float) -> str:
     if val > 0:
@@ -578,7 +883,45 @@ def render_ticker_technical_chart(ticker: str, days: int = 180, chart_key: str =
         config={"displayModeBar": False},
         key=chart_key or f"tech_chart_{ticker}_{days}"
     )
-    
+
+def render_ticker_technical_panel(
+    ticker: str,
+    chart_key_prefix: str = "tech",
+    days: int = 180,
+    show_title: bool = True,
+):
+    ticker = normalize_ticker(ticker)
+
+    if show_title:
+        st.markdown("#### 技術摘要")
+    render_ticker_technical_summary(ticker)
+
+    if show_title:
+        st.markdown("#### 完整技術圖")
+    render_ticker_technical_chart(
+        ticker,
+        days=days,
+        chart_key=f"{chart_key_prefix}_{ticker}_{days}"
+    )
+
+def render_ticker_technical_expander(
+    ticker: str,
+    expander_label: Optional[str] = None,
+    chart_key_prefix: str = "tech",
+    days: int = 180,
+    expanded: bool = False,
+):
+    ticker = normalize_ticker(ticker)
+    label = expander_label or f"📈 查看 {ticker} 技術分析"
+
+    with st.expander(label, expanded=expanded):
+        render_ticker_technical_panel(
+            ticker=ticker,
+            chart_key_prefix=chart_key_prefix,
+            days=days,
+            show_title=True,
+        )
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Data init
 # ─────────────────────────────────────────────────────────────────────────────
@@ -706,6 +1049,9 @@ with tab1:
             industry_raw = str(p.get("Industry", "") or "").strip()
             industry_safe = html.escape(industry_raw)
         
+            brief_label, brief_color = get_ticker_brief_technical_signal(p["Ticker"])
+            brief_badge_html = technical_bias_badge(brief_label, brief_color)
+        
             signal_html = signal_badge(sig)
             action_tip_safe = html.escape(
                 str(action_tip(p)).replace("<b>", "").replace("</b>", "")
@@ -723,6 +1069,7 @@ with tab1:
                 '    <div>',
                 f'      <div class="pc-ticker">{ticker_safe} <span style="font-size:0.7rem;color:var(--muted);font-weight:400">{bucket_safe}</span></div>',
                 f'      <div class="pc-meta">{p["Shares"]:.4f} 股 · 成本 ${p["AvgCost"]:.2f}{meta_suffix}</div>',
+                f'      <div style="margin-top:8px;">{brief_badge_html}</div>',
                 '    </div>',
                 f'    <div style="text-align:right">{signal_html}<div style="margin-top:4px;font-family:var(--mono);font-size:0.72rem;color:var(--muted)">分數 {sc_val:.1f}</div></div>',
                 '  </div>',
@@ -749,13 +1096,13 @@ with tab1:
         
             st.markdown(card_html, unsafe_allow_html=True)
         
-            with st.expander(f"📈 查看 {ticker_safe} 技術圖表", expanded=False):
-                render_ticker_technical_summary(p["Ticker"])
-                render_ticker_technical_chart(
-                    p["Ticker"],
-                    days=180,
-                    chart_key=f"portfolio_chart_{ticker_safe}_{i}"
-                )
+            render_ticker_technical_expander(
+                ticker=p["Ticker"],
+                expander_label=f"📈 查看 {ticker_safe} 技術分析",
+                chart_key_prefix=f"portfolio_chart_{i}",
+                days=180,
+                expanded=False,
+            )
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — Scanner
@@ -1455,13 +1802,13 @@ with tab6:
             </div>
             """, unsafe_allow_html=True)
             
-                with st.expander(f"📈 查看 {_r['ticker']} 技術圖表", expanded=False):
-                    render_ticker_technical_summary(_r["ticker"])
-                    render_ticker_technical_chart(
-                        _r["ticker"],
-                        days=180,
-                        chart_key=f"semi_chart_{_r['ticker']}_{_i}"
-                    )
+                render_ticker_technical_expander(
+                    ticker=_r["ticker"],
+                    expander_label=f"📈 查看 {_r['ticker']} 技術分析",
+                    chart_key_prefix=f"semi_chart_{_i}",
+                    days=180,
+                    expanded=False,
+                )
 
             st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
             st.markdown('<div class="qsec">完整結果表格</div>', unsafe_allow_html=True)
