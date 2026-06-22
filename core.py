@@ -371,6 +371,21 @@ def is_earnings_blocked(symbol: str) -> bool:
         return False
 
 
+def _wilder(s: pd.Series, period: int) -> pd.Series:
+    """Wilder 平滑 == alpha=1/period 的 EMA，用於 ATR / ADX / RSI 與標準刻度一致。"""
+    return s.ewm(alpha=1.0 / period, adjust=False).mean()
+
+
+@lru_cache(maxsize=4)
+def _get_benchmark_close(symbol: str = "SPY", period: str = "2y") -> Optional[pd.Series]:
+    """取得對標收盤序列並快取，避免在每檔 get_unified_analysis 內重複下載 SPY。"""
+    try:
+        h = yf.Ticker(normalize_ticker(symbol)).history(period=period, auto_adjust=True)
+        return h["Close"] if not h.empty else None
+    except Exception:
+        return None
+
+
 @lru_cache(maxsize=1024)
 def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
     try:
@@ -394,27 +409,25 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
         lc = (df["Low"] - df["Close"].shift(1)).abs()
         tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
         df["TR"] = tr
-        df["ATR"] = tr.rolling(14).mean()
+        df["ATR"] = _wilder(tr, 14)
 
         up_move = df["High"].diff()
         down_move = -df["Low"].diff()
         plus_dm = up_move.where((up_move > down_move) & (up_move > 0), 0.0)
         minus_dm = down_move.where((down_move > up_move) & (down_move > 0), 0.0)
 
-        atr14 = df["TR"].rolling(14).mean()
-        plus_di = 100 * (plus_dm.rolling(14).mean() / (atr14 + 1e-9))
-        minus_di = 100 * (minus_dm.rolling(14).mean() / (atr14 + 1e-9))
+        atr14 = _wilder(tr, 14)
+        plus_di = 100 * (_wilder(plus_dm, 14) / (atr14 + 1e-9))
+        minus_di = 100 * (_wilder(minus_dm, 14) / (atr14 + 1e-9))
         dx = ((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)) * 100
-        df["ADX"] = dx.rolling(14).mean()
+        df["ADX"] = _wilder(dx, 14)
         df["PLUS_DI"] = plus_di
         df["MINUS_DI"] = minus_di
 
         delta = df["Close"].diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
-        avg_gain = gain.rolling(14).mean()
-        avg_loss = loss.rolling(14).mean()
-        rs = avg_gain / (avg_loss + 1e-9)
+        rs = _wilder(gain, 14) / (_wilder(loss, 14) + 1e-9)
         df["RSI"] = 100 - (100 / (1 + rs))
 
         ema12 = df["Close"].ewm(span=12, adjust=False).mean()
@@ -449,9 +462,9 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
         df["OBV_SMA20"] = obv_s.rolling(20).mean()
         df["OBV_Slope20"] = obv_s.diff(20)
 
-        spy = yf.Ticker("SPY").history(period="2y", auto_adjust=True)
-        if spy is not None and not spy.empty:
-            spy_close = spy["Close"].reindex(df.index).ffill()
+        spy_close_raw = _get_benchmark_close("SPY", "2y")
+        if spy_close_raw is not None and not spy_close_raw.empty:
+            spy_close = spy_close_raw.reindex(df.index).ffill()
             df["RS_Line_SPY"] = df["Close"] / (spy_close + 1e-9)
             df["Ret20"] = df["Close"].pct_change(RS_LOOKBACK_DAYS)
             df["SPY_Ret20"] = spy_close.pct_change(RS_LOOKBACK_DAYS)
@@ -472,6 +485,7 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
 def clear_market_cache():
     get_last_price.cache_clear()
     get_unified_analysis.cache_clear()
+    _get_benchmark_close.cache_clear()
     get_next_earnings_date.cache_clear()
     get_symbol_profile.cache_clear()
 
@@ -1256,20 +1270,25 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
         total_realized_pl += realized_pl
         rem_shares = sum(l["shares"] for l in lots)
         if rem_shares > 1e-9:
-            last_pr = get_last_price(ticker)
-            if not last_pr:
-                continue
             cb = sum(l["shares"] * l["price"] for l in lots)
+            avg_cost = cb / rem_shares
+            last_pr = get_last_price(ticker)
+            # 抓不到報價時，現金早已扣除；若直接 continue 會讓部位消失、NAV 被低估。
+            # 改用成本價估值並標記 PriceStale，UI 可提示「報價過期」。
+            price_stale = not last_pr
+            if price_stale:
+                last_pr = avg_cost
             mv = rem_shares * last_pr
             portfolio.append({
                 "Ticker": ticker,
                 "Shares": round(rem_shares, 4),
-                "AvgCost": round(cb / rem_shares, 4),
+                "AvgCost": round(avg_cost, 4),
                 "LastPrice": round(last_pr, 4),
                 "MarketValue": round(mv, 4),
                 "Unrealized": round(mv - cb, 4),
-                "PL_Pct": round(((last_pr / (cb / rem_shares)) - 1) * 100, 2),
-                "RealizedPL": round(realized_pl, 4)
+                "PL_Pct": round(((last_pr / avg_cost) - 1) * 100, 2),
+                "RealizedPL": round(realized_pl, 4),
+                "PriceStale": price_stale,
             })
 
     return portfolio, cash, total_realized_pl
@@ -1303,7 +1322,8 @@ def evaluate_strategy(
     cash,
     market_regime,
     portfolio_heat_pct,
-    portfolio
+    portfolio,
+    recent_buy: bool = False,
 ) -> Tuple[float, str, Dict, str]:
     last = hist.iloc[-1]
     close = safe_float(last["Close"])
@@ -1339,13 +1359,21 @@ def evaluate_strategy(
         current_weight = current_mkt_value / total_assets if total_assets > 0 else 0
         can_add = current_weight < limits["max_weight"] * SCALE_IN_MAX_WEIGHT_RATIO
         pullback_ok = close <= sma20 * 1.03
-        if score >= SCORE_BUY_ADD_THRESHOLD and can_add and pullback_ok and qty > 0 and market_regime.get("allow_add_position"):
+        avail_cash = cash - (total_assets * CASH_RESERVE_PCT)                                  # 與新進場一致
+        after_weight = (current_mkt_value + close * qty) / total_assets if total_assets > 0 else 1.0
+        if (score >= SCORE_BUY_ADD_THRESHOLD and can_add and pullback_ok and qty > 0
+                and avail_cash > close * qty                                                   # 補：現金檢查
+                and after_weight <= limits["max_weight"]                                       # 補：加碼後權重上限
+                and not recent_buy                                                             # 補：冷卻期
+                and market_regime.get("allow_add_position")):
             action, mode, tp = "BUY_ADD", "SCALE_IN", close
 
     elif held_shares <= 0 and meta["trend_ok"] and meta["liquid_ok"] and not meta["earnings_blocked"]:
         avail_cash = cash - (total_assets * CASH_RESERVE_PCT)
         heat_ok = portfolio_heat_pct < PORTFOLIO_HEAT_LIMIT_PCT * 100
-        if score >= SCORE_BUY_NOW_THRESHOLD and qty > 0 and avail_cash > close * qty and heat_ok and market_regime.get("allow_new_position"):
+        if (score >= SCORE_BUY_NOW_THRESHOLD and qty > 0 and avail_cash > close * qty
+                and heat_ok and not recent_buy                                                 # 補：冷卻期
+                and market_regime.get("allow_new_position")):
             action, mode, tp = "BUY_NOW", "TREND_MOMENTUM", close
 
     partial_sell_qty = max(1, math.floor(held_shares * 0.5)) if action == "SELL_PARTIAL" else 0
@@ -1430,7 +1458,10 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
             continue
         held = next((p["Shares"] for p in portfolio if p["Ticker"] == tk), 0)
         mkt_val = next((p["MarketValue"] for p in portfolio if p["Ticker"] == tk), 0)
-        sc, act, det, note = evaluate_strategy(tk, h, held, mkt_val, total_assets, cash, market_regime, 0, portfolio)
+        recent_buy, _ = get_recent_trade_status(tk, trades_df)
+        sc, act, det, note = evaluate_strategy(
+            tk, h, held, mkt_val, total_assets, cash, market_regime, 0, portfolio, recent_buy=recent_buy
+        )
         candidates.append({"ticker": tk, "score": sc, "action": act, "details": det, "note": note})
 
         if act != "WATCH" and should_send_alert(alerts_df, tk, act, det["close"], sc, session):
@@ -2045,7 +2076,10 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
     with _cf.ThreadPoolExecutor(max_workers=US_SEMI_SCAN_WORKERS) as ex:
         futs = {ex.submit(_us_semi_score_one, tk, sox_regime): tk for tk in universe}
         for fut in _cf.as_completed(futs):
-            r = fut.result()
+            try:
+                r = fut.result()
+            except Exception:
+                r = None
             if r:
                 results.append(r)
 
@@ -2054,6 +2088,9 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
     strong_buy = [r for r in results if r["signal"] == "STRONG_BUY"]
     buy = [r for r in results if r["signal"] == "BUY"]
     watch = [r for r in results if r["signal"] == "WATCH"]
+
+    # 取不到資料的代碼（皆為快取命中，不再連網）：通常是下市/更名/錯誤代碼或被限流
+    no_data_tickers = [tk for tk in universe if get_unified_analysis(tk) is None]
 
     eastern = pytz.timezone("US/Eastern")
     scan_date = datetime.now(eastern).strftime("%Y-%m-%d")
@@ -2066,6 +2103,8 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
         "sox_regime": sox_regime,
         "total_scanned": len(universe),
         "total_hits": len(results),
+        "no_data_count": len(no_data_tickers),
+        "no_data_tickers": no_data_tickers,
         "scan_date": scan_date,
     }
 
@@ -2152,3 +2191,169 @@ def send_us_semi_tg(messages: List[str]) -> bool:
         except Exception:
             ok = False
     return ok
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 訊號成效追蹤 / 真實交易統計 / 宇宙健檢（新增）
+# ═══════════════════════════════════════════════════════════════════════════════
+def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS) -> pd.DataFrame:
+    """
+    回顧 Signals 表中已「成熟」的訊號，計算其前瞻表現（+N 交易日報酬、MFE/MAE）。
+    用途：驗證評分是否真有 edge，據此調整分數門檻與權重。
+    限制：get_unified_analysis 僅含約 2 年歷史，更早的訊號評不到；交易日對齊以日曆日緩衝近似。
+    """
+    cols = ["Ticker", "DateTime", "Action", "StrategyMode", "Score",
+            "EntryPx", "FwdRetPct", "MFEPct", "MAEPct", "Win"]
+    sig = load_signals()
+    if sig is None or sig.empty:
+        return pd.DataFrame(columns=cols)
+
+    sig = sig.dropna(subset=["DateTime", "Ticker", "Close"]).copy()
+    cutoff = pd.Timestamp(datetime.now()) - pd.Timedelta(days=int(lookahead_days * 1.6))
+    mature = sig[sig["DateTime"] <= cutoff]
+    if mature.empty:
+        return pd.DataFrame(columns=cols)
+
+    rows = []
+    for tk, grp in mature.groupby("Ticker"):
+        hist = get_unified_analysis(tk)
+        if hist is None or hist.empty:
+            continue
+        closes = hist["Close"]
+        idx = hist.index
+        try:
+            idx_dates = pd.DatetimeIndex(idx.tz_localize(None)).normalize()
+        except (TypeError, AttributeError):
+            idx_dates = pd.DatetimeIndex(idx).normalize()
+
+        for _, s in grp.iterrows():
+            entry_dt = pd.Timestamp(s["DateTime"]).normalize()
+            pos = int(idx_dates.searchsorted(entry_dt))           # 訊號日或之後第一個交易日
+            if pos >= len(idx) - 1:
+                continue
+            entry_px = float(closes.iloc[pos])
+            if entry_px <= 0:
+                continue
+            fwd_pos = min(pos + lookahead_days, len(idx) - 1)
+            fwd_px = float(closes.iloc[fwd_pos])
+            window = closes.iloc[pos:fwd_pos + 1]
+            ret = (fwd_px / entry_px - 1) * 100
+            rows.append({
+                "Ticker": tk,
+                "DateTime": s["DateTime"],
+                "Action": str(s.get("Action", "")),
+                "StrategyMode": str(s.get("StrategyMode", "")),
+                "Score": safe_float(s["Score"]) if pd.notna(s["Score"]) else None,
+                "EntryPx": round(entry_px, 2),
+                "FwdRetPct": round(ret, 2),
+                "MFEPct": round((float(window.max()) / entry_px - 1) * 100, 2),  # 最大有利偏移
+                "MAEPct": round((float(window.min()) / entry_px - 1) * 100, 2),  # 最大不利偏移→驗證停損
+                "Win": ret > 0,
+            })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def summarize_signal_edge(outcomes: Optional[pd.DataFrame] = None,
+                          lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS) -> pd.DataFrame:
+    """
+    將買進類訊號依分數分箱，彙總命中率/平均報酬/MAE。
+    若高分箱未單調優於低分箱，代表評分缺乏 edge，應重做權重或門檻。
+    """
+    if outcomes is None:
+        outcomes = evaluate_signal_outcomes(lookahead_days)
+    if outcomes is None or outcomes.empty:
+        return pd.DataFrame()
+
+    buys = outcomes[outcomes["Action"].astype(str).str.contains("BUY", na=False)].copy()
+    buys = buys.dropna(subset=["Score"])
+    if buys.empty:
+        return pd.DataFrame()
+
+    buys["分數區間"] = pd.cut(
+        buys["Score"], bins=[-99, 3.5, 4.5, 5.5, 999],
+        labels=["<3.5", "3.5–4.5", "4.5–5.5", "≥5.5"],
+    )
+    g = buys.groupby("分數區間", observed=True)
+    summary = pd.DataFrame({
+        "樣本數": g["FwdRetPct"].count(),
+        "勝率%": (g["Win"].mean() * 100).round(1),
+        f"平均{lookahead_days}日報酬%": g["FwdRetPct"].mean().round(2),
+        "中位數%": g["FwdRetPct"].median().round(2),
+        "平均MAE%": g["MAEPct"].mean().round(2),
+    })
+    return summary.reset_index()
+
+
+def calc_realized_trade_stats(trades_df: pd.DataFrame) -> Dict:
+    """
+    以 FIFO 配對計算「已平倉」交易的真實統計：勝率、平均盈虧、盈虧比、獲利因子、期望值。
+    取代以「上漲天數比例」當勝率的誤導指標。每個 FIFO 配對視為一筆平倉結果（lot 層級）。
+    """
+    empty = {"closed_trades": 0, "win_rate": None, "avg_win": None, "avg_loss": None,
+             "payoff_ratio": None, "profit_factor": None, "expectancy": None,
+             "gross_profit": 0.0, "gross_loss": 0.0, "net_realized": 0.0}
+    if trades_df is None or trades_df.empty:
+        return empty
+
+    pnls: List[float] = []
+    for ticker in trades_df["Ticker"].dropna().unique().tolist():
+        tdf = trades_df[trades_df["Ticker"] == ticker].sort_values("TradeDateTime")
+        lots: List[Dict] = []
+        for _, row in tdf.iterrows():
+            qty = safe_float(row["Shares"])
+            pr = safe_float(row["Price"])
+            fee = safe_float(row.get("Fee"))
+            slip = safe_float(row.get("Slippage"))
+            if qty <= 0 or pr <= 0:
+                continue
+            if normalize_trade_type(row["Type"]) == "BUY":
+                lots.append({"shares": qty, "price": (pr * qty + fee + slip) / qty})
+            else:
+                proceeds_ps = (pr * qty - fee - slip) / qty
+                sell_qty = qty
+                while sell_qty > 1e-9 and lots:
+                    first = lots[0]
+                    matched = min(sell_qty, first["shares"])
+                    pnls.append((proceeds_ps - first["price"]) * matched)
+                    first["shares"] -= matched
+                    sell_qty -= matched
+                    if first["shares"] <= 1e-9:
+                        lots.pop(0)
+
+    if not pnls:
+        return empty
+
+    s = pd.Series(pnls, dtype="float64")
+    wins, losses = s[s > 0], s[s < 0]
+    gross_profit, gross_loss = float(wins.sum()), float(-losses.sum())
+    avg_win = float(wins.mean()) if len(wins) else 0.0
+    avg_loss = float(-losses.mean()) if len(losses) else 0.0
+    return {
+        "closed_trades": int(len(s)),
+        "win_rate": round(len(wins) / len(s) * 100, 1),
+        "avg_win": round(avg_win, 2),
+        "avg_loss": round(avg_loss, 2),
+        "payoff_ratio": round(avg_win / avg_loss, 2) if avg_loss > 0 else None,
+        "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else None,
+        "expectancy": round(float(s.mean()), 2),
+        "gross_profit": round(gross_profit, 2),
+        "gross_loss": round(gross_loss, 2),
+        "net_realized": round(float(s.sum()), 2),
+    }
+
+
+def audit_universe(tickers: List[str]) -> pd.DataFrame:
+    """
+    逐檔檢查資料可取得性，用於汰除下市/更名/錯誤代碼（會連網，建議偶爾手動執行）。
+    取不到資料者（可取得資料=False）排在最前面。
+    """
+    rows = []
+    for t in sorted(set(normalize_ticker(x) for x in tickers)):
+        h = get_unified_analysis(t)
+        ok = h is not None and not h.empty
+        rows.append({
+            "Ticker": t,
+            "可取得資料": ok,
+            "最後價": round(float(h["Close"].iloc[-1]), 2) if ok else None,
+            "日均額M": round(float(h["DollarVolume20"].iloc[-1]) / 1e6, 1) if ok else None,
+        })
+    return pd.DataFrame(rows).sort_values(["可取得資料", "Ticker"]).reset_index(drop=True)
