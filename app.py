@@ -23,9 +23,13 @@ from core import (
     _get_sox_regime,
     _us_semi_score_one,
     build_portfolio,
+    audit_universe,
     build_trade_preview,
     calc_portfolio_heat,
+    calc_realized_trade_stats,
     calculate_performance_metrics,
+    evaluate_signal_outcomes,
+    summarize_signal_edge,
     clear_market_cache,
     color_pl,
     delete_watchlist_ticker,
@@ -984,8 +988,8 @@ st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效", "🔬 美股半導體"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+    "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效", "🔬 美股半導體", "🧪 訊號驗證"
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1473,7 +1477,7 @@ with tab5:
     </div>
   </div>
   <div class="pstat">
-    <div class="pstat-label">勝率</div>
+    <div class="pstat-label">上漲日%</div>
     <div class="pstat-value" style="color:{'var(--green)' if (win_rate or 0) >= 55 else 'var(--muted)'}">
       {f'{win_rate:.1f}%' if win_rate is not None else '—'}
     </div>
@@ -1841,6 +1845,104 @@ with tab6:
             if st.button("✖ 清除掃描結果", use_container_width=True):
                 st.session_state.semi_result = None
                 st.rerun()
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 7 — Signal Validation & Edge（訊號驗證）
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab7:
+    st.markdown('<div class="qsec">真實交易統計（已平倉 · FIFO）</div>', unsafe_allow_html=True)
+    st.caption("以 FIFO 配對計算已平倉交易的真實勝率與盈虧比，與「績效」頁的『上漲日%』是不同概念。")
+
+    ts = calc_realized_trade_stats(trades_df)
+    if ts["closed_trades"] == 0:
+        st.info("尚無已平倉交易，無法計算交易統計。")
+    else:
+        wr = ts["win_rate"]
+        pf = ts["profit_factor"]
+        exp = ts["expectancy"]
+        payoff = ts["payoff_ratio"]
+        st.markdown(f"""
+<div class="pstat-grid">
+  <div class="pstat">
+    <div class="pstat-label">已平倉筆數</div>
+    <div class="pstat-value">{ts['closed_trades']}</div>
+  </div>
+  <div class="pstat">
+    <div class="pstat-label">真實勝率</div>
+    <div class="pstat-value" style="color:{'var(--green)' if (wr or 0) >= 50 else 'var(--gold)'}">{wr:.1f}%</div>
+  </div>
+  <div class="pstat">
+    <div class="pstat-label">獲利因子 PF</div>
+    <div class="pstat-value" style="color:{'var(--green)' if (pf or 0) >= 1.5 else 'var(--gold)' if (pf or 0) >= 1 else 'var(--red)'}">{f'{pf:.2f}' if pf is not None else '∞'}</div>
+  </div>
+  <div class="pstat">
+    <div class="pstat-label">每筆期望值</div>
+    <div class="pstat-value" style="color:{'var(--green)' if (exp or 0) >= 0 else 'var(--red)'}">${exp:.2f}</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("平均獲利", f"${ts['avg_win']:.2f}")
+        c2.metric("平均虧損", f"${ts['avg_loss']:.2f}")
+        c3.metric("盈虧比", f"{payoff:.2f}" if payoff is not None else "—")
+        st.caption(
+            f"毛獲利 ${ts['gross_profit']:,.2f}　|　毛虧損 ${ts['gross_loss']:,.2f}　|　淨已實現 ${ts['net_realized']:,.2f}"
+        )
+
+    st.divider()
+
+    # ── 訊號成效（買進訊號 · 分數分箱）─────────────────────────────────────
+    st.markdown('<div class="qsec">訊號成效（買進訊號 · 分數分箱）</div>', unsafe_allow_html=True)
+    st.caption("回顧 Signals 表中已成熟的訊號，計算前瞻報酬。若高分箱未明顯優於低分箱，代表評分缺乏 edge。")
+
+    if st.button("🧪 計算訊號成效", use_container_width=True, key="run_edge"):
+        with st.spinner("回測已記錄訊號的前瞻表現…（需抓取歷史價，可能稍久）"):
+            try:
+                _outcomes = evaluate_signal_outcomes()
+                st.session_state.sig_outcomes = _outcomes
+                st.session_state.sig_edge = summarize_signal_edge(_outcomes)
+            except Exception as e:
+                st.session_state.sig_outcomes = None
+                st.session_state.sig_edge = None
+                st.error(f"計算失敗：{e}")
+
+    _edge = st.session_state.get("sig_edge")
+    _outcomes = st.session_state.get("sig_outcomes")
+    if _outcomes is not None:
+        _n_buy = (
+            int(_outcomes["Action"].astype(str).str.contains("BUY", na=False).sum())
+            if not _outcomes.empty else 0
+        )
+        st.caption(f"已成熟訊號：{len(_outcomes)} 筆（買進類 {_n_buy} 筆）")
+        if _edge is not None and not _edge.empty:
+            st.dataframe(_edge, use_container_width=True, hide_index=True)
+            st.caption("判讀：理想情況下『勝率%』與『平均報酬%』應隨分數區間遞增；若否，請重新檢視評分權重或 BUY 門檻。")
+        else:
+            st.info("買進類成熟訊號不足，無法分箱彙總（需先累積一段時間的訊號記錄）。")
+
+    st.divider()
+
+    # ── 半導體宇宙資料健檢 ─────────────────────────────────────────────────
+    st.markdown('<div class="qsec">半導體宇宙資料健檢</div>', unsafe_allow_html=True)
+    st.caption("檢查每檔是否取得到資料；取不到的多半是下市/更名/錯誤代碼，建議從 US_SEMI_UNIVERSE 移除。")
+
+    if st.button("🔍 執行宇宙健檢", use_container_width=True, key="run_audit"):
+        with st.spinner(f"檢查 {len(US_SEMI_UNIVERSE)} 檔資料可取得性…"):
+            try:
+                st.session_state.universe_audit = audit_universe(US_SEMI_UNIVERSE)
+            except Exception as e:
+                st.session_state.universe_audit = None
+                st.error(f"健檢失敗：{e}")
+
+    _audit = st.session_state.get("universe_audit")
+    if _audit is not None and not _audit.empty:
+        _bad = _audit[~_audit["可取得資料"]]
+        if not _bad.empty:
+            st.warning(f"⚠️ {len(_bad)} 檔取不到資料：{'、'.join(_bad['Ticker'].tolist())}")
+        else:
+            st.success("✅ 全部代碼皆可取得資料。")
+        st.dataframe(_audit, use_container_width=True, hide_index=True)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Footer
