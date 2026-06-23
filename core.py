@@ -92,6 +92,13 @@ SIGNAL_LOG_LOOKAHEAD_DAYS = get_env_int("SIGNAL_LOG_LOOKAHEAD_DAYS", 20)
 SCORE_BUY_NOW_THRESHOLD = get_env_float("SCORE_BUY_NOW_THRESHOLD", 3.5)
 SCORE_BUY_ADD_THRESHOLD = get_env_float("SCORE_BUY_ADD_THRESHOLD", 4.5)
 SCALE_IN_MAX_WEIGHT_RATIO = get_env_float("SCALE_IN_MAX_WEIGHT_RATIO", 0.75)
+# 出場策略（以進場成本為固定參考；R = 初始風險距離 = 進場 − 初始止損）
+EXIT_INIT_STOP_ATR = get_env_float("EXIT_INIT_STOP_ATR", 2.0)    # 初始硬止損：進場 − 2×ATR
+EXIT_TRAIL_ATR = get_env_float("EXIT_TRAIL_ATR", 3.0)           # Chandelier 移動停損：High20 − 3×ATR
+EXIT_TP1_R = get_env_float("EXIT_TP1_R", 2.0)                   # 第一獲利目標：進場 + 2R（分批出場）
+EXIT_TP2_R = get_env_float("EXIT_TP2_R", 4.0)                   # 第二獲利目標：進場 + 4R（顯示用）
+EXIT_SCALE_OUT_PCT = get_env_float("EXIT_SCALE_OUT_PCT", 0.34)  # 觸及 TP1 時分批賣出比例（約 1/3）
+EXIT_BREAKEVEN_AT_R = get_env_float("EXIT_BREAKEVEN_AT_R", 1.0) # 浮盈達 +1R 後，止損上移至保本（進場價）
 RS_STRONG_THRESHOLD = get_env_float("RS_STRONG_THRESHOLD", 2.0)
 RS_WEAK_THRESHOLD = get_env_float("RS_WEAK_THRESHOLD", -2.0)
 OBV_LOOKBACK = get_env_int("OBV_LOOKBACK", 20)
@@ -577,13 +584,13 @@ def get_watchlist_worksheet(readonly: bool = True):
 
 
 def get_signals_worksheet(readonly: bool = True):
-    ws = get_or_create_worksheet(get_spreadsheet(), "Signals", rows=20000, cols=20)
+    ws = get_or_create_worksheet(get_spreadsheet(), "Signals", rows=20000, cols=21)
     if not readonly:
         ensure_headers(ws, [
             "DateTime", "Ticker", "Action", "StrategyMode", "Score", "Close",
             "TargetBuyPrice", "TargetSellPrice", "StopLoss", "TrendStop",
             "TakeProfit1", "TakeProfit2", "RS20vsSPY", "ADX", "Regime", "Bucket",
-            "SignalState", "Reason", "Fingerprint", "Session"
+            "SignalState", "Reason", "Fingerprint", "Session", "Source"
         ])
     return ws
 
@@ -875,7 +882,7 @@ def _load_signals_raw() -> pd.DataFrame:
         "DateTime", "Ticker", "Action", "StrategyMode", "Score", "Close",
         "TargetBuyPrice", "TargetSellPrice", "StopLoss", "TrendStop", "TakeProfit1",
         "TakeProfit2", "RS20vsSPY", "ADX", "Regime", "Bucket", "SignalState",
-        "Reason", "Fingerprint", "Session"
+        "Reason", "Fingerprint", "Session", "Source"
     ]
     df = read_worksheet_as_df(get_signals_worksheet(readonly=True), cols)
     if df.empty:
@@ -883,6 +890,8 @@ def _load_signals_raw() -> pd.DataFrame:
     df["DateTime"] = pd.to_datetime(df["DateTime"], errors="coerce")
     for col in ["Score", "Close", "TargetBuyPrice", "TargetSellPrice", "StopLoss", "TrendStop", "TakeProfit1", "TakeProfit2", "RS20vsSPY", "ADX"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    # 舊資料無 Source 欄（讀入為空字串）→ 標記 LEGACY，與新引擎訊號區分
+    df["Source"] = df["Source"].replace("", "LEGACY").fillna("LEGACY")
     return df.sort_values("DateTime").reset_index(drop=True)
 
 
@@ -1027,7 +1036,8 @@ def log_sent_alert(ticker, action, price, score, session, target_price, message)
         return False
 
 
-def log_signal_snapshot(ticker, action, strategy_mode, score, details, reason, session) -> bool:
+def log_signal_snapshot(ticker, action, strategy_mode, score, details, reason, session,
+                        source: str = "PORTFOLIO") -> bool:
     try:
         ws = get_signals_worksheet(readonly=False)
         tp = details.get("target_buy_price") or details.get("target_sell_price")
@@ -1052,7 +1062,8 @@ def log_signal_snapshot(ticker, action, strategy_mode, score, details, reason, s
             build_signal_state(action, strategy_mode),
             reason,
             fp,
-            session
+            session,
+            source,
         ]))
         clear_app_caches()
         return True
@@ -1095,7 +1106,54 @@ def log_signal_snapshots(candidates: List[Dict], session: str) -> int:
                 str(det.get("bucket", "")),
                 build_signal_state(act, mode),
                 c.get("note", ""),
-                fp, session,
+                fp, session, "PORTFOLIO",
+            ])
+        gsheet_retry(lambda: ws.append_rows(rows))
+        clear_app_caches()
+        return len(rows)
+    except Exception:
+        return 0
+
+
+def log_semi_signal_snapshots(results: List[Dict], sox_regime: Dict,
+                              min_signal_score: Optional[float] = None) -> int:
+    """
+    將半導體掃描的買進類訊號（含 'BUY' 的 STRONG_BUY / BUY）批次寫入 Signals 表，Source=SEMI。
+    供訊號成效追蹤累積樣本。預設只記分數 >= US_SEMI_SCORE_BUY 者（WATCH 不記，避免灌爆表）。
+    結果結構為 _us_semi_score_one 回傳的 dict。
+    """
+    if min_signal_score is None:
+        min_signal_score = US_SEMI_SCORE_BUY
+    rows_src = [r for r in (results or [])
+                if "BUY" in str(r.get("signal", "")) and safe_float(r.get("score")) >= min_signal_score]
+    if not rows_src:
+        return 0
+    try:
+        ws = get_signals_worksheet(readonly=False)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        regime_lbl = f"SOX_{sox_regime.get('trend', 'NEUTRAL')}"
+        rows = []
+        for r in rows_src:
+            tk = r["ticker"]
+            sig = r["signal"]
+            sc = safe_float(r.get("score"))
+            close = safe_float(r.get("close"))
+            fp = build_alert_fingerprint(tk, sig, "SEMI", close, sc, close)
+            rows.append([
+                ts, tk, sig, "US_SEMI", float(sc), float(close),
+                float(close),                                   # TargetBuyPrice ≈ 訊號日收盤
+                "",                                             # TargetSellPrice（n/a）
+                float(r.get("stop_loss") or 0) or "",
+                "",                                             # TrendStop（半導體引擎無）
+                float(r.get("tp1") or 0) or "",
+                float(r.get("tp2") or 0) or "",
+                float(r.get("rs20_vs_spy") or 0) or "",
+                float(r.get("adx") or 0) or "",
+                regime_lbl,
+                str(r.get("category", "")),
+                build_signal_state(sig, "US_SEMI"),
+                " | ".join(r.get("reasons", []) or []),
+                fp, "SEMI", "SEMI",                             # Session, Source
             ])
         gsheet_retry(lambda: ws.append_rows(rows))
         clear_app_caches()
@@ -1368,36 +1426,45 @@ def evaluate_strategy(
     portfolio_heat_pct,
     portfolio,
     recent_buy: bool = False,
+    recent_sell: bool = False,
 ) -> Tuple[float, str, Dict, str]:
     last = hist.iloc[-1]
     close = safe_float(last["Close"])
     atr = safe_float(last["ATR"])
     sma20 = safe_float(last["SMA20"])
     rsi = safe_float(last["RSI"])
+    high20 = safe_float(last.get("RollingHigh20", close))
 
     score, meta = rank_symbol_strength(ticker, hist, market_regime)
 
-    stop_loss = max(0.01, close - 2.0 * atr) if atr > 0 else close * 0.93
-    trend_stop = safe_float(last.get("TrailingStop", stop_loss))
-    tp1 = close + 2.0 * atr
-    tp2 = close + 4.0 * atr
+    # 出場以「進場成本」為固定參考；新倉以收盤估算（買在收盤）
+    avg_cost = next((safe_float(p.get("AvgCost")) for p in portfolio if p.get("Ticker") == ticker), 0.0)
+    entry = avg_cost if (held_shares > 0 and avg_cost > 0) else close
+
+    R = (EXIT_INIT_STOP_ATR * atr) if atr > 0 else entry * 0.07              # 初始風險距離（價格單位）
+    initial_stop = max(0.01, entry - R)                                     # 初始硬止損（錨定進場成本）
+    chandelier = (high20 - EXIT_TRAIL_ATR * atr) if atr > 0 else entry * 0.90  # Chandelier 移動停損
+    reached_1R = high20 >= entry + EXIT_BREAKEVEN_AT_R * R                   # 以 20 日高為波段高點 proxy
+    floor_be = entry if reached_1R else 0.0                                 # 浮盈達 +1R 後止損上移保本
+    effective_stop = max(initial_stop, chandelier, floor_be)                # 實際止損：只升不降
+    tp1 = entry + EXIT_TP1_R * R
+    tp2 = entry + EXIT_TP2_R * R
 
     limits = get_bucket_limits(meta.get("bucket", "LARGE_CAP"))
 
     risk_dollars = total_assets * limits["risk_per_trade_pct"] * safe_float(market_regime.get("risk_multiplier", 1.0))
-    risk_per_share = max(0.01, close - stop_loss)
+    risk_per_share = max(0.01, R)                                           # 新倉風險/股 = R
     qty = math.floor(risk_dollars / risk_per_share) if risk_per_share > 0 else 0
 
     action, mode, tp = "WATCH", "NONE", None
 
-    if held_shares > 0 and close < stop_loss:
-        action, mode, tp = "SELL_EXIT", "RISK_EXIT", close
+    if held_shares > 0 and close < effective_stop:
+        _bounds = {"RISK_EXIT": initial_stop, "TRAIL_EXIT": chandelier, "BREAKEVEN_EXIT": floor_be}
+        mode = max(_bounds, key=_bounds.get)                                # 標示是哪一道止損生效
+        action, tp = "SELL_EXIT", round(effective_stop, 2)
 
-    elif held_shares > 0 and close < trend_stop:
-        action, mode, tp = "SELL_EXIT", "TRAIL_EXIT", trend_stop
-
-    elif held_shares > 0 and close >= tp1 and rsi > 72:
-        action, mode, tp = "SELL_PARTIAL", "TAKE_PROFIT", tp1
+    elif held_shares > 0 and close >= tp1 and not recent_sell:
+        action, mode, tp = "SELL_PARTIAL", "TAKE_PROFIT", round(tp1, 2)
 
     elif held_shares > 0 and meta["trend_ok"] and meta["liquid_ok"] and not meta["earnings_blocked"]:
         current_weight = current_mkt_value / total_assets if total_assets > 0 else 0
@@ -1408,7 +1475,7 @@ def evaluate_strategy(
         if (score >= SCORE_BUY_ADD_THRESHOLD and can_add and pullback_ok and qty > 0
                 and avail_cash > close * qty                                                   # 補：現金檢查
                 and after_weight <= limits["max_weight"]                                       # 補：加碼後權重上限
-                and not recent_buy                                                             # 補：冷卻期
+                and not recent_buy and not recent_sell                                         # 補：冷卻期（買/賣皆計）
                 and market_regime.get("allow_add_position")):
             action, mode, tp = "BUY_ADD", "SCALE_IN", close
 
@@ -1416,20 +1483,21 @@ def evaluate_strategy(
         avail_cash = cash - (total_assets * CASH_RESERVE_PCT)
         heat_ok = portfolio_heat_pct < PORTFOLIO_HEAT_LIMIT_PCT * 100
         if (score >= SCORE_BUY_NOW_THRESHOLD and qty > 0 and avail_cash > close * qty
-                and heat_ok and not recent_buy                                                 # 補：冷卻期
+                and heat_ok and not recent_buy and not recent_sell                             # 補：冷卻期（買/賣皆計）
                 and market_regime.get("allow_new_position")):
             action, mode, tp = "BUY_NOW", "TREND_MOMENTUM", close
 
-    partial_sell_qty = max(1, math.floor(held_shares * 0.5)) if action == "SELL_PARTIAL" else 0
+    partial_sell_qty = max(1, math.floor(held_shares * EXIT_SCALE_OUT_PCT)) if action == "SELL_PARTIAL" else 0
 
     return score, action, {
         "close": close,
         "rsi": rsi,
         "atr": atr,
-        "stop_loss": stop_loss,
-        "trend_stop": trend_stop,
-        "take_profit_1": tp1,
-        "take_profit_2": tp2,
+        "entry_ref": round(entry, 2),
+        "stop_loss": round(effective_stop, 2),
+        "trend_stop": round(chandelier, 2),
+        "take_profit_1": round(tp1, 2),
+        "take_profit_2": round(tp2, 2),
         "suggested_buy_qty": qty,
         "suggested_sell_qty": math.ceil(held_shares) if action == "SELL_EXIT" else partial_sell_qty,
         "target_buy_price": tp if "BUY" in action else None,
@@ -1502,9 +1570,10 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
             continue
         held = next((p["Shares"] for p in portfolio if p["Ticker"] == tk), 0)
         mkt_val = next((p["MarketValue"] for p in portfolio if p["Ticker"] == tk), 0)
-        recent_buy, _ = get_recent_trade_status(tk, trades_df)
+        recent_buy, recent_sell = get_recent_trade_status(tk, trades_df)
         sc, act, det, note = evaluate_strategy(
-            tk, h, held, mkt_val, total_assets, cash, market_regime, 0, portfolio, recent_buy=recent_buy
+            tk, h, held, mkt_val, total_assets, cash, market_regime, 0, portfolio,
+            recent_buy=recent_buy, recent_sell=recent_sell
         )
         candidates.append({"ticker": tk, "score": sc, "action": act, "details": det, "note": note})
 
@@ -2119,7 +2188,8 @@ def migrate_trades_v1_to_v2() -> Tuple[bool, str]:
         return False, f"❌ 遷移失敗：{e}"
 
 
-def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
+def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None,
+                        log_signals: bool = False) -> Dict:
     sox_regime = _get_sox_regime()
 
     base_universe = get_us_semi_universe(include_etf=False)
@@ -2147,6 +2217,9 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
     # 取不到資料的代碼（皆為快取命中，不再連網）：通常是下市/更名/錯誤代碼或被限流
     no_data_tickers = [tk for tk in universe if get_unified_analysis(tk) is None]
 
+    # 僅在排程掃描時寫入 Signals（log_signals=True），避免 App 互動點擊重複灌列
+    signals_logged = log_semi_signal_snapshots(strong_buy + buy, sox_regime) if log_signals else 0
+
     eastern = pytz.timezone("US/Eastern")
     scan_date = datetime.now(eastern).strftime("%Y-%m-%d")
 
@@ -2160,6 +2233,7 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None) -> Dict:
         "total_hits": len(results),
         "no_data_count": len(no_data_tickers),
         "no_data_tickers": no_data_tickers,
+        "signals_logged": signals_logged,
         "scan_date": scan_date,
     }
 
@@ -2251,10 +2325,13 @@ def send_us_semi_tg(messages: List[str]) -> bool:
 # 訊號成效追蹤 / 真實交易統計 / 宇宙健檢（新增）
 # ═══════════════════════════════════════════════════════════════════════════════
 def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
-                             dedup_window_days: Optional[int] = None) -> pd.DataFrame:
+                             dedup_window_days: Optional[int] = None,
+                             source: Optional[str] = None) -> pd.DataFrame:
     """
     回顧 Signals 表中已「成熟」的訊號，計算其前瞻表現（+N 交易日報酬、MFE/MAE）。
     用途：驗證評分是否真有 edge，據此調整分數門檻與權重。
+    source：可指定只評估特定來源（"SEMI" / "PORTFOLIO" / "LEGACY"）；None 表示全部。
+            由於兩套引擎分數尺度不同，分析時建議指定單一來源（多半用 "SEMI"）。
     去重：同一檔、同方向（BUY/SELL）在 dedup_window_days 日內只計第一筆，避免持續訊號被每日
           快照重複計數，亦避免前瞻窗口重疊造成樣本相關性灌水（預設等於 lookahead_days）。
     限制：get_unified_analysis 僅含約 2 年歷史，更早的訊號評不到；交易日對齊以日曆日緩衝近似；
@@ -2262,13 +2339,15 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
     """
     if dedup_window_days is None:
         dedup_window_days = lookahead_days
-    cols = ["Ticker", "DateTime", "Action", "StrategyMode", "Score",
+    cols = ["Ticker", "DateTime", "Action", "StrategyMode", "Source", "Score",
             "EntryPx", "FwdRetPct", "MFEPct", "MAEPct", "Win"]
     sig = load_signals()
     if sig is None or sig.empty:
         return pd.DataFrame(columns=cols)
 
     sig = sig.dropna(subset=["DateTime", "Ticker", "Close"]).copy()
+    if source is not None and "Source" in sig.columns:
+        sig = sig[sig["Source"] == source]
     cutoff = pd.Timestamp(datetime.now()) - pd.Timedelta(days=int(lookahead_days * 1.6))
     mature = sig[sig["DateTime"] <= cutoff]
     if mature.empty:
@@ -2313,6 +2392,7 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
                 "DateTime": s["DateTime"],
                 "Action": str(s.get("Action", "")),
                 "StrategyMode": str(s.get("StrategyMode", "")),
+                "Source": str(s.get("Source", "")),
                 "Score": safe_float(s["Score"]) if pd.notna(s["Score"]) else None,
                 "EntryPx": round(entry_px, 2),
                 "FwdRetPct": round(ret, 2),
@@ -2324,13 +2404,15 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
 
 
 def summarize_signal_edge(outcomes: Optional[pd.DataFrame] = None,
-                          lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS) -> pd.DataFrame:
+                          lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
+                          source: Optional[str] = None) -> pd.DataFrame:
     """
     將買進類訊號依分數分箱，彙總命中率/平均報酬/MAE。
     若高分箱未單調優於低分箱，代表評分缺乏 edge，應重做權重或門檻。
+    source：限定來源（建議單一來源，因兩套引擎分數尺度不同）。
     """
     if outcomes is None:
-        outcomes = evaluate_signal_outcomes(lookahead_days)
+        outcomes = evaluate_signal_outcomes(lookahead_days, source=source)
     if outcomes is None or outcomes.empty:
         return pd.DataFrame()
 
