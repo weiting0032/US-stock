@@ -1895,10 +1895,17 @@ with tab7:
     st.markdown('<div class="qsec">訊號成效（買進訊號 · 分數分箱）</div>', unsafe_allow_html=True)
     st.caption("回顧 Signals 表中已成熟的訊號，計算前瞻報酬。若高分箱未明顯優於低分箱，代表評分缺乏 edge。")
 
+    _src_label = st.radio(
+        "訊號來源", ["半導體 (SEMI)", "持倉引擎 (PORTFOLIO)", "全部"],
+        horizontal=True, key="edge_source",
+        help="兩套引擎分數尺度不同，建議單一來源分析。你的進場是半導體引擎，故預設 SEMI。",
+    )
+    _src = {"半導體 (SEMI)": "SEMI", "持倉引擎 (PORTFOLIO)": "PORTFOLIO", "全部": None}[_src_label]
+
     if st.button("🧪 計算訊號成效", use_container_width=True, key="run_edge"):
         with st.spinner("回測已記錄訊號的前瞻表現…（需抓取歷史價，可能稍久）"):
             try:
-                _outcomes = evaluate_signal_outcomes()
+                _outcomes = evaluate_signal_outcomes(source=_src)
                 st.session_state.sig_outcomes = _outcomes
                 st.session_state.sig_edge = summarize_signal_edge(_outcomes)
             except Exception as e:
@@ -1913,7 +1920,7 @@ with tab7:
             int(_outcomes["Action"].astype(str).str.contains("BUY", na=False).sum())
             if not _outcomes.empty else 0
         )
-        st.caption(f"已成熟訊號：{len(_outcomes)} 筆（買進類 {_n_buy} 筆）")
+        st.caption(f"已成熟訊號：{len(_outcomes)} 筆（買進類 {_n_buy} 筆）· 來源：{_src_label}")
         if _edge is not None and not _edge.empty:
             st.dataframe(_edge, use_container_width=True, hide_index=True)
             st.caption("判讀：理想情況下『勝率%』與『平均報酬%』應隨分數區間遞增；若否，請重新檢視評分權重或 BUY 門檻。")
