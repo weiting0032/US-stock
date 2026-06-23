@@ -87,11 +87,11 @@ def run_semi_scan():
     except Exception:
         held_tickers = []
 
-    result = run_us_semi_scanner(extra_tickers=held_tickers)
+    result = run_us_semi_scanner(extra_tickers=held_tickers, log_signals=True)
 
     sox = result["sox_regime"]
     print(f"SOX 趨勢: {sox.get('trend')} | RS vs SPY: {sox.get('rs_vs_spy', 0):+.1f}%")
-    print(f"掃描: {result['total_scanned']} 檔 | 入選: {result['total_hits']} 檔")
+    print(f"掃描: {result['total_scanned']} 檔 | 入選: {result['total_hits']} 檔 | 寫入訊號: {result.get('signals_logged', 0)} 筆")
     print(f"  🔴 強力買進: {len(result['strong_buy'])} 檔")
     print(f"  🟢 積極買進: {len(result['buy'])} 檔")
     print(f"  🟡 留意候補: {len(result['watch'])} 檔")
