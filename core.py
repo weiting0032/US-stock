@@ -1060,6 +1060,50 @@ def log_signal_snapshot(ticker, action, strategy_mode, score, details, reason, s
         return False
 
 
+def log_signal_snapshots(candidates: List[Dict], session: str) -> int:
+    """
+    批次寫入訊號快照到 Signals 表（單一 append_rows 呼叫，避免逐筆 API 與重複清快取）。
+    candidates 為 run_auto_scanner 產生的 [{ticker, score, action, details, note}, ...]。
+    回傳實際寫入列數。
+    """
+    if not candidates:
+        return 0
+    try:
+        ws = get_signals_worksheet(readonly=False)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = []
+        for c in candidates:
+            tk = c["ticker"]
+            act = c["action"]
+            sc = c["score"]
+            det = c.get("details", {}) or {}
+            mode = det.get("strategy_mode", "")
+            tp = det.get("target_buy_price") or det.get("target_sell_price")
+            fp = build_alert_fingerprint(tk, act, session, safe_float(det.get("close")), sc, tp)
+            rows.append([
+                ts, tk, act, mode, float(sc),
+                float(det.get("close", 0)),
+                float(det.get("target_buy_price") or 0) or "",
+                float(det.get("target_sell_price") or 0) or "",
+                float(det.get("stop_loss") or 0) or "",
+                float(det.get("trend_stop") or 0) or "",
+                float(det.get("take_profit_1") or 0) or "",
+                float(det.get("take_profit_2") or 0) or "",
+                float(det.get("rs20_vs_spy") or 0) or "",
+                float(det.get("adx") or 0) or "",
+                str(det.get("market_regime", "")),
+                str(det.get("bucket", "")),
+                build_signal_state(act, mode),
+                c.get("note", ""),
+                fp, session,
+            ])
+        gsheet_retry(lambda: ws.append_rows(rows))
+        clear_app_caches()
+        return len(rows)
+    except Exception:
+        return 0
+
+
 # ===============================
 # Market regime
 # ===============================
@@ -1470,6 +1514,9 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
             if send_telegram_msg(msg):
                 log_sent_alert(tk, act, det["close"], sc, session, det.get("target_buy_price"), "")
 
+    # 每次掃描都把可行動訊號（非 WATCH）寫入 Signals 表，供訊號成效追蹤累積樣本。
+    logged = log_signal_snapshots([c for c in candidates if c["action"] != "WATCH"], session)
+
     candidates.sort(key=lambda x: (0 if "SELL" in x["action"] else 1, -x["score"]))
     top_buys = [c for c in candidates if "BUY" in c["action"]][:SCANNER_TOP_N]
     top_exits = [c for c in candidates if "SELL" in c["action"]]
@@ -1485,6 +1532,7 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
             "universe_count": len(universe),
             "buy_signals": len(top_buys),
             "sell_signals": len(top_exits),
+            "signals_logged": logged,
         },
     }
 
@@ -1705,8 +1753,15 @@ US_SEMI_CATEGORY_MAP: Dict[str, str] = {
     "SANM": "Electronics Manufacturing",
 }
 
-# 100+ 檔半導體宇宙
-US_SEMI_UNIVERSE: List[str] = sorted(list(dict.fromkeys([
+# 已下市/更名/破產（2026-06 宇宙健檢確認取不到資料；接手代碼多已在宇宙內，故直接移除不損覆蓋）：
+#   BRKS→AZTA、CCMP→ENTG、ESIO→MKSI、NANO→ONTO、IIVI→COHR（皆已併購/更名）
+#   MACOM 為錯誤代碼（公司代碼為 MTSI）
+#   WOLF：Wolfspeed 2025 Chapter 11，舊普通股 2025-10 自 NYSE 下市
+#   LAZR：Luminar 2025 Chapter 11，2025-12 自 Nasdaq 下市，現於 OTC 以 LAZRQ 交易
+_US_SEMI_DELISTED = {"BRKS", "CCMP", "ESIO", "NANO", "IIVI", "MACOM", "WOLF", "LAZR"}
+
+# 半導體宇宙（已過濾掉下市/錯誤代碼）
+US_SEMI_UNIVERSE: List[str] = sorted(t for t in dict.fromkeys([
     # AI / GPU / CPU / Networking
     "NVDA", "AMD", "INTC", "AVGO", "MRVL", "QCOM", "CRDO", "ALAB", "ARM",
 
@@ -1747,7 +1802,7 @@ US_SEMI_UNIVERSE: List[str] = sorted(list(dict.fromkeys([
     # Additional niche / specialty names
     "ALAB", "AZTA", "ATOM", "OSIS", "MACOM", "MTSI", "SYNA", "HIMX",
     "INDI", "LSCC", "SITM", "PLAB", "PDFS", "SIMO", "MXL", "CEVA",
-])))
+]) if t not in _US_SEMI_DELISTED)
 
 US_SEMI_GROUPS: Dict[str, List[str]] = {
     "AI / GPU / CPU": ["NVDA", "AMD", "INTC", "AVGO", "MRVL", "QCOM", "CRDO", "ALAB", "ARM"],
@@ -2195,12 +2250,18 @@ def send_us_semi_tg(messages: List[str]) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 # 訊號成效追蹤 / 真實交易統計 / 宇宙健檢（新增）
 # ═══════════════════════════════════════════════════════════════════════════════
-def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS) -> pd.DataFrame:
+def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
+                             dedup_window_days: Optional[int] = None) -> pd.DataFrame:
     """
     回顧 Signals 表中已「成熟」的訊號，計算其前瞻表現（+N 交易日報酬、MFE/MAE）。
     用途：驗證評分是否真有 edge，據此調整分數門檻與權重。
-    限制：get_unified_analysis 僅含約 2 年歷史，更早的訊號評不到；交易日對齊以日曆日緩衝近似。
+    去重：同一檔、同方向（BUY/SELL）在 dedup_window_days 日內只計第一筆，避免持續訊號被每日
+          快照重複計數，亦避免前瞻窗口重疊造成樣本相關性灌水（預設等於 lookahead_days）。
+    限制：get_unified_analysis 僅含約 2 年歷史，更早的訊號評不到；交易日對齊以日曆日緩衝近似；
+          前瞻報酬為「未套用停損」的原始報酬，實盤虧損端通常因停損而更小。
     """
+    if dedup_window_days is None:
+        dedup_window_days = lookahead_days
     cols = ["Ticker", "DateTime", "Action", "StrategyMode", "Score",
             "EntryPx", "FwdRetPct", "MFEPct", "MAEPct", "Win"]
     sig = load_signals()
@@ -2212,6 +2273,10 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS) ->
     mature = sig[sig["DateTime"] <= cutoff]
     if mature.empty:
         return pd.DataFrame(columns=cols)
+
+    def _dir(action) -> str:
+        a = str(action).upper()
+        return "BUY" if "BUY" in a else ("SELL" if "SELL" in a else a)
 
     rows = []
     for tk, grp in mature.groupby("Ticker"):
@@ -2225,14 +2290,20 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS) ->
         except (TypeError, AttributeError):
             idx_dates = pd.DatetimeIndex(idx).normalize()
 
-        for _, s in grp.iterrows():
+        last_counted: Dict[str, pd.Timestamp] = {}
+        for _, s in grp.sort_values("DateTime").iterrows():
             entry_dt = pd.Timestamp(s["DateTime"]).normalize()
+            bucket = _dir(s.get("Action", ""))
+            prev = last_counted.get(bucket)
+            if prev is not None and (entry_dt - prev).days < dedup_window_days:
+                continue                                          # 去重：窗口內同方向只計第一筆
             pos = int(idx_dates.searchsorted(entry_dt))           # 訊號日或之後第一個交易日
             if pos >= len(idx) - 1:
                 continue
             entry_px = float(closes.iloc[pos])
             if entry_px <= 0:
                 continue
+            last_counted[bucket] = entry_dt
             fwd_pos = min(pos + lookahead_days, len(idx) - 1)
             fwd_px = float(closes.iloc[fwd_pos])
             window = closes.iloc[pos:fwd_pos + 1]
