@@ -1839,6 +1839,15 @@ with tab6:
                 _reasons = "、".join(_r["reasons"][:3]) if _r["reasons"] else "—"
                 _rank = _rank_emoji[_i] if _i < len(_rank_emoji) else f"{_i+1}."
                 _score_w = min(100, _r["score"] / 8 * 100)
+                _warns = _r.get("warnings") or []
+                _warn_html = ""
+                if _warns:
+                    _chips = ""
+                    for _w in _warns:
+                        _wc = "var(--gold)" if _w.startswith("⚠️") else "var(--cyan)"
+                        _chips += (f'<span style="font-size:.68rem;padding:2px 7px;border-radius:5px;'
+                                   f'background:rgba(255,255,255,.04);color:{_wc};border:1px solid {_wc}40">{_w}</span>')
+                    _warn_html = f'<div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">{_chips}</div>'
             
                 st.markdown(f"""
             <div class="pc">
@@ -1865,6 +1874,7 @@ with tab6:
                 <div class="pc-kv"><span class="pc-kv-label">日均成交</span><span class="pc-kv-value">${_r['dv20_m']:.0f}M</span></div>
                 <div class="pc-kv" style="grid-column:span 2;"><span class="pc-kv-label">因子</span><span class="pc-kv-value" style="font-size:.75rem">{_reasons}</span></div>
               </div>
+              {_warn_html}
             </div>
             """, unsafe_allow_html=True)
             
