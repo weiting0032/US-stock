@@ -1348,6 +1348,7 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
         tdf = trades_df[trades_df["Ticker"] == ticker].sort_values("TradeDateTime").copy()
         lots = []
         realized_pl = 0.0
+        run_bought = 0.0   # 本輪持倉（自上次清空後）累計買進股數，供分層減碼用
 
         for _, row in tdf.iterrows():
             qty = safe_float(row["Shares"])
@@ -1361,6 +1362,7 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
                 cost = pr * qty + fee + slip
                 lots.append({"shares": qty, "price": cost / qty, "date": row.get("TradeDateTime")})
                 cash -= cost
+                run_bought += qty
             else:
                 proceeds = pr * qty - fee - slip
                 cash += proceeds
@@ -1373,6 +1375,8 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
                     sell_qty -= matched
                     if first["shares"] <= 1e-9:
                         lots.pop(0)
+                if not lots:
+                    run_bought = 0.0   # 全部平倉→下一輪重新計算
 
         total_realized_pl += realized_pl
         rem_shares = sum(l["shares"] for l in lots)
@@ -1398,6 +1402,7 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
                 "RealizedPL": round(realized_pl, 4),
                 "PriceStale": price_stale,
                 "EntryDate": entry_date,
+                "EntryShares": round(run_bought, 4),
             })
 
     return portfolio, cash, total_realized_pl
@@ -1529,6 +1534,19 @@ def evaluate_strategy(
     tp1 = entry + EXIT_TP1_R * R
     tp2 = entry + EXIT_TP2_R * R
 
+    # 分層減碼：觸及 TP1 減至 (1−1×比例)、觸及 TP2 減至 (1−2×比例)，最後一份跟著移動停損跑。
+    # 用「本輪進場總股數」當基準，使建議持續到減足目標、且不會重複過賣。
+    entry_shares = next((safe_float(p.get("EntryShares")) for p in portfolio if p.get("Ticker") == ticker), 0.0)
+    if entry_shares <= 0:
+        entry_shares = held_shares
+    if close >= tp2:
+        target_frac, scale_ref = max(0.0, 1.0 - 2.0 * EXIT_SCALE_OUT_PCT), tp2
+    elif close >= tp1:
+        target_frac, scale_ref = max(0.0, 1.0 - EXIT_SCALE_OUT_PCT), tp1
+    else:
+        target_frac, scale_ref = 1.0, tp1
+    scale_out_qty = max(0, math.floor(held_shares - entry_shares * target_frac))   # 應再減出的股數
+
     limits = get_bucket_limits(meta.get("bucket", "LARGE_CAP"))
 
     risk_dollars = total_assets * limits["risk_per_trade_pct"] * safe_float(market_regime.get("risk_multiplier", 1.0))
@@ -1554,8 +1572,8 @@ def evaluate_strategy(
           and close <= entry and close < sma200):
         action, mode, tp = "SELL_EXIT", "TREND_EXIT", round(close, 2)       # 虧損中且跌破年線→趨勢轉弱出場
 
-    elif held_shares > 0 and close >= tp1 and not recent_sell:
-        action, mode, tp = "SELL_PARTIAL", "TAKE_PROFIT", round(tp1, 2)
+    elif held_shares > 0 and close >= tp1 and scale_out_qty >= 1:
+        action, mode, tp = "SELL_PARTIAL", "TAKE_PROFIT", round(scale_ref, 2)
 
     elif held_shares > 0 and meta["trend_ok"] and meta["liquid_ok"] and not meta["earnings_blocked"]:
         current_weight = current_mkt_value / total_assets if total_assets > 0 else 0
@@ -1584,7 +1602,7 @@ def evaluate_strategy(
             else:
                 category_capped = True
 
-    partial_sell_qty = max(1, math.floor(held_shares * EXIT_SCALE_OUT_PCT)) if action == "SELL_PARTIAL" else 0
+    partial_sell_qty = scale_out_qty if action == "SELL_PARTIAL" else 0
 
     return score, action, {
         "close": close,
