@@ -737,7 +737,7 @@ def action_tip(p: dict) -> str:
             return f'📉 趨勢轉弱（虧損中跌破年線 SMA200），建議出場 <b>{qty_sell} 股</b>，執行紀律'
         return f'⚠️ 跌破停損（{pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>，執行紀律'
     if "SELL_PARTIAL" in sig:
-        return f'💰 到達 TP1（{pl:+.1f}%），建議分批獲利 <b>{qty_sell} 股</b>，其餘續抱讓移動停損接管'
+        return f'💰 觸及獲利目標（{pl:+.1f}%），建議分批減碼 <b>{qty_sell} 股</b>落袋，其餘續抱讓移動停損接管'
     if p.get("CategoryCapped"):
         return f'🔒 訊號達標，但「{p.get("Category","該產業")}」曝險已達上限（{p.get("CategoryWeight",0):.0f}%），暫不加碼以控制集中度'
     return '👁 無強烈訊號，持續觀察。'
