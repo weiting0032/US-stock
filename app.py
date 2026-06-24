@@ -20,12 +20,16 @@ from core import (
     US_SEMI_SCORE_STRONG,
     US_SEMI_SCORE_WATCH,
     US_SEMI_UNIVERSE,
+    CATEGORY_MAX_WEIGHT,
+    CORR_LOOKBACK_DAYS,
     _get_sox_regime,
     _us_semi_score_one,
     build_portfolio,
     audit_universe,
     build_trade_preview,
     calc_portfolio_heat,
+    calc_category_exposure,
+    calc_portfolio_correlation,
     calc_realized_trade_stats,
     calculate_performance_metrics,
     evaluate_signal_outcomes,
@@ -717,14 +721,25 @@ def score_bar(score: float, max_score: float = 8) -> str:
 
 def action_tip(p: dict) -> str:
     sig = p.get("Signal", "WATCH")
+    mode = p.get("StrategyMode", "")
+    qty_sell = p.get("SuggestedSellQty", 0)
+    pl = p.get("PL_Pct", 0)
     if "BUY_NOW" in sig:
         return f'🛒 建議買進 <b>{p.get("SuggestedBuyQty", 0)} 股</b>，參考價 <b>${p["LastPrice"]:.2f}</b>'
     if "BUY_ADD" in sig:
         return f'➕ 建議加碼 <b>{p.get("SuggestedBuyQty", 0)} 股</b>，動能仍強，控制部位權重'
     if "SELL_EXIT" in sig:
-        return f'⚠️ 跌破停損，建議出場 <b>{p.get("SuggestedSellQty", 0)} 股</b>，執行紀律'
+        if mode == "TRAIL_EXIT":
+            return f'📉 回落觸發移動停利（鎖定 {pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>'
+        if mode == "BREAKEVEN_EXIT":
+            return f'🛡 回落至保本線，建議出場 <b>{qty_sell} 股</b>，保護獲利不倒賠'
+        if mode == "TREND_EXIT":
+            return f'📉 趨勢轉弱（虧損中跌破年線 SMA200），建議出場 <b>{qty_sell} 股</b>，執行紀律'
+        return f'⚠️ 跌破停損（{pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>，執行紀律'
     if "SELL_PARTIAL" in sig:
-        return f'💰 到達 TP1，建議獲利了結 <b>{p.get("SuggestedSellQty", 0)} 股</b> (約 50%)'
+        return f'💰 到達 TP1（{pl:+.1f}%），建議分批獲利 <b>{qty_sell} 股</b>，其餘續抱讓移動停損接管'
+    if p.get("CategoryCapped"):
+        return f'🔒 訊號達標，但「{p.get("Category","該產業")}」曝險已達上限（{p.get("CategoryWeight",0):.0f}%），暫不加碼以控制集中度'
     return '👁 無強烈訊號，持續觀察。'
 
 def render_ticker_technical_chart(ticker: str, days: int = 180, chart_key: str = None):
@@ -1021,6 +1036,49 @@ with tab1:
                 legend=dict(font=dict(family="DM Sans", size=11), orientation="h", yanchor="bottom", y=-0.2),
             )
             st.plotly_chart(pie, use_container_width=True, config={"displayModeBar": False})
+
+        # ── 產業曝險 / 相關性集中度 ──────────────────────────────────────
+        cat_exp = calc_category_exposure(portfolio, total_assets)
+        corr_info = calc_portfolio_correlation(portfolio)
+        over_cap_cats = [c for c in cat_exp if c.get("over_cap")]
+        concentrated = bool(over_cap_cats) or bool(corr_info.get("over_threshold"))
+        cap_pct = CATEGORY_MAX_WEIGHT * 100
+
+        if concentrated:
+            bits = []
+            if over_cap_cats:
+                bits.append("、".join(f'{c["category"]} {c["weight_pct"]:.0f}%' for c in over_cap_cats)
+                            + f'（單一次產業上限 {cap_pct:.0f}%，已自動禁止再加碼）')
+            if corr_info.get("over_threshold"):
+                bits.append(f'持倉平均相關性 {corr_info["avg_corr"]}（高度同向，看似多檔實為一注）')
+            st.warning("⚠️ 集中度偏高：" + "；".join(bits))
+
+        with st.expander("產業曝險 / 相關性", expanded=concentrated):
+            if cat_exp:
+                st.markdown('<div class="qsec">半導體次產業曝險</div>', unsafe_allow_html=True)
+                for c in cat_exp:
+                    colour = "var(--red)" if c.get("over_cap") else "var(--cyan)"
+                    bar_w = min(100.0, float(c["weight_pct"]))
+                    flag = " ⚠" if c.get("over_cap") else ""
+                    st.markdown(
+                        f'<div style="margin:5px 0">'
+                        f'<div style="display:flex;justify-content:space-between;font-size:0.8rem;margin-bottom:2px">'
+                        f'<span>{c["category"]}</span>'
+                        f'<span style="color:{colour}">{c["weight_pct"]:.1f}%{flag}</span></div>'
+                        f'<div style="height:6px;background:#1a1d27;border-radius:3px;overflow:hidden">'
+                        f'<div style="height:100%;width:{bar_w}%;background:{colour}"></div></div></div>',
+                        unsafe_allow_html=True,
+                    )
+            if corr_info.get("avg_corr") is not None:
+                mp = corr_info.get("max_pair")
+                pair_str = f'{mp[0]}–{mp[1]}（{corr_info["max_corr"]}）' if mp else "—"
+                st.caption(
+                    f'持倉平均兩兩相關性：{corr_info["avg_corr"]}'
+                    f'（{corr_info["n"]} 檔，近 {CORR_LOOKBACK_DAYS} 日）　最相關：{pair_str}'
+                )
+                st.caption('相關性越高分散效果越差；半導體普遍偏高。新倉/加碼已自動受單一次產業上限約束。')
+            else:
+                st.caption('持倉不足 2 檔或歷史資料不足，無法計算相關性。')
 
         st.markdown('<div class="qsec">持倉明細</div>', unsafe_allow_html=True)
 
