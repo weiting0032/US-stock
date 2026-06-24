@@ -2311,6 +2311,26 @@ def migrate_trades_v1_to_v2() -> Tuple[bool, str]:
         return False, f"❌ 遷移失敗：{e}"
 
 
+def _held_tickers_from_trades(trades_df) -> set:
+    """直接由交易紀錄計算目前淨持有(>0)的代碼，不依賴抓價，較 build_portfolio 穩健。"""
+    if trades_df is None or getattr(trades_df, "empty", True):
+        return set()
+    try:
+        net: Dict[str, float] = {}
+        for _, row in trades_df.iterrows():
+            tk = normalize_ticker(row.get("Ticker", ""))
+            if not tk:
+                continue
+            q = safe_float(row.get("Shares"))
+            if normalize_trade_type(row.get("Type")) == "BUY":
+                net[tk] = net.get(tk, 0.0) + q
+            else:
+                net[tk] = net.get(tk, 0.0) - q
+        return {tk for tk, n in net.items() if n > 1e-9}
+    except Exception:
+        return set()
+
+
 def _annotate_semi_candidate(r: Dict, exposure: Dict, held_set: set,
                              trades_df, cap_pct: float) -> None:
     """對半導體候選標註持倉層級狀態：已持有(加碼)、產業曝險已達上限、冷卻期(剛賣出)。"""
@@ -2377,7 +2397,7 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None,
         except Exception:
             pass
     exposure = {c["category"]: c for c in calc_category_exposure(portfolio, total_assets)}
-    held_set = {normalize_ticker(p.get("Ticker", "")) for p in portfolio}
+    held_set = _held_tickers_from_trades(trades_df)            # 直接由交易算持倉，不依賴抓價
     cap_pct = CATEGORY_MAX_WEIGHT * 100
     for r in results:
         _annotate_semi_candidate(r, exposure, held_set, trades_df, cap_pct)
