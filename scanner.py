@@ -80,6 +80,7 @@ def run_semi_scan():
     print("===== 美股半導體宇宙掃描 =====")
 
     # 取得持倉中的半導體個股，一併納入掃描
+    trades_df = None
     try:
         trades_df = load_trades()
         portfolio_raw, _, _ = build_portfolio(trades_df, DEFAULT_INITIAL_CAPITAL)
@@ -87,7 +88,7 @@ def run_semi_scan():
     except Exception:
         held_tickers = []
 
-    result = run_us_semi_scanner(extra_tickers=held_tickers, log_signals=True)
+    result = run_us_semi_scanner(extra_tickers=held_tickers, log_signals=True, trades_df=trades_df)
 
     sox = result["sox_regime"]
     print(f"SOX 趨勢: {sox.get('trend')} | RS vs SPY: {sox.get('rs_vs_spy', 0):+.1f}%")
