@@ -730,9 +730,13 @@ def action_tip(p: dict) -> str:
         return f'➕ 建議加碼 <b>{p.get("SuggestedBuyQty", 0)} 股</b>，動能仍強，控制部位權重'
     if "SELL_EXIT" in sig:
         if mode == "TRAIL_EXIT":
-            return f'📉 回落觸發移動停利（鎖定 {pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>'
+            if pl >= 0:
+                return f'📉 回落觸發移動停利（鎖定 {pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>'
+            return f'📉 回落跌破移動停損（獲利已回吐至 {pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>，執行紀律'
         if mode == "BREAKEVEN_EXIT":
-            return f'🛡 回落至保本線，建議出場 <b>{qty_sell} 股</b>，保護獲利不倒賠'
+            if pl >= -0.5:
+                return f'🛡 回落至保本線（{pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>，保護獲利不倒賠'
+            return f'🛡 跌破保本線（{pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>，執行紀律'
         if mode == "TREND_EXIT":
             return f'📉 趨勢轉弱（虧損中跌破年線 SMA200），建議出場 <b>{qty_sell} 股</b>，執行紀律'
         return f'⚠️ 跌破停損（{pl:+.1f}%），建議出場 <b>{qty_sell} 股</b>，執行紀律'
