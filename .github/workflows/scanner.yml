@@ -6,9 +6,9 @@ name: US Stock Scanner
 # 3. UTC 01:00 (Tue-Sat) = 台灣 09:00 = 美東 前日收盤後   → 半導體宇宙全掃描
 on:
   schedule:
-    - cron: "0 13 * * 1-5"   # 美東盤前（台灣 21:00）
-    - cron: "30 21 * * 1-5"  # 美東收盤後（台灣 05:30）
-    - cron: "0 1 * * 2-6"    # 台灣 09:00 半導體全掃描（美股前日收盤後）
+    - cron: "0 13 * * 1-5"   # 美東盤前（台灣 21:00）→ portfolio
+    - cron: "30 21 * * 1-5"  # 美東收盤後（台灣 05:30）→ portfolio
+    - cron: "0 1 * * 2-6"    # 台灣 09:00 半導體全掃描（美股前日收盤後）→ semi
   workflow_dispatch:
     inputs:
       scan_mode:
@@ -41,25 +41,22 @@ jobs:
           pip install -r requirements.txt
 
       # ── 判斷本次觸發為哪種模式 ──────────────────────────────────────────
+      # 重要：用 github.event.schedule（觸發當下的 cron 字串）判斷，而非解析時鐘。
+      # GitHub Actions 排程常延遲數分鐘～數十分鐘，用時鐘的 MINUTE<15 會把延遲的
+      # 01:00 半導體掃描誤判成 portfolio，導致半導體掃描永遠不執行。
       - name: Detect scan mode
         id: mode
         run: |
-          # UTC 01:00 (cron "0 1 * * 2-6") = 半導體全掃描
-          # 其餘時間 = 持倉/Watchlist 掃描
-          HOUR=$(date -u +%H)
-          MINUTE=$(date -u +%M)
           MANUAL_MODE="${{ github.event.inputs.scan_mode }}"
-
-          if [ "$MANUAL_MODE" == "semi" ]; then
-            echo "mode=semi" >> $GITHUB_OUTPUT
-            echo "label=美股半導體全掃描（手動）"
-          elif [ "$HOUR" == "01" ] && [ "$MINUTE" -lt "15" ]; then
-            echo "mode=semi" >> $GITHUB_OUTPUT
-            echo "label=美股半導體全掃描（台灣 09:00）"
+          SCHED="${{ github.event.schedule }}"
+          if [ "$MANUAL_MODE" == "semi" ] || [ "$SCHED" == "0 1 * * 2-6" ]; then
+            echo "mode=semi" >> "$GITHUB_OUTPUT"
+            echo "label=美股半導體全掃描"
           else
-            echo "mode=portfolio" >> $GITHUB_OUTPUT
+            echo "mode=portfolio" >> "$GITHUB_OUTPUT"
             echo "label=持倉/Watchlist 掃描"
           fi
+          echo "觸發來源 schedule='${SCHED}' manual='${MANUAL_MODE}'"
 
       # ── 持倉 / Watchlist 掃描 ───────────────────────────────────────────
       - name: Run portfolio scanner
