@@ -2311,8 +2311,38 @@ def migrate_trades_v1_to_v2() -> Tuple[bool, str]:
         return False, f"❌ 遷移失敗：{e}"
 
 
+def _annotate_semi_candidate(r: Dict, exposure: Dict, held_set: set,
+                             trades_df, cap_pct: float) -> None:
+    """對半導體候選標註持倉層級狀態：已持有(加碼)、產業曝險已達上限、冷卻期(剛賣出)。"""
+    tk = normalize_ticker(r.get("ticker", ""))
+    warnings = []
+
+    r["held"] = tk in held_set
+    if r["held"]:
+        warnings.append("ℹ️ 已持有（此為加碼）")
+
+    catinfo = exposure.get(r.get("category"))
+    r["cat_weight"] = float(catinfo["weight_pct"]) if catinfo else 0.0
+    r["category_full"] = bool(catinfo and catinfo["weight_pct"] >= cap_pct)
+    if r["category_full"]:
+        warnings.append(f"⚠️ {r.get('category')} 曝險已達 {r['cat_weight']:.0f}%（上限 {cap_pct:.0f}%）")
+
+    recent_sell = False
+    if trades_df is not None:
+        try:
+            _rb, recent_sell = get_recent_trade_status(tk, trades_df)
+        except Exception:
+            recent_sell = False
+    r["cooldown"] = bool(recent_sell)
+    if recent_sell:
+        warnings.append(f"⚠️ 冷卻期（{COOLDOWN_DAYS} 日內剛賣出）")
+
+    r["warnings"] = warnings
+
+
 def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None,
-                        log_signals: bool = False) -> Dict:
+                        log_signals: bool = False,
+                        trades_df=None) -> Dict:
     sox_regime = _get_sox_regime()
 
     base_universe = get_us_semi_universe(include_etf=False)
@@ -2332,6 +2362,25 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None,
                 results.append(r)
 
     results.sort(key=lambda x: -x["score"])
+
+    # ── 持倉脈絡：對候選標註集中度/冷卻（你的實際進場在此引擎，需在此提醒風控）──
+    if trades_df is None:
+        try:
+            trades_df = load_trades()
+        except Exception:
+            trades_df = None
+    portfolio, total_assets = [], DEFAULT_INITIAL_CAPITAL
+    if trades_df is not None and not trades_df.empty:
+        try:
+            portfolio, cash, _ = build_portfolio(trades_df, DEFAULT_INITIAL_CAPITAL)
+            total_assets = cash + sum(safe_float(p.get("MarketValue")) for p in portfolio)
+        except Exception:
+            pass
+    exposure = {c["category"]: c for c in calc_category_exposure(portfolio, total_assets)}
+    held_set = {normalize_ticker(p.get("Ticker", "")) for p in portfolio}
+    cap_pct = CATEGORY_MAX_WEIGHT * 100
+    for r in results:
+        _annotate_semi_candidate(r, exposure, held_set, trades_df, cap_pct)
 
     strong_buy = [r for r in results if r["signal"] == "STRONG_BUY"]
     buy = [r for r in results if r["signal"] == "BUY"]
@@ -2394,7 +2443,7 @@ def format_us_semi_tg_messages(scan_result: Dict) -> List[str]:
         reasons = "、".join(r["reasons"][:3]) if r["reasons"] else "—"
         category = r.get("category", "Semiconductor / Other")
     
-        return [
+        lines = [
             f"{rank} *{r['ticker']}*  {stars}  {sig_lbl}",
             f"   類別: `{category}`",
             f"   分數 *{r['score']:.1f}*  |  RSI {r['rsi']:.0f}  ADX {r['adx']:.0f}",
@@ -2402,8 +2451,12 @@ def format_us_semi_tg_messages(scan_result: Dict) -> List[str]:
             f"   📈 {reasons}",
             f"   🛑 ${r['stop_loss']}  🎯 TP1 ${r['tp1']}  TP2 ${r['tp2']}",
             f"   建議股數 {r['suggested_qty']} 股  |  日均量 ${r['dv20_m']:.0f}M",
-            "",
         ]
+        warns = r.get("warnings") or []
+        if warns:
+            lines.append("   " + "　".join(warns))
+        lines.append("")
+        return lines
 
     footer = ["─────────────────────────────", "⚠️ 本訊息僅供參考，不構成投資建議"]
 
