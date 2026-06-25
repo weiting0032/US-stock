@@ -102,6 +102,7 @@ EXIT_TP2_PCT = get_env_float("EXIT_TP2_PCT", 0.40)             # 第二獲利目
 EXIT_SCALE_OUT_PCT = get_env_float("EXIT_SCALE_OUT_PCT", 0.34)  # 觸及 TP1 時分批賣出比例（約 1/3）
 EXIT_BREAKEVEN_AT_R = get_env_float("EXIT_BREAKEVEN_AT_R", 1.0) # 浮盈達 +1R 後，止損上移至保本（進場價）
 EXIT_TREND_BREAK = get_env_int("EXIT_TREND_BREAK", 1)          # 趨勢轉弱出場：虧損中且跌破 SMA200 即出場（1=啟用）
+EXIT_MIN_HOLD_BARS = get_env_int("EXIT_MIN_HOLD_BARS", 1)      # 新倉保護期（含進場日的日線根數）；期內僅初始硬止損生效，保本/移動/趨勢出場一律不啟用
 # 產業/相關性曝險控制
 CATEGORY_MAX_WEIGHT = get_env_float("CATEGORY_MAX_WEIGHT", 0.40)  # 單一半導體次產業總權重上限（進場/加碼閘）
 CORR_WARN_THRESHOLD = get_env_float("CORR_WARN_THRESHOLD", 0.70) # 持倉平均兩兩相關性警示門檻
@@ -1512,27 +1513,41 @@ def evaluate_strategy(
     entry_date = next((p.get("EntryDate") for p in portfolio if p.get("Ticker") == ticker), None)
     entry = avg_cost if (held_shares > 0 and avg_cost > 0) else close
 
-    # 移動停損基準＝「進場後最高價」（只計進場日之後），避免用到進場前的高點而誤殺
-    peak = safe_float(last.get("RollingHigh20", close))
+    # 進場後窗口：以「日期」(截到當日 00:00) 篩選、含進場日當天的日線。
+    #   peak       → Chandelier 移動停損用（進場後最高 High）
+    #   peak_close → 保本上移判定用（進場後最高「收盤」，避免進場日單根長上影誤觸 +1R）
+    # 關鍵：取不到任何進場後 K 棒時，一律退回 close，絕不退回含進場前高點的 RollingHigh20，
+    #       否則保本/移動停損會被進場前的高點誤觸發（剛買進就被掃出）。
+    peak = close
+    peak_close = close
+    bars_since_entry = EXIT_MIN_HOLD_BARS + 1     # entry_date 缺失時視為成熟部位（不進保護期）
     if held_shares > 0 and entry_date is not None:
         try:
             ed = pd.Timestamp(entry_date)
             if ed.tzinfo is not None:
                 ed = ed.tz_localize(None)
+            ed = ed.normalize()                                              # 截到當日 00:00，確保含進場日的日線
             idx_naive = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
-            mask = (pd.DatetimeIndex(idx_naive) >= ed)
-            sel = hist["High"].to_numpy()[mask]
-            if sel.size > 0:
-                peak = max(float(sel.max()), close)
+            mask = (pd.DatetimeIndex(idx_naive).normalize() >= ed)
+            if mask.any():
+                peak = max(float(hist["High"].to_numpy()[mask].max()), close)
+                peak_close = max(float(hist["Close"].to_numpy()[mask].max()), close)
+                bars_since_entry = int(mask.sum())
+            else:
+                bars_since_entry = 1                                        # 今天剛進場、日線尚未成形 → 仍在保護期
         except Exception:
             pass
 
+    in_grace = held_shares > 0 and bars_since_entry <= EXIT_MIN_HOLD_BARS     # 新倉保護期
+
     R = (EXIT_INIT_STOP_ATR * atr) if atr > 0 else entry * 0.07              # 初始風險距離（價格單位）
-    initial_stop = max(0.01, entry - R)                                     # 初始硬止損（錨定進場成本）
+    initial_stop = max(0.01, entry - R)                                     # 初始硬止損（錨定進場成本，保護期內仍生效）
     chandelier = (peak - EXIT_TRAIL_ATR * atr) if atr > 0 else entry * 0.90  # Chandelier：進場後高點 − 3×ATR
-    reached_1R = peak >= entry + EXIT_BREAKEVEN_AT_R * R                     # 進場後曾達 +1R
+    # 保本上移：需「進場後曾收在 +1R 之上」(用收盤，不用盤中 High)，且已過保護期
+    reached_1R = (peak_close >= entry + EXIT_BREAKEVEN_AT_R * R) and not in_grace
     floor_be = entry if reached_1R else 0.0                                 # 達 +1R 後止損上移保本
-    effective_stop = max(initial_stop, chandelier, floor_be)                # 實際止損：只升不降
+    trail_stop = chandelier if not in_grace else 0.0                        # 移動停損保護期內不啟用
+    effective_stop = max(initial_stop, trail_stop, floor_be)                # 實際止損：只升不降
     tp1 = min(entry + EXIT_TP1_R * R, entry * (1 + EXIT_TP1_PCT))   # +2R 與 +20% 取較早者
     tp2 = min(entry + EXIT_TP2_R * R, entry * (1 + EXIT_TP2_PCT))   # +4R 與 +40% 取較早者
 
@@ -1566,11 +1581,11 @@ def evaluate_strategy(
     category_capped = False
 
     if held_shares > 0 and close < effective_stop:
-        _bounds = {"RISK_EXIT": initial_stop, "TRAIL_EXIT": chandelier, "BREAKEVEN_EXIT": floor_be}
+        _bounds = {"RISK_EXIT": initial_stop, "TRAIL_EXIT": trail_stop, "BREAKEVEN_EXIT": floor_be}
         mode = max(_bounds, key=_bounds.get)                                # 標示是哪一道止損生效
         action, tp = "SELL_EXIT", round(effective_stop, 2)
 
-    elif (held_shares > 0 and EXIT_TREND_BREAK and sma200 > 0
+    elif (held_shares > 0 and not in_grace and EXIT_TREND_BREAK and sma200 > 0
           and close <= entry and close < sma200):
         action, mode, tp = "SELL_EXIT", "TREND_EXIT", round(close, 2)       # 虧損中且跌破年線→趨勢轉弱出場
 
@@ -1680,6 +1695,10 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
     alerts_df = load_alerts()
     session = get_market_session()
 
+    # portfolio 已由 enrich_portfolio_with_weight_and_risk 補上 StopLoss → heat 可正確計算
+    # （過去此處寫死 0，使 PORTFOLIO_HEAT_LIMIT 在此進場路徑形同虛設）
+    heat_pct = calc_portfolio_heat(portfolio, total_assets).get("heat_pct", 0.0)
+
     universe = sorted(list(set(
         [p["Ticker"] for p in portfolio] +
         (watchlist_df[watchlist_df["Enabled"]]["Ticker"].tolist() if watchlist_df is not None and not watchlist_df.empty else [])
@@ -1695,7 +1714,7 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
         mkt_val = next((p["MarketValue"] for p in portfolio if p["Ticker"] == tk), 0)
         recent_buy, recent_sell = get_recent_trade_status(tk, trades_df)
         sc, act, det, note = evaluate_strategy(
-            tk, h, held, mkt_val, total_assets, cash, market_regime, 0, portfolio,
+            tk, h, held, mkt_val, total_assets, cash, market_regime, heat_pct, portfolio,
             recent_buy=recent_buy, recent_sell=recent_sell
         )
         candidates.append({"ticker": tk, "score": sc, "action": act, "details": det, "note": note})
@@ -2218,6 +2237,7 @@ def _us_semi_score_one(ticker: str, sox_regime: Dict) -> Optional[Dict]:
             "tp1": tp1,
             "tp2": tp2,
             "suggested_qty": suggested_qty,
+            "bucket": classify_symbol_bucket(ticker, hist),
             "rsi": round(rsi, 1),
             "adx": round(adx, 1),
             "rs20_vs_spy": round(rs20, 2),
@@ -2360,6 +2380,92 @@ def _annotate_semi_candidate(r: Dict, exposure: Dict, held_set: set,
     r["warnings"] = warnings
 
 
+def apply_entry_risk_gates(cand: Dict, portfolio: List[Dict], total_assets: float,
+                           cash: float, heat_pct: float, market_regime: Dict) -> None:
+    """
+    半導體進場引擎的統一風控閘（就地更新 cand）。
+    過去 _us_semi_score_one 算出的 suggested_qty 只看 ATR 風險、且用固定 32000 計本金，
+    完全無視 regime / 現金 / 單檔權重 / 產業曝險 / 投組熱度 / 冷卻期。此函式補上這些閘，
+    並改用「即時權益」做 sizing，使進場引擎與 evaluate_strategy 的風控一致。
+
+    寫回欄位：
+      suggested_qty_raw → 原始（僅 ATR 風險、固定本金）股數
+      suggested_qty     → 套用所有風控閘後的最終可買股數（可為 0）
+      gate_blocked      → True 表示被風控完全擋下（qty=0）
+      warnings          → 追加縮減/封鎖原因（沿用既有渲染）
+    """
+    warnings = cand.setdefault("warnings", [])
+    cand["suggested_qty_raw"] = safe_int(cand.get("suggested_qty", 0))
+
+    close = safe_float(cand.get("close"))
+    stop = safe_float(cand.get("stop_loss"))
+    cat = cand.get("category", "")
+    held = bool(cand.get("held"))
+    tk = normalize_ticker(cand.get("ticker", ""))
+    limits = get_bucket_limits(cand.get("bucket", "LARGE_CAP"))
+
+    if total_assets <= 0 or close <= 0:
+        cand["suggested_qty"] = 0
+        cand["gate_blocked"] = True
+        return
+
+    risk_per_share = max(0.01, close - stop)
+    risk_mult = safe_float(market_regime.get("risk_multiplier", 1.0), 1.0)
+
+    # ③ 即時權益 sizing（取代固定 DEFAULT_INITIAL_CAPITAL）＋ regime 風險係數
+    qty = math.floor(total_assets * limits["risk_per_trade_pct"] * risk_mult / risk_per_share)
+    notes = []
+
+    def _cut(cap_qty: int, hard_msg: str, soft_msg: str):
+        nonlocal qty
+        if cap_qty < qty:
+            notes.append(hard_msg if cap_qty <= 0 else soft_msg.format(n=max(0, cap_qty)))
+            qty = max(0, min(qty, cap_qty))
+
+    # ① 市場 regime：新倉看 allow_new_position，加碼看 allow_add_position
+    regime_allow = market_regime.get("allow_add_position") if held else market_regime.get("allow_new_position")
+    if not regime_allow or risk_mult <= 0:
+        qty = 0
+        notes.append(f"🚫 市場狀態 {market_regime.get('regime', '?')} 暫停{'加碼' if held else '新進場'}")
+
+    # 現金閘（保留現金準備金）
+    avail_cash = cash - total_assets * CASH_RESERVE_PCT
+    _cut(math.floor(avail_cash / close), "🚫 可用現金不足（已扣除現金準備）", "✂️ 現金上限 {n} 股")
+
+    # ④ 單檔權重上限（加碼另需未達 max_weight×SCALE_IN 比例才可加）
+    cur_mv = sum(safe_float(p.get("MarketValue")) for p in portfolio
+                 if normalize_ticker(p.get("Ticker", "")) == tk)
+    max_w = limits["max_weight"]
+    if held and total_assets > 0 and (cur_mv / total_assets) >= max_w * SCALE_IN_MAX_WEIGHT_RATIO:
+        qty = 0
+        notes.append(f"🚫 已達加碼權重上限（{cur_mv / total_assets * 100:.0f}%）")
+    else:
+        _cut(math.floor((max_w * total_assets - cur_mv) / close),
+             f"🚫 單檔權重已達上限 {max_w * 100:.0f}%", "✂️ 單檔權重上限 {n} 股")
+
+    # ⑤ 半導體次產業曝險上限
+    cat_mv = sum(safe_float(p.get("MarketValue")) for p in portfolio
+                 if get_us_semi_category(p.get("Ticker", "")) == cat)
+    _cut(math.floor((CATEGORY_MAX_WEIGHT * total_assets - cat_mv) / close),
+         f"🚫 {cat} 產業曝險已達上限 {CATEGORY_MAX_WEIGHT * 100:.0f}%", "✂️ 產業曝險上限 {n} 股")
+
+    # ⑥ 投組總熱度上限（此版本才真正生效）
+    heat_room = (PORTFOLIO_HEAT_LIMIT_PCT - heat_pct / 100.0) * total_assets
+    _cut(math.floor(heat_room / risk_per_share),
+         f"🚫 投組總熱度已達上限 {PORTFOLIO_HEAT_LIMIT_PCT * 100:.0f}%", "✂️ 熱度上限 {n} 股")
+
+    # ⑦ 冷卻期（同檔近 N 日剛賣出）
+    if cand.get("cooldown"):
+        qty = 0
+        notes.append(f"🚫 冷卻期（{COOLDOWN_DAYS} 日內剛賣出），暫不進場")
+
+    qty = max(0, int(qty))
+    cand["suggested_qty"] = qty
+    cand["gate_blocked"] = qty == 0
+    if notes:
+        warnings.extend(notes)
+
+
 def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None,
                         log_signals: bool = False,
                         trades_df=None) -> Dict:
@@ -2383,24 +2489,33 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None,
 
     results.sort(key=lambda x: -x["score"])
 
-    # ── 持倉脈絡：對候選標註集中度/冷卻（你的實際進場在此引擎，需在此提醒風控）──
+    # ── 持倉脈絡：對候選標註集中度/冷卻，並套用統一進場風控閘（你的實際進場在此引擎）──
     if trades_df is None:
         try:
             trades_df = load_trades()
         except Exception:
             trades_df = None
-    portfolio, total_assets = [], DEFAULT_INITIAL_CAPITAL
+    portfolio, total_assets, cash = [], DEFAULT_INITIAL_CAPITAL, DEFAULT_INITIAL_CAPITAL
+    market_regime = {"regime": "UNKNOWN", "allow_new_position": True,
+                     "allow_add_position": True, "risk_multiplier": 0.5}
+    heat_pct = 0.0
     if trades_df is not None and not trades_df.empty:
         try:
-            portfolio, cash, _ = build_portfolio(trades_df, DEFAULT_INITIAL_CAPITAL)
-            total_assets = cash + sum(safe_float(p.get("MarketValue")) for p in portfolio)
+            portfolio_raw, cash, _ = build_portfolio(trades_df, DEFAULT_INITIAL_CAPITAL)
+            total_assets = cash + sum(safe_float(p.get("MarketValue")) for p in portfolio_raw)
+            market_regime = get_market_regime()
+            # enrich 後才有 StopLoss → heat 才算得出來（raw portfolio 的 heat 恆為 0）
+            portfolio = enrich_portfolio_with_weight_and_risk(
+                portfolio_raw, total_assets, cash, market_regime) if portfolio_raw else []
+            heat_pct = calc_portfolio_heat(portfolio, total_assets).get("heat_pct", 0.0)
         except Exception:
-            pass
+            portfolio = []
     exposure = {c["category"]: c for c in calc_category_exposure(portfolio, total_assets)}
     held_set = _held_tickers_from_trades(trades_df)            # 直接由交易算持倉，不依賴抓價
     cap_pct = CATEGORY_MAX_WEIGHT * 100
     for r in results:
         _annotate_semi_candidate(r, exposure, held_set, trades_df, cap_pct)
+        apply_entry_risk_gates(r, portfolio, total_assets, cash, heat_pct, market_regime)
 
     strong_buy = [r for r in results if r["signal"] == "STRONG_BUY"]
     buy = [r for r in results if r["signal"] == "BUY"]
