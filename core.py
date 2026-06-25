@@ -95,6 +95,7 @@ SCALE_IN_MAX_WEIGHT_RATIO = get_env_float("SCALE_IN_MAX_WEIGHT_RATIO", 0.75)
 # 出場策略（以進場成本為固定參考；R = 初始風險距離 = 進場 − 初始止損）
 EXIT_INIT_STOP_ATR = get_env_float("EXIT_INIT_STOP_ATR", 2.0)    # 初始硬止損：進場 − 2×ATR
 EXIT_TRAIL_ATR = get_env_float("EXIT_TRAIL_ATR", 3.0)           # Chandelier 移動停損：High20 − 3×ATR
+EXIT_TRAIL_ATR_FINAL = get_env_float("EXIT_TRAIL_ATR_FINAL", 2.0)  # 減碼兩次後剩最後一份：收緊至 2×ATR 鎖更多利
 EXIT_TP1_R = get_env_float("EXIT_TP1_R", 2.0)                   # 第一獲利目標：進場 + 2R（分批出場）
 EXIT_TP2_R = get_env_float("EXIT_TP2_R", 4.0)                   # 第二獲利目標：進場 + 4R（顯示用）
 EXIT_TP1_PCT = get_env_float("EXIT_TP1_PCT", 0.20)             # 第一獲利目標的百分比上限（與 +XR 取較早者；高波動股提早落袋）
@@ -1521,6 +1522,7 @@ def evaluate_strategy(
     peak = close
     peak_close = close
     bars_since_entry = EXIT_MIN_HOLD_BARS + 1     # entry_date 缺失時視為成熟部位（不進保護期）
+    atr_entry = atr                               # entry-time ATR；預設＝當前 ATR（新倉/抓不到時）
     if held_shares > 0 and entry_date is not None:
         try:
             ed = pd.Timestamp(entry_date)
@@ -1528,21 +1530,42 @@ def evaluate_strategy(
                 ed = ed.tz_localize(None)
             ed = ed.normalize()                                              # 截到當日 00:00，確保含進場日的日線
             idx_naive = hist.index.tz_localize(None) if hist.index.tz is not None else hist.index
-            mask = (pd.DatetimeIndex(idx_naive).normalize() >= ed)
+            idx_norm = pd.DatetimeIndex(idx_naive).normalize()
+            mask = (idx_norm >= ed)
             if mask.any():
                 peak = max(float(hist["High"].to_numpy()[mask].max()), close)
                 peak_close = max(float(hist["Close"].to_numpy()[mask].max()), close)
                 bars_since_entry = int(mask.sum())
             else:
                 bars_since_entry = 1                                        # 今天剛進場、日線尚未成形 → 仍在保護期
+            # entry-time ATR：取「進場當根（或最近一根 ≤ 進場日）」的 ATR，使 R 不隨之後波動漂移。
+            # Wilder ATR 為因果指標，該根 ATR 不論何時計算皆相同，等同於進場當下寫入的值。
+            atr_col = hist["ATR"].to_numpy()
+            at_or_before = (idx_norm <= ed)
+            if at_or_before.any():
+                cand_atr = safe_float(atr_col[at_or_before][-1])
+            elif mask.any():
+                cand_atr = safe_float(atr_col[mask][0])                     # 進場日早於序列起點 → 取最早一根
+            else:
+                cand_atr = 0.0
+            if cand_atr > 0:
+                atr_entry = cand_atr
         except Exception:
             pass
 
     in_grace = held_shares > 0 and bars_since_entry <= EXIT_MIN_HOLD_BARS     # 新倉保護期
 
-    R = (EXIT_INIT_STOP_ATR * atr) if atr > 0 else entry * 0.07              # 初始風險距離（價格單位）
+    # 本輪進場總股數（供分批減碼與「最後一份 tranche 收緊移動停損」判定）
+    entry_shares = next((safe_float(p.get("EntryShares")) for p in portfolio if p.get("Ticker") == ticker), 0.0)
+    if entry_shares <= 0:
+        entry_shares = held_shares
+    # 減碼兩次後剩最後一份（≈1/3）→ 移動停損由 3ATR 收緊至 2ATR
+    final_tranche = entry_shares > 0 and held_shares <= entry_shares * (1.0 - 2.0 * EXIT_SCALE_OUT_PCT) + 1e-6
+    trail_atr_mult = EXIT_TRAIL_ATR_FINAL if final_tranche else EXIT_TRAIL_ATR
+
+    R = (EXIT_INIT_STOP_ATR * atr_entry) if atr_entry > 0 else entry * 0.07  # 初始風險距離（以 entry-time ATR 計，不漂移）
     initial_stop = max(0.01, entry - R)                                     # 初始硬止損（錨定進場成本，保護期內仍生效）
-    chandelier = (peak - EXIT_TRAIL_ATR * atr) if atr > 0 else entry * 0.90  # Chandelier：進場後高點 − 3×ATR
+    chandelier = (peak - trail_atr_mult * atr) if atr > 0 else entry * 0.90  # Chandelier 用當前 ATR：本就應隨波動調整
     # 保本上移：需「進場後曾收在 +1R 之上」(用收盤，不用盤中 High)，且已過保護期
     reached_1R = (peak_close >= entry + EXIT_BREAKEVEN_AT_R * R) and not in_grace
     floor_be = entry if reached_1R else 0.0                                 # 達 +1R 後止損上移保本
@@ -1552,10 +1575,7 @@ def evaluate_strategy(
     tp2 = min(entry + EXIT_TP2_R * R, entry * (1 + EXIT_TP2_PCT))   # +4R 與 +40% 取較早者
 
     # 分層減碼：觸及 TP1 減至 (1−1×比例)、觸及 TP2 減至 (1−2×比例)，最後一份跟著移動停損跑。
-    # 用「本輪進場總股數」當基準，使建議持續到減足目標、且不會重複過賣。
-    entry_shares = next((safe_float(p.get("EntryShares")) for p in portfolio if p.get("Ticker") == ticker), 0.0)
-    if entry_shares <= 0:
-        entry_shares = held_shares
+    # 用「本輪進場總股數」當基準（已於上方取得），使建議持續到減足目標、且不會重複過賣。
     if close >= tp2:
         target_frac, scale_ref = max(0.0, 1.0 - 2.0 * EXIT_SCALE_OUT_PCT), tp2
     elif close >= tp1:
@@ -1625,6 +1645,8 @@ def evaluate_strategy(
         "close": close,
         "rsi": rsi,
         "atr": atr,
+        "entry_atr": round(atr_entry, 4),
+        "trail_atr_mult": trail_atr_mult,
         "entry_ref": round(entry, 2),
         "stop_loss": round(effective_stop, 2),
         "trend_stop": round(chandelier, 2),
