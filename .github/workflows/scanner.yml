@@ -9,10 +9,11 @@ on:
     - cron: "0 13 * * 1-5"   # 美東盤前（台灣 21:00）→ portfolio
     - cron: "30 21 * * 1-5"  # 美東收盤後（台灣 05:30）→ portfolio
     - cron: "0 1 * * 2-6"    # 台灣 09:00 半導體全掃描（美股前日收盤後）→ semi
+    - cron: "0 23 * * 1-5"   # 台灣 07:00 跨產業廣度發現（美股當日收盤後）→ broad
   workflow_dispatch:
     inputs:
       scan_mode:
-        description: '掃描模式 (portfolio / semi)'
+        description: '掃描模式 (portfolio / semi / broad)'
         required: false
         default: 'portfolio'
 
@@ -52,6 +53,9 @@ jobs:
           if [ "$MANUAL_MODE" == "semi" ] || [ "$SCHED" == "0 1 * * 2-6" ]; then
             echo "mode=semi" >> "$GITHUB_OUTPUT"
             echo "label=美股半導體全掃描"
+          elif [ "$MANUAL_MODE" == "broad" ] || [ "$SCHED" == "0 23 * * 1-5" ]; then
+            echo "mode=broad" >> "$GITHUB_OUTPUT"
+            echo "label=跨產業廣度發現"
           else
             echo "mode=portfolio" >> "$GITHUB_OUTPUT"
             echo "label=持倉/Watchlist 掃描"
@@ -101,6 +105,25 @@ jobs:
           US_SEMI_SCAN_WORKERS: ${{ secrets.US_SEMI_SCAN_WORKERS }}
           US_SEMI_TOP_N:        ${{ secrets.US_SEMI_TOP_N }}
         run: python scanner.py --semi
+
+      # ── 跨產業廣度發現掃描（不限半導體，找全市場趨勢領導股）─────────────
+      - name: Run broad discovery scanner
+        if: steps.mode.outputs.mode == 'broad'
+        env:
+          TG_TOKEN:             ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID:           ${{ secrets.TG_CHAT_ID }}
+          MIN_AVG_DOLLAR_VOLUME: ${{ secrets.MIN_AVG_DOLLAR_VOLUME }}
+          MIN_PRICE:            ${{ secrets.MIN_PRICE }}
+          EARNINGS_BLOCK_DAYS:  ${{ secrets.EARNINGS_BLOCK_DAYS }}
+          US_SEMI_SCAN_WORKERS: ${{ secrets.US_SEMI_SCAN_WORKERS }}
+          # ── 進場品質閘參數（可選；未設定則用程式內預設值）──────────────
+          SCORE_BUY_NOW_THRESHOLD:   ${{ secrets.SCORE_BUY_NOW_THRESHOLD }}
+          ENTRY_REQUIRE_TRIGGER:     ${{ secrets.ENTRY_REQUIRE_TRIGGER }}
+          ENTRY_PULLBACK_SMA20_PCT:  ${{ secrets.ENTRY_PULLBACK_SMA20_PCT }}
+          ENTRY_BREAKOUT_VOL_MULT:   ${{ secrets.ENTRY_BREAKOUT_VOL_MULT }}
+          ENTRY_MAX_EXT_ATR:         ${{ secrets.ENTRY_MAX_EXT_ATR }}
+          ENTRY_REQUIRE_RS_POSITIVE: ${{ secrets.ENTRY_REQUIRE_RS_POSITIVE }}
+        run: python scanner.py --broad
 
       # ── 執行完畢通知 ────────────────────────────────────────────────────
       - name: Summary
