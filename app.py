@@ -62,6 +62,7 @@ from core import (
     migrate_trades_v1_to_v2,
     normalize_ticker,
     run_auto_scanner,
+    run_broad_scanner,
     run_us_semi_scanner,
     save_trade,
     save_watchlist,
@@ -1212,6 +1213,41 @@ with tab2:
             )
         st.session_state["scan_result"] = result
         st.rerun()
+
+    # ── 跨產業廣度發現（P4）：不限半導體，掃全市場趨勢領導股 ──
+    with st.expander("🌐 跨產業廣度發現（找全市場新標的）", expanded=False):
+        st.caption("對跨產業高流動性領導股套用趨勢動能評分 + 進場品質閘（突破/回檔、不追高、強於大盤）。")
+        if st.button("🔭 執行廣度發現掃描", use_container_width=True, key="run_broad"):
+            with st.spinner("跨產業掃描中 …"):
+                try:
+                    st.session_state["broad_result"] = run_broad_scanner()
+                except Exception as e:
+                    st.session_state["broad_result"] = None
+                    st.error(f"掃描失敗：{e}")
+            st.rerun()
+
+        _broad = st.session_state.get("broad_result")
+        if _broad:
+            st.caption(f"市場 {_broad['regime']}｜掃描 {_broad['total_scanned']} 檔｜"
+                       f"買進候選 {_broad['total_hits']} 檔｜{_broad['scan_date']}")
+            if not _broad.get("allow_new_position"):
+                st.warning("⚠️ 目前市場狀態不開放新倉，以下為觀察用候選。")
+            _hits = _broad["strong_buy"] + _broad["buy"]
+            if not _hits:
+                st.info("目前無符合進場品質的買進候選。")
+            for r in _hits[:15]:
+                _emoji = "🔴" if r["signal"] == "STRONG_BUY" else "🟢"
+                st.markdown(f"""
+<div class="sc-card">
+  <div class="sc-rank">{_emoji}</div>
+  <div style="flex:1">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <div class="sc-ticker">{r['ticker']} <span style="font-size:0.7rem;color:var(--muted)">{html.escape(str(r.get('sector','')))}</span></div>
+      <div style="font-family:var(--mono);font-size:0.85rem">${r['close']:.2f} · {r['score']:.1f}pt</div>
+    </div>
+    <div class="sc-reason">[{r['trigger']}] RS{r['rs20_vs_spy']:+.1f}% · 停損 ${r['stop_loss']} · TP1 ${r['tp1']} · {' / '.join(r.get('reasons', []))}</div>
+  </div>
+</div>""", unsafe_allow_html=True)
 
     result = st.session_state.get("scan_result")
     if result:

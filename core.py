@@ -144,6 +144,23 @@ EXIT_SCALE_OUT_PCT = get_env_float("EXIT_SCALE_OUT_PCT", 0.34)  # 觸及 TP1 時
 EXIT_BREAKEVEN_AT_R = get_env_float("EXIT_BREAKEVEN_AT_R", 1.0) # 浮盈達 +1R 後，止損上移至保本（進場價）
 EXIT_TREND_BREAK = get_env_int("EXIT_TREND_BREAK", 1)          # 趨勢轉弱出場：虧損中且跌破 SMA200 即出場（1=啟用）
 EXIT_MIN_HOLD_BARS = get_env_int("EXIT_MIN_HOLD_BARS", 1)      # 新倉保護期（含進場日的日線根數）；期內僅初始硬止損生效，保本/移動/趨勢出場一律不啟用
+
+# ── 進場品質閘（P1）：避免追高，新倉須為「突破」或「回檔」且不過度乖離、強於大盤 ──
+ENTRY_REQUIRE_TRIGGER = get_env_int("ENTRY_REQUIRE_TRIGGER", 1)        # 1=新倉須通過突破/回檔觸發
+ENTRY_PULLBACK_SMA20_PCT = get_env_float("ENTRY_PULLBACK_SMA20_PCT", 0.04)  # 收盤距 SMA20 在此範圍內視為「回檔買點」
+ENTRY_BREAKOUT_VOL_MULT = get_env_float("ENTRY_BREAKOUT_VOL_MULT", 1.3)     # 突破須伴隨量 > 均量 × 此倍數
+ENTRY_MAX_EXT_ATR = get_env_float("ENTRY_MAX_EXT_ATR", 4.0)            # 乖離上限：收盤不得高於 SMA20 + N×ATR（追高保護）
+ENTRY_REQUIRE_RS_POSITIVE = get_env_int("ENTRY_REQUIRE_RS_POSITIVE", 1)     # 1=新倉要求 RS20 vs SPY > 0（強於大盤）
+
+# ── 加碼只加贏家（P2）：部位需已獲利達門檻才允許金字塔加碼，杜絕往下攤平 ──
+ADD_REQUIRE_PROFIT = get_env_int("ADD_REQUIRE_PROFIT", 1)             # 1=僅對獲利中部位加碼
+ADD_MIN_PROFIT_R = get_env_float("ADD_MIN_PROFIT_R", 0.5)             # 加碼前現價需站上 進場 + N×R
+
+# ── 時間/呆滯止損（P3）：進場 N 根後仍未達 +1R 且 RS 轉弱 → 釋出資金 ──
+TIME_STOP_ENABLE = get_env_int("TIME_STOP_ENABLE", 1)
+TIME_STOP_BARS = get_env_int("TIME_STOP_BARS", 20)                    # 呆滯判定的持倉日線根數
+TIME_STOP_MIN_R = get_env_float("TIME_STOP_MIN_R", 1.0)              # 此期間內須至少達到的浮盈（以 R 計）
+
 # 產業/相關性曝險控制
 CATEGORY_MAX_WEIGHT = get_env_float("CATEGORY_MAX_WEIGHT", 0.40)  # 單一半導體次產業總權重上限（進場/加碼閘）
 CORR_WARN_THRESHOLD = get_env_float("CORR_WARN_THRESHOLD", 0.70) # 持倉平均兩兩相關性警示門檻
@@ -1640,6 +1657,21 @@ def evaluate_strategy(
     category_ok = after_cat_weight <= CATEGORY_MAX_WEIGHT
     category_capped = False
 
+    # ── 進場品質（P1）：新倉須為「突破」或「回檔」、不過度乖離、且強於大盤，杜絕追高 ──
+    volume = safe_float(last["Volume"])
+    vol_sma20 = safe_float(last.get("VOL_SMA20", 0))
+    rs20 = safe_float(meta.get("rs20_vs_spy", 0))
+    prev_high20 = safe_float(hist["RollingHigh20"].shift(1).iloc[-1]) if "RollingHigh20" in hist.columns else 0.0
+    breakout_ok = prev_high20 > 0 and close > prev_high20 and volume > vol_sma20 * ENTRY_BREAKOUT_VOL_MULT
+    pullback_ok_entry = sma20 > 0 and close <= sma20 * (1 + ENTRY_PULLBACK_SMA20_PCT)
+    not_extended = (atr <= 0) or (close <= sma20 + ENTRY_MAX_EXT_ATR * atr)
+    rs_ok_entry = (not ENTRY_REQUIRE_RS_POSITIVE) or rs20 > 0
+    entry_trigger_ok = (not ENTRY_REQUIRE_TRIGGER) or breakout_ok or pullback_ok_entry
+    entry_quality_ok = entry_trigger_ok and not_extended and rs_ok_entry
+
+    # 加碼只加贏家（P2）：現價須站上 進場 + N×R（且為正報酬），否則禁止往下攤平
+    add_profit_ok = (not ADD_REQUIRE_PROFIT) or (close >= entry + ADD_MIN_PROFIT_R * R)
+
     if held_shares > 0 and close < effective_stop:
         _bounds = {"RISK_EXIT": initial_stop, "TRAIL_EXIT": trail_stop, "BREAKEVEN_EXIT": floor_be}
         mode = max(_bounds, key=_bounds.get)                                # 標示是哪一道止損生效
@@ -1648,6 +1680,12 @@ def evaluate_strategy(
     elif (held_shares > 0 and not in_grace and EXIT_TREND_BREAK and sma200 > 0
           and close <= entry and close < sma200):
         action, mode, tp = "SELL_EXIT", "TREND_EXIT", round(close, 2)       # 虧損中且跌破年線→趨勢轉弱出場
+
+    elif (held_shares > 0 and not in_grace and TIME_STOP_ENABLE
+          and bars_since_entry >= TIME_STOP_BARS
+          and peak_close < entry + TIME_STOP_MIN_R * R                       # 進場後從未達到 +1R（呆滯）
+          and rs20 < 0):                                                     # 且已弱於大盤 → 釋出資金
+        action, mode, tp = "SELL_EXIT", "TIME_EXIT", round(close, 2)
 
     elif held_shares > 0 and close >= tp1 and scale_out_qty >= 1:
         action, mode, tp = "SELL_PARTIAL", "TAKE_PROFIT", round(scale_ref, 2)
@@ -1659,6 +1697,7 @@ def evaluate_strategy(
         avail_cash = cash - (total_assets * CASH_RESERVE_PCT)                                  # 與新進場一致
         after_weight = (current_mkt_value + close * qty) / total_assets if total_assets > 0 else 1.0
         if (score >= SCORE_BUY_ADD_THRESHOLD and can_add and pullback_ok and qty > 0
+                and add_profit_ok                                                              # P2：只對獲利中部位加碼，杜絕往下攤平
                 and avail_cash > close * qty                                                   # 補：現金檢查
                 and after_weight <= limits["max_weight"]                                       # 補：加碼後權重上限
                 and not recent_buy and not recent_sell                                         # 補：冷卻期（買/賣皆計）
@@ -1673,6 +1712,7 @@ def evaluate_strategy(
         heat_ok = portfolio_heat_pct < PORTFOLIO_HEAT_LIMIT_PCT * 100
         if (score >= SCORE_BUY_NOW_THRESHOLD and qty > 0 and avail_cash > close * qty
                 and heat_ok and not recent_buy and not recent_sell                             # 補：冷卻期（買/賣皆計）
+                and entry_quality_ok                                                           # P1：突破/回檔觸發 + 不追高 + 強於大盤
                 and market_regime.get("allow_new_position")):
             if category_ok:
                 action, mode, tp = "BUY_NOW", "TREND_MOMENTUM", close
@@ -1708,6 +1748,14 @@ def evaluate_strategy(
         "rs20_vs_spy": meta.get("rs20_vs_spy", 0),
         "adx": meta.get("adx", 0),
         "reasons": meta["reasons"],
+        # 進場品質診斷（P1/P2）：高分卻未觸發 BUY 時可據此說明原因
+        "breakout_ok": breakout_ok,
+        "pullback_ok_entry": pullback_ok_entry,
+        "not_extended": not_extended,
+        "rs_ok_entry": rs_ok_entry,
+        "entry_quality_ok": entry_quality_ok,
+        "add_profit_ok": add_profit_ok,
+        "bars_since_entry": int(bars_since_entry),
     }, " | ".join(meta["reasons"]) if meta["reasons"] else "No Signal"
 
 
@@ -2093,6 +2141,7 @@ US_SEMI_GROUPS: Dict[str, List[str]] = {
 
 
 @lru_cache(maxsize=1)
+@ttl_cache(86400, maxsize=16)
 def _fetch_etf_holdings(etf: str = "SOXX") -> List[str]:
     try:
         tk = yf.Ticker(etf)
@@ -2111,9 +2160,14 @@ def _fetch_etf_holdings(etf: str = "SOXX") -> List[str]:
 
 def get_us_semi_universe(include_etf: bool = False) -> List[str]:
     """
-    取得完整美股半導體宇宙（不使用 ETF）。
+    取得完整美股半導體宇宙。include_etf=True 時併入 SOXX/SMH 成分股，
+    讓宇宙隨新上市/權重變化自我更新（每日快取），不再只靠靜態硬編碼清單。
     """
-    return sorted(list(dict.fromkeys([normalize_ticker(t) for t in US_SEMI_UNIVERSE])))
+    tickers = [normalize_ticker(t) for t in US_SEMI_UNIVERSE]
+    if include_etf:
+        for etf in ("SOXX", "SMH"):
+            tickers += _fetch_etf_holdings(etf)
+    return sorted(list(dict.fromkeys(tickers)))
 
 
 def get_us_semi_category(ticker: str) -> str:
@@ -2289,11 +2343,21 @@ def _us_semi_score_one(ticker: str, sox_regime: Dict) -> Optional[Dict]:
         risk_dollars = DEFAULT_INITIAL_CAPITAL * LARGE_CAP_RISK_PER_TRADE_PCT
         suggested_qty = max(1, math.floor(risk_dollars / risk_per_share))
 
+        # 進場品質（P1）：突破/回檔觸發、不過度乖離、強於大盤 — 與 evaluate_strategy 一致
+        prev_high20 = safe_float(prev.get("RollingHigh20", 0))
+        breakout_ok = prev_high20 > 0 and close > prev_high20 and volume > vsma20 * ENTRY_BREAKOUT_VOL_MULT
+        pullback_ok = sma20 > 0 and close <= sma20 * (1 + ENTRY_PULLBACK_SMA20_PCT)
+        not_extended = (atr <= 0) or (close <= sma20 + ENTRY_MAX_EXT_ATR * atr)
+        rs_ok = (not ENTRY_REQUIRE_RS_POSITIVE) or rs20 > 0
+        entry_quality_ok = ((not ENTRY_REQUIRE_TRIGGER) or breakout_ok or pullback_ok) and not_extended and rs_ok
+
         return {
             "ticker": ticker,
             "category": get_us_semi_category(ticker),
             "score": score,
             "signal": signal,
+            "entry_quality_ok": entry_quality_ok,
+            "extended": not not_extended,
             "close": round(close, 2),
             "stop_loss": stop_loss,
             "tp1": tp1,
@@ -2520,6 +2584,18 @@ def apply_entry_risk_gates(cand: Dict, portfolio: List[Dict], total_assets: floa
     if cand.get("cooldown"):
         qty = 0
         notes.append(f"🚫 冷卻期（{COOLDOWN_DAYS} 日內剛賣出），暫不進場")
+
+    # ⑧ 進場品質（P1 新倉）/ 只加贏家（P2 加碼）— 與 evaluate_strategy 一致
+    if held:
+        if ADD_REQUIRE_PROFIT:
+            avg_cost = next((safe_float(p.get("AvgCost")) for p in portfolio
+                             if normalize_ticker(p.get("Ticker", "")) == tk), 0.0)
+            if avg_cost > 0 and close < avg_cost + ADD_MIN_PROFIT_R * risk_per_share:
+                qty = 0
+                notes.append("🚫 加碼需部位已獲利（不往下攤平）")
+    elif not cand.get("entry_quality_ok", True):
+        qty = 0
+        notes.append("🚫 進場品質未達（追高/無突破回檔/弱於大盤）")
 
     qty = max(0, int(qty))
     cand["suggested_qty"] = qty
@@ -2896,3 +2972,112 @@ def audit_universe(tickers: List[str]) -> pd.DataFrame:
             "日均額M": round(float(h["DollarVolume20"].iloc[-1]) / 1e6, 1) if ok else None,
         })
     return pd.DataFrame(rows).sort_values(["可取得資料", "Ticker"]).reset_index(drop=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 跨產業廣度發現掃描（P4）— 不限半導體，找出全市場的趨勢領導股
+# ═══════════════════════════════════════════════════════════════════════════════
+# 預設宇宙：跨產業、高流動性的動能領導股（互動掃描用，避免一次拉 500 檔被限流）。
+# 排程深掃可改傳 get_sp500_tickers() 解析後的完整清單。
+BROAD_UNIVERSE_DEFAULT: List[str] = [
+    # Mega-cap tech / AI
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "AVGO", "TSLA", "AMD", "NFLX",
+    "CRM", "ORCL", "ADBE", "NOW", "PLTR", "SNOW", "PANW", "CRWD", "ANET", "MU",
+    # Semis / hardware (代表性，完整半導體用半導體掃描)
+    "QCOM", "TXN", "INTC", "ARM", "MRVL", "LRCX", "KLAC", "AMAT", "ASML", "TSM",
+    # Consumer / internet / payments
+    "COST", "WMT", "HD", "MCD", "NKE", "SBUX", "V", "MA", "PYPL", "SHOP",
+    "UBER", "ABNB", "BKNG", "DIS", "DASH",
+    # Financials / industrials / energy / health
+    "JPM", "GS", "BRK-B", "CAT", "DE", "GE", "BA", "XOM", "CVX", "LLY",
+    "UNH", "ISRG", "NVO", "VRTX", "REGN",
+]
+
+
+def _broad_score_one(ticker: str, market_regime: Dict) -> Optional[Dict]:
+    """跨產業單檔評分（複用 rank_symbol_strength + 進場品質閘），僅回傳達標的買進候選。"""
+    ticker = normalize_ticker(ticker)
+    try:
+        hist = get_unified_analysis(ticker)
+        if hist is None or hist.empty or len(hist) < 60:
+            return None
+        score, meta = rank_symbol_strength(ticker, hist, market_regime)
+        if not (meta.get("trend_ok") and meta.get("liquid_ok")) or meta.get("earnings_blocked"):
+            return None
+
+        last = hist.iloc[-1]
+        prev = hist.iloc[-2] if len(hist) >= 2 else last
+        close = safe_float(last["Close"])
+        atr = safe_float(last.get("ATR", 0))
+        sma20 = safe_float(last["SMA20"])
+        volume = safe_float(last["Volume"])
+        vsma20 = safe_float(last.get("VOL_SMA20", 0))
+        rs20 = safe_float(meta.get("rs20_vs_spy", 0))
+
+        prev_high20 = safe_float(prev.get("RollingHigh20", 0))
+        breakout_ok = prev_high20 > 0 and close > prev_high20 and volume > vsma20 * ENTRY_BREAKOUT_VOL_MULT
+        pullback_ok = sma20 > 0 and close <= sma20 * (1 + ENTRY_PULLBACK_SMA20_PCT)
+        not_extended = (atr <= 0) or (close <= sma20 + ENTRY_MAX_EXT_ATR * atr)
+        rs_ok = (not ENTRY_REQUIRE_RS_POSITIVE) or rs20 > 0
+        entry_quality_ok = ((not ENTRY_REQUIRE_TRIGGER) or breakout_ok or pullback_ok) and not_extended and rs_ok
+
+        if score < SCORE_BUY_NOW_THRESHOLD or not entry_quality_ok:
+            return None
+
+        stop = round(max(0.01, close - EXIT_INIT_STOP_ATR * atr) if atr > 0 else close * 0.93, 2)
+        tp1 = round(close + EXIT_TP1_R * EXIT_INIT_STOP_ATR * atr if atr > 0 else close * 1.10, 2)
+        prof = get_symbol_profile(ticker)
+        signal = "STRONG_BUY" if score >= SCORE_BUY_ADD_THRESHOLD else "BUY"
+        return {
+            "ticker": ticker,
+            "score": round(score, 2),
+            "signal": signal,
+            "close": round(close, 2),
+            "stop_loss": stop,
+            "tp1": tp1,
+            "rs20_vs_spy": round(rs20, 2),
+            "adx": round(safe_float(meta.get("adx", 0)), 1),
+            "sector": prof.get("sector", ""),
+            "trigger": "突破" if breakout_ok else "回檔",
+            "reasons": meta.get("reasons", [])[:4],
+        }
+    except Exception:
+        return None
+
+
+def run_broad_scanner(universe: Optional[List[str]] = None,
+                      top_n: int = 15,
+                      max_tickers: int = 120) -> Dict:
+    """
+    跨產業廣度發現掃描：對給定宇宙套用趨勢動能評分 + 進場品質閘，回傳全市場買進候選。
+    universe 預設為 BROAD_UNIVERSE_DEFAULT（互動用）；排程深掃可傳入更大的清單（會截到 max_tickers）。
+    """
+    uni = [normalize_ticker(t) for t in (universe or BROAD_UNIVERSE_DEFAULT)]
+    uni = list(dict.fromkeys(uni))[:max_tickers]
+    market_regime = get_market_regime()
+
+    results = []
+    with _cf.ThreadPoolExecutor(max_workers=US_SEMI_SCAN_WORKERS) as ex:
+        futs = {ex.submit(_broad_score_one, tk, market_regime): tk for tk in uni}
+        for fut in _cf.as_completed(futs):
+            try:
+                r = fut.result()
+            except Exception:
+                r = None
+            if r:
+                results.append(r)
+
+    results.sort(key=lambda x: -x["score"])
+    strong = [r for r in results if r["signal"] == "STRONG_BUY"]
+    buy = [r for r in results if r["signal"] == "BUY"]
+    eastern = pytz.timezone("US/Eastern")
+    return {
+        "strong_buy": strong,
+        "buy": buy,
+        "all_results": results[:top_n],
+        "regime": market_regime.get("regime"),
+        "allow_new_position": market_regime.get("allow_new_position"),
+        "total_scanned": len(uni),
+        "total_hits": len(results),
+        "scan_date": datetime.now(eastern).strftime("%Y-%m-%d %H:%M"),
+    }

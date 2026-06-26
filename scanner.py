@@ -20,7 +20,9 @@ from core import (
     maybe_log_daily_history,
     normalize_ticker,
     run_auto_scanner,
+    run_broad_scanner,
     run_us_semi_scanner,
+    send_telegram_msg,
     send_us_semi_tg,
 )
 
@@ -29,6 +31,7 @@ from core import (
 #   python scanner.py            → 標準持倉/Watchlist 掃描
 #   python scanner.py --semi     → 美股半導體宇宙全掃描（台灣 09:00 執行）
 SEMI_MODE = "--semi" in sys.argv
+BROAD_MODE = "--broad" in sys.argv
 
 
 def run_portfolio_scan():
@@ -111,8 +114,33 @@ def run_semi_scan():
         print("本日無強勢半導體標的，略過 Telegram 推播。")
 
 
+def run_broad_scan():
+    """跨產業廣度發現掃描（找全市場趨勢領導股），強勢候選透過 Telegram 推播。"""
+    print("===== 跨產業廣度發現掃描 =====")
+    result = run_broad_scanner()
+    print(f"市場狀態: {result['regime']} | 開放新倉: {result['allow_new_position']}")
+    print(f"掃描: {result['total_scanned']} 檔 | 買進候選: {result['total_hits']} 檔")
+    for r in result["strong_buy"] + result["buy"]:
+        print(f"  {r['signal']:10s} {r['ticker']:6s} {r['score']:.1f}pt ${r['close']} "
+              f"[{r['trigger']}] RS{r['rs20_vs_spy']:+.1f}% {r.get('sector','')}")
+
+    hits = result["strong_buy"] + result["buy"]
+    if hits and result.get("allow_new_position"):
+        lines = ["📡 *跨產業發現掃描*", f"市場 {result['regime']}｜候選 {len(hits)} 檔", ""]
+        for r in hits[:15]:
+            emoji = "🔴" if r["signal"] == "STRONG_BUY" else "🟢"
+            lines.append(f"{emoji} *{r['ticker']}* {r['score']:.1f}pt ${r['close']} "
+                         f"[{r['trigger']}] RS{r['rs20_vs_spy']:+.1f}%")
+        ok = send_telegram_msg("\n".join(lines))
+        print(f"Telegram: {'✅ 已發送' if ok else '❌ 發送失敗'}")
+    else:
+        print("無符合條件之新倉候選（或市場狀態不開放新倉），略過 Telegram。")
+
+
 if __name__ == "__main__":
     if SEMI_MODE:
         run_semi_scan()
+    elif BROAD_MODE:
+        run_broad_scan()
     else:
         run_portfolio_scan()
