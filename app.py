@@ -1102,6 +1102,11 @@ with tab1:
 
         st.markdown('<div class="qsec">持倉明細</div>', unsafe_allow_html=True)
 
+        if any(p.get("SplitAdjusted") for p in portfolio):
+            _sa = ", ".join(p["Ticker"] for p in portfolio if p.get("SplitAdjusted"))
+            st.caption(f"🔀 {_sa}：偵測到進場後股票分割，股數/成本已自動對齊還原權值價。"
+                       f"若你已手動調整過交易股數，請設環境變數 AUTO_SPLIT_ADJUST=0 以免重複調整。")
+
         for i, p in enumerate(sorted(portfolio, key=lambda x: x["MarketValue"], reverse=True)):
             sig = str(p.get("Signal", "WATCH")).upper()
             pl = float(p.get("Unrealized", 0) or 0)

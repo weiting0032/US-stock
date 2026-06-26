@@ -110,6 +110,7 @@ ALERT_MIN_PRICE_CHANGE = get_env_float("ALERT_MIN_PRICE_CHANGE", 1.0)
 ALERT_MIN_SCORE_CHANGE = get_env_float("ALERT_MIN_SCORE_CHANGE", 0.8)
 
 MARKET_CACHE_TTL = get_env_int("MARKET_CACHE_TTL", 300)  # 行情快取存活秒數（盤中報價刷新節奏）
+AUTO_SPLIT_ADJUST = get_env_int("AUTO_SPLIT_ADJUST", 1)   # 1=自動把進場後分割對齊到還原權值價（若你已手動改交易股數，設 0）
 
 MIN_AVG_DOLLAR_VOLUME = get_env_float("MIN_AVG_DOLLAR_VOLUME", 20000000)
 MIN_PRICE = get_env_float("MIN_PRICE", 10)
@@ -561,6 +562,7 @@ def clear_market_cache():
     _get_benchmark_close.cache_clear()
     get_next_earnings_date.cache_clear()
     get_symbol_profile.cache_clear()
+    _get_splits.cache_clear()
 
 
 # ===============================
@@ -1387,9 +1389,70 @@ def rank_symbol_strength(ticker: str, hist: pd.DataFrame, market_regime: Optiona
 # ===============================
 # Portfolio / Scanner
 # ===============================
+@ttl_cache(86400, maxsize=512)
+def _get_splits(ticker: str) -> tuple:
+    """回傳 ((split_date_naive_normalized, ratio), ...)；ratio 為分割倍數（10:1→10.0、1:10→0.1）。"""
+    try:
+        s = yf.Ticker(normalize_ticker(ticker)).splits
+        if s is None or len(s) == 0:
+            return ()
+        out = []
+        for d, r in s.items():
+            if r and float(r) > 0:
+                dd = pd.Timestamp(d)
+                if dd.tzinfo is not None:
+                    dd = dd.tz_localize(None)
+                out.append((dd.normalize(), float(r)))
+        return tuple(out)
+    except Exception:
+        return ()
+
+
+def _split_factor_after(ticker: str, after_dt) -> float:
+    """進場後（嚴格大於 after_dt）所有分割倍數的乘積；用來把名目交易對齊到還原權值價序列。"""
+    splits = _get_splits(ticker)
+    if not splits or after_dt is None:
+        return 1.0
+    try:
+        ref = pd.Timestamp(after_dt)
+        if ref.tzinfo is not None:
+            ref = ref.tz_localize(None)
+        ref = ref.normalize()
+    except Exception:
+        return 1.0
+    factor = 1.0
+    for d, r in splits:
+        if d > ref:
+            factor *= r
+    return factor
+
+
+def _split_adjust(trades_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    把每筆交易依「該筆成交日之後發生的分割」對齊：Shares ×= factor、Price ÷= factor
+    （金額不變）。使名目交易與 auto_adjust 的還原權值價序列一致，避免分割後出現
+    假停損/損益錯誤/FIFO 賣超。預設啟用，AUTO_SPLIT_ADJUST=0 可關閉（若你已手動改股數）。
+    """
+    if not AUTO_SPLIT_ADJUST or trades_df is None or trades_df.empty:
+        return trades_df
+    if "Ticker" not in trades_df.columns or "TradeDateTime" not in trades_df.columns:
+        return trades_df
+    df = trades_df.copy()
+    for tk in df["Ticker"].dropna().unique().tolist():
+        if not _get_splits(tk):
+            continue
+        for idx in df.index[df["Ticker"] == tk]:
+            factor = _split_factor_after(tk, df.at[idx, "TradeDateTime"])
+            if factor != 1.0:
+                df.at[idx, "Shares"] = safe_float(df.at[idx, "Shares"]) * factor
+                df.at[idx, "Price"] = safe_float(df.at[idx, "Price"]) / factor
+    return df
+
+
 def get_current_holding_shares(trades_df: pd.DataFrame, ticker: str) -> float:
     if trades_df.empty:
         return 0.0
+    trades_df = _split_adjust(trades_df)
     t = trades_df[trades_df["Ticker"] == normalize_ticker(ticker)]
     return max(
         0.0,
@@ -1401,6 +1464,7 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
     if trades_df.empty:
         return [], float(initial_capital), 0.0
 
+    trades_df = _split_adjust(trades_df)   # 進場後分割對齊（A）：股數/成本與還原權值價一致
     cash = float(initial_capital)
     portfolio = []
     total_realized_pl = 0.0
@@ -1464,6 +1528,7 @@ def build_portfolio(trades_df: pd.DataFrame, initial_capital: float) -> Tuple[Li
                 "PriceStale": price_stale,
                 "EntryDate": entry_date,
                 "EntryShares": round(run_bought, 4),
+                "SplitAdjusted": _split_factor_after(ticker, entry_date) != 1.0,
             })
 
     return portfolio, cash, total_realized_pl
@@ -2462,6 +2527,7 @@ def _held_tickers_from_trades(trades_df) -> set:
     if trades_df is None or getattr(trades_df, "empty", True):
         return set()
     try:
+        trades_df = _split_adjust(trades_df)   # 分割對齊：避免分割後淨股數計算偏差
         net: Dict[str, float] = {}
         for _, row in trades_df.iterrows():
             tk = normalize_ticker(row.get("Ticker", ""))
@@ -2909,6 +2975,7 @@ def calc_realized_trade_stats(trades_df: pd.DataFrame) -> Dict:
     if trades_df is None or trades_df.empty:
         return empty
 
+    trades_df = _split_adjust(trades_df)   # 分割對齊：FIFO 配對不因分割產生賣超/錯誤盈虧
     pnls: List[float] = []
     for ticker in trades_df["Ticker"].dropna().unique().tolist():
         tdf = trades_df[trades_df["Ticker"] == ticker].sort_values("TradeDateTime")
