@@ -1,6 +1,8 @@
+import functools
 import json
 import math
 import os
+import threading
 import time
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -16,6 +18,42 @@ try:
     import streamlit as st
 except Exception:
     st = None
+
+
+def ttl_cache(ttl_seconds: float, maxsize: int = 1024):
+    """執行緒安全的 TTL 快取（提供 .cache_clear()，與 lru_cache 介面相容）。
+
+    用於即時行情類函式：lru_cache 在 Streamlit 常駐進程中永不過期，會讓盤中報價
+    凍結整個 session（NAV／訊號全是進程啟動當下的舊價）。改用本快取後，超過 TTL
+    會自動重抓；且不依賴 Streamlit ScriptRunContext，在 ThreadPoolExecutor 掃描
+    與 GitHub Actions 短進程中皆正常運作。
+    """
+    def decorator(fn):
+        store: Dict[tuple, tuple] = {}
+        lock = threading.Lock()
+
+        @functools.wraps(fn)
+        def wrapper(*args):
+            now = time.time()
+            with lock:
+                hit = store.get(args)
+                if hit is not None and now - hit[1] < ttl_seconds:
+                    return hit[0]
+            value = fn(*args)
+            with lock:
+                if len(store) >= maxsize:
+                    store.clear()
+                store[args] = (value, now)
+            return value
+
+        def cache_clear():
+            with lock:
+                store.clear()
+
+        wrapper.cache_clear = cache_clear
+        return wrapper
+
+    return decorator
 
 
 # ===============================
@@ -70,6 +108,8 @@ PRE_ALERT_PCT = get_env_float("PRE_ALERT_PCT", 0.01)
 ALERT_MIN_MINUTES = get_env_int("ALERT_MIN_MINUTES", 30)
 ALERT_MIN_PRICE_CHANGE = get_env_float("ALERT_MIN_PRICE_CHANGE", 1.0)
 ALERT_MIN_SCORE_CHANGE = get_env_float("ALERT_MIN_SCORE_CHANGE", 0.8)
+
+MARKET_CACHE_TTL = get_env_int("MARKET_CACHE_TTL", 300)  # 行情快取存活秒數（盤中報價刷新節奏）
 
 MIN_AVG_DOLLAR_VOLUME = get_env_float("MIN_AVG_DOLLAR_VOLUME", 20000000)
 MIN_PRICE = get_env_float("MIN_PRICE", 10)
@@ -231,11 +271,17 @@ def send_telegram_msg(message: str) -> bool:
     if not TG_TOKEN or not TG_CHAT_ID:
         return False
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        data = res.json()
-        return bool(data.get("ok"))
+        res = requests.post(
+            url,
+            json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        if bool(res.json().get("ok")):
+            return True
+        # Markdown 解析失敗（標的含 _ / - 等特殊字元時常見）→ 退回純文字重送，避免整則漏發
+        res = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message}, timeout=10)
+        return bool(res.json().get("ok"))
     except Exception:
         return False
 
@@ -286,16 +332,8 @@ def get_sp500_tickers() -> List[str]:
         return ["AAPL - Apple", "MSFT - Microsoft", "NVDA - NVIDIA", "AMZN - Amazon", "TSLA - Tesla"]
 
 
-def _fetch_wespai_price(symbol: str) -> Optional[float]:
-    return None
-
-
-@lru_cache(maxsize=1024)
+@ttl_cache(MARKET_CACHE_TTL, maxsize=1024)
 def get_last_price(symbol: str) -> Optional[float]:
-    wespai_price = _fetch_wespai_price(symbol)
-    if wespai_price is not None:
-        return wespai_price
-
     try:
         hist = yf.Ticker(normalize_ticker(symbol)).history(period="5d", auto_adjust=True)
         if not hist.empty:
@@ -382,7 +420,9 @@ def is_earnings_blocked(symbol: str) -> bool:
         if pd.isna(next_date):
             return False
         days = (next_date.date() - datetime.now().date()).days
-        return abs(days) <= EARNINGS_BLOCK_DAYS
+        # 只擋「即將到來」的財報（今天起算 EARNINGS_BLOCK_DAYS 日內）。
+        # 過去用 abs(days) 會把 yfinance 偶爾回傳的「上一次」財報日當成即將財報而誤擋進場。
+        return 0 <= days <= EARNINGS_BLOCK_DAYS
     except Exception:
         return False
 
@@ -392,7 +432,7 @@ def _wilder(s: pd.Series, period: int) -> pd.Series:
     return s.ewm(alpha=1.0 / period, adjust=False).mean()
 
 
-@lru_cache(maxsize=4)
+@ttl_cache(MARKET_CACHE_TTL, maxsize=8)
 def _get_benchmark_close(symbol: str = "SPY", period: str = "2y") -> Optional[pd.Series]:
     """取得對標收盤序列並快取，避免在每檔 get_unified_analysis 內重複下載 SPY。"""
     try:
@@ -402,7 +442,7 @@ def _get_benchmark_close(symbol: str = "SPY", period: str = "2y") -> Optional[pd
         return None
 
 
-@lru_cache(maxsize=1024)
+@ttl_cache(MARKET_CACHE_TTL, maxsize=1024)
 def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
     try:
         symbol = normalize_ticker(symbol)
@@ -923,8 +963,8 @@ def save_trade(trade_dt, ticker, trade_type, price, shares, note="", fee=DEFAULT
     if not ticker or trade_type not in ["BUY", "SELL"] or price <= 0 or shares <= 0:
         return False, "輸入無效"
 
-    trades_df = load_trades()
-    holding_shares = get_current_holding_shares(trades_df, ticker)
+    # 賣超檢查用「即時」交易資料（繞過 ttl=120 快取），避免短時間連續下單因快取未刷新而賣超
+    holding_shares = get_current_holding_shares(_load_trades_raw(), ticker)
     if trade_type == "SELL" and shares > holding_shares + 1e-9:
         return False, f"賣出超過持股 {holding_shares:.4f}"
 
@@ -2097,7 +2137,7 @@ US_SEMI_SCORE_BUY = get_env_float("US_SEMI_SCORE_BUY", 3.5)
 US_SEMI_SCORE_WATCH = get_env_float("US_SEMI_SCORE_WATCH", 2.0)
 US_SEMI_MIN_DOLLAR_VOL = get_env_float("US_SEMI_MIN_DOLLAR_VOL", 20_000_000)
 US_SEMI_MIN_PRICE = get_env_float("US_SEMI_MIN_PRICE", 10.0)
-US_SEMI_SCAN_WORKERS = get_env_int("US_SEMI_SCAN_WORKERS", 10)
+US_SEMI_SCAN_WORKERS = get_env_int("US_SEMI_SCAN_WORKERS", 6)  # 過高併發易觸發 yfinance 限流→該檔靜默漏掉
 US_SEMI_TOP_N = get_env_int("US_SEMI_TOP_N", 15)
 
 def _get_sox_regime() -> Dict:
@@ -2673,7 +2713,7 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
     if dedup_window_days is None:
         dedup_window_days = lookahead_days
     cols = ["Ticker", "DateTime", "Action", "StrategyMode", "Source", "Score",
-            "EntryPx", "FwdRetPct", "MFEPct", "MAEPct", "Win"]
+            "EntryPx", "FwdRetPct", "StopRetPct", "MFEPct", "MAEPct", "Win"]
     sig = load_signals()
     if sig is None or sig.empty:
         return pd.DataFrame(columns=cols)
@@ -2696,6 +2736,7 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
         if hist is None or hist.empty:
             continue
         closes = hist["Close"]
+        lows = hist["Low"]
         idx = hist.index
         try:
             idx_dates = pd.DatetimeIndex(idx.tz_localize(None)).normalize()
@@ -2719,7 +2760,16 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
             fwd_pos = min(pos + lookahead_days, len(idx) - 1)
             fwd_px = float(closes.iloc[fwd_pos])
             window = closes.iloc[pos:fwd_pos + 1]
+            low_window = lows.iloc[pos:fwd_pos + 1]
             ret = (fwd_px / entry_px - 1) * 100
+
+            # 套用停損後報酬：買進類訊號若窗口內最低價曾觸及當時記錄的 StopLoss，
+            # 視為在停損價出場（原始 FwdRetPct 未停損，會高估虧損端、灌水 edge）。
+            stop_px = safe_float(s.get("StopLoss")) if "StopLoss" in s.index else 0.0
+            stop_ret = ret
+            if bucket == "BUY" and stop_px > 0 and float(low_window.min()) <= stop_px:
+                stop_ret = (stop_px / entry_px - 1) * 100
+
             rows.append({
                 "Ticker": tk,
                 "DateTime": s["DateTime"],
@@ -2729,6 +2779,7 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
                 "Score": safe_float(s["Score"]) if pd.notna(s["Score"]) else None,
                 "EntryPx": round(entry_px, 2),
                 "FwdRetPct": round(ret, 2),
+                "StopRetPct": round(stop_ret, 2),  # 觸及停損即視為停損出場後的報酬
                 "MFEPct": round((float(window.max()) / entry_px - 1) * 100, 2),  # 最大有利偏移
                 "MAEPct": round((float(window.min()) / entry_px - 1) * 100, 2),  # 最大不利偏移→驗證停損
                 "Win": ret > 0,
@@ -2759,14 +2810,16 @@ def summarize_signal_edge(outcomes: Optional[pd.DataFrame] = None,
         labels=["<3.5", "3.5–4.5", "4.5–5.5", "≥5.5"],
     )
     g = buys.groupby("分數區間", observed=True)
-    summary = pd.DataFrame({
+    cols = {
         "樣本數": g["FwdRetPct"].count(),
         "勝率%": (g["Win"].mean() * 100).round(1),
         f"平均{lookahead_days}日報酬%": g["FwdRetPct"].mean().round(2),
         "中位數%": g["FwdRetPct"].median().round(2),
-        "平均MAE%": g["MAEPct"].mean().round(2),
-    })
-    return summary.reset_index()
+    }
+    if "StopRetPct" in buys.columns:
+        cols["停損後平均%"] = g["StopRetPct"].mean().round(2)  # 貼近實盤（觸停損即出場）的報酬
+    cols["平均MAE%"] = g["MAEPct"].mean().round(2)
+    return pd.DataFrame(cols).reset_index()
 
 
 def calc_realized_trade_stats(trades_df: pd.DataFrame) -> Dict:

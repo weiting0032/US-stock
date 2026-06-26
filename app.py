@@ -12,10 +12,16 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import streamlit as st
 
+try:
+    from streamlit_autorefresh import st_autorefresh
+except Exception:
+    st_autorefresh = None
+
 from core import (
     DEFAULT_COMMISSION,
     DEFAULT_INITIAL_CAPITAL,
     DEFAULT_SLIPPAGE_PCT,
+    MARKET_CACHE_TTL,
     US_SEMI_SCORE_BUY,
     US_SEMI_SCORE_STRONG,
     US_SEMI_SCORE_WATCH,
@@ -24,6 +30,9 @@ from core import (
     CORR_LOOKBACK_DAYS,
     _get_sox_regime,
     _us_semi_score_one,
+    _annotate_semi_candidate,
+    _held_tickers_from_trades,
+    apply_entry_risk_gates,
     build_portfolio,
     audit_universe,
     build_trade_preview,
@@ -978,6 +987,11 @@ perf = calculate_performance_metrics(history_df)
 
 session = get_market_session()
 
+# 盤中（PREMARKET/REGULAR/AFTERMARKET）自動刷新：每 MARKET_CACHE_TTL 秒重跑，
+# 配合行情 TTL 快取自然到期重抓，讓 NAV／報價／訊號不再凍結在進程啟動當下。
+if st_autorefresh is not None and session != "CLOSED":
+    st_autorefresh(interval=MARKET_CACHE_TTL * 1000, key="market_refresh")
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Top header
 # ─────────────────────────────────────────────────────────────────────────────
@@ -996,7 +1010,8 @@ st.markdown(f"""
 # ─────────────────────────────────────────────────────────────────────────────
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 c1.metric("NAV 總資產", fmt_dollar(total_assets))
-c2.metric("總損益", fmt_dollar(total_pl), f"{(total_pl / initial_capital * 100):+.2f}%")
+_pl_pct = (total_pl / initial_capital * 100) if initial_capital > 0 else 0.0
+c2.metric("總損益", fmt_dollar(total_pl), f"{_pl_pct:+.2f}%")
 c3.metric("已實現", fmt_dollar(total_realized_pl))
 c4.metric("未實現", fmt_dollar(total_unrealized_pl))
 c5.metric("現金", fmt_dollar(cash))
@@ -1546,6 +1561,8 @@ with tab5:
   </div>
 </div>
 """, unsafe_allow_html=True)
+    st.caption("Sharpe 以每日 NAV 報酬年化（×√252、未扣無風險利率），NAV 每日僅記一筆故為近似值；"
+               "「上漲日%」為 NAV 上漲天數比例，非交易勝率 — 真實已平倉勝率請見「訊號驗證」頁。")
 
     if not history_df.empty and len(history_df) >= 2:
         st.markdown('<div class="qsec">NAV vs SPY 曲線</div>', unsafe_allow_html=True)
@@ -1761,6 +1778,20 @@ with tab6:
                 )
 
         _prog_bar.empty()
+
+        # 套用與排程引擎 (run_us_semi_scanner) 一致的風控閘：標註持倉/集中度/冷卻後，
+        # 用即時權益計算最終可買股數。過去 UI 只跑 _us_semi_score_one，顯示的建議股數
+        # 用固定本金、無視 regime/現金/權重/產業/熱度/冷卻，與你的實際進場引擎不一致。
+        try:
+            _exposure = {c["category"]: c for c in calc_category_exposure(portfolio, total_assets)}
+            _held_set = _held_tickers_from_trades(trades_df)
+            _cap_pct = CATEGORY_MAX_WEIGHT * 100
+            _heat_pct = heat_info.get("heat_pct", 0.0)
+            for _r in _results:
+                _annotate_semi_candidate(_r, _exposure, _held_set, trades_df, _cap_pct)
+                apply_entry_risk_gates(_r, portfolio, total_assets, cash, _heat_pct, market_regime)
+        except Exception:
+            pass
 
         _results.sort(key=lambda x: -x["score"])
         _strong = [r for r in _results if r["signal"] == "STRONG_BUY"]
