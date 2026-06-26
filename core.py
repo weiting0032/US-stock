@@ -1984,6 +1984,7 @@ US_SEMI_CATEGORY_MAP: Dict[str, str] = {
     "CRDO": "Datacenter Connectivity",
     "ALAB": "Datacenter Networking",
     "ARM": "CPU IP / Architecture",
+    "SPCX": "AI / GPU / CPU",
 
     # ── Analog / Power / Mixed Signal / MCU ──────────────────────────────
     "ADI": "Analog / Mixed Signal",
