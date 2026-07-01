@@ -1233,65 +1233,60 @@ def log_semi_signal_snapshots(results: List[Dict], sox_regime: Dict,
 # ===============================
 # Market regime
 # ===============================
-def get_market_regime() -> Dict:
-    spy = get_unified_analysis("SPY")
-    qqq = get_unified_analysis("QQQ")
-    vix = get_unified_analysis("^VIX")
+def _regime_from_indicator_rows(spy_last, qqq_last, vix_last) -> Dict:
+    """由 SPY/QQQ/VIX「單根指標列」計算市場 regime。
 
-    if spy is None or spy.empty or qqq is None or qqq.empty:
+    抽成獨立函式作為單一真相來源：即時路徑 get_market_regime() 傳 .iloc[-1]，
+    回測 (backtest.py) 傳「截至該歷史日」的對應列，兩者評分邏輯保證一致、不漂移。
+    spy_last / qqq_last / vix_last 為 pandas 列（Series）或 None。
+    """
+    if spy_last is None or qqq_last is None:
         return {
             "regime": "UNKNOWN",
             "score": 0,
             "allow_new_position": True,
             "allow_add_position": True,
             "risk_multiplier": 0.5,
-            "vix": None
+            "vix": None,
         }
 
     score = 0
-    if safe_float(spy.iloc[-1]["Close"]) > safe_float(spy.iloc[-1]["SMA200"]):
+    if safe_float(spy_last["Close"]) > safe_float(spy_last["SMA200"]):
         score += 1
-    if safe_float(spy.iloc[-1]["SMA50"]) > safe_float(spy.iloc[-1]["SMA200"]):
+    if safe_float(spy_last["SMA50"]) > safe_float(spy_last["SMA200"]):
         score += 1
-    if safe_float(qqq.iloc[-1]["Close"]) > safe_float(qqq.iloc[-1]["SMA200"]):
+    if safe_float(qqq_last["Close"]) > safe_float(qqq_last["SMA200"]):
         score += 1
-    if safe_float(spy.iloc[-1]["MACD_Hist"]) > 0:
+    if safe_float(spy_last["MACD_Hist"]) > 0:
         score += 1
 
     vix_ok, vix_level = True, None
-    if vix is not None and not vix.empty:
-        vix_level = safe_float(vix.iloc[-1]["Close"])
+    if vix_last is not None:
+        vix_level = safe_float(vix_last["Close"])
         if vix_level >= 25:
             vix_ok = False
         elif vix_level < 20:
             score += 1
 
     if score >= 4 and vix_ok:
-        return {
-            "regime": "RISK_ON",
-            "score": score,
-            "allow_new_position": True,
-            "allow_add_position": True,
-            "risk_multiplier": 1.0,
-            "vix": vix_level
-        }
+        return {"regime": "RISK_ON", "score": score, "allow_new_position": True,
+                "allow_add_position": True, "risk_multiplier": 1.0, "vix": vix_level}
     if score <= 2:
-        return {
-            "regime": "RISK_OFF",
-            "score": score,
-            "allow_new_position": False,
-            "allow_add_position": False,
-            "risk_multiplier": 0.0,
-            "vix": vix_level
-        }
-    return {
-        "regime": "NEUTRAL",
-        "score": score,
-        "allow_new_position": False,
-        "allow_add_position": True,
-        "risk_multiplier": 0.5,
-        "vix": vix_level
-    }
+        return {"regime": "RISK_OFF", "score": score, "allow_new_position": False,
+                "allow_add_position": False, "risk_multiplier": 0.0, "vix": vix_level}
+    return {"regime": "NEUTRAL", "score": score, "allow_new_position": False,
+            "allow_add_position": True, "risk_multiplier": 0.5, "vix": vix_level}
+
+
+def get_market_regime() -> Dict:
+    spy = get_unified_analysis("SPY")
+    qqq = get_unified_analysis("QQQ")
+    vix = get_unified_analysis("^VIX")
+
+    spy_last = spy.iloc[-1] if spy is not None and not spy.empty else None
+    qqq_last = qqq.iloc[-1] if qqq is not None and not qqq.empty else None
+    vix_last = vix.iloc[-1] if vix is not None and not vix.empty else None
+    return _regime_from_indicator_rows(spy_last, qqq_last, vix_last)
 
 
 # ===============================
@@ -2964,10 +2959,14 @@ def summarize_signal_edge(outcomes: Optional[pd.DataFrame] = None,
     return pd.DataFrame(cols).reset_index()
 
 
-def calc_realized_trade_stats(trades_df: pd.DataFrame) -> Dict:
+def calc_realized_trade_stats(trades_df: pd.DataFrame, split_adjust: bool = True) -> Dict:
     """
     以 FIFO 配對計算「已平倉」交易的真實統計：勝率、平均盈虧、盈虧比、獲利因子、期望值。
     取代以「上漲天數比例」當勝率的誤導指標。每個 FIFO 配對視為一筆平倉結果（lot 層級）。
+
+    split_adjust：實盤交易以「名目價」記錄，須對齊到還原權值價（預設 True）。
+      回測產生的交易本就成交在 auto_adjust 還原權值價序列上，若再對齊會「二次分割調整」
+      → 含分割窗口（如 NVDA 2024/06 10:1）的已實現統計會被扭曲，故回測須傳 False。
     """
     empty = {"closed_trades": 0, "win_rate": None, "avg_win": None, "avg_loss": None,
              "payoff_ratio": None, "profit_factor": None, "expectancy": None,
@@ -2975,7 +2974,8 @@ def calc_realized_trade_stats(trades_df: pd.DataFrame) -> Dict:
     if trades_df is None or trades_df.empty:
         return empty
 
-    trades_df = _split_adjust(trades_df)   # 分割對齊：FIFO 配對不因分割產生賣超/錯誤盈虧
+    if split_adjust:
+        trades_df = _split_adjust(trades_df)   # 分割對齊：FIFO 配對不因分割產生賣超/錯誤盈虧
     pnls: List[float] = []
     for ticker in trades_df["Ticker"].dropna().unique().tolist():
         tdf = trades_df[trades_df["Ticker"] == ticker].sort_values("TradeDateTime")
