@@ -115,7 +115,9 @@ def prepare_data(tickers: List[str], progress: bool = False):
     regime = {s: get_unified_analysis(s) for s in ("SPY", "QQQ", "^VIX")}
     benchmarks = {}
     for s in ("SOXX", "SPY"):
-        bf = regime.get(s) or get_unified_analysis(s)
+        bf = regime.get(s)                     # 不可用 `or`：DataFrame 的布林值不明確會拋錯
+        if bf is None:
+            bf = get_unified_analysis(s)
         if bf is not None and not bf.empty:
             benchmarks[s] = bf
     return data, regime, benchmarks

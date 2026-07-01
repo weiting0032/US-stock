@@ -163,7 +163,9 @@ def run_backtest(
         benchmark_symbols = benchmark_symbols or ["SOXX", "SPY"]
         benchmarks = {}
         for s in benchmark_symbols:
-            bf = regime_frames.get(s) or get_unified_analysis(s)
+            bf = regime_frames.get(s)          # 不可用 `or`：DataFrame 的布林值不明確會拋錯
+            if bf is None:
+                bf = get_unified_analysis(s)
             if bf is not None and not bf.empty:
                 benchmarks[s] = bf
 
