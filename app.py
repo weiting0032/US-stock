@@ -71,6 +71,8 @@ from core import (
     send_us_semi_tg,
     set_watchlist_enabled,
 )
+import backtest as bt
+import optimize as opt
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config
@@ -1024,8 +1026,8 @@ st.markdown("<hr class='qdiv'>", unsafe_allow_html=True)
 # ─────────────────────────────────────────────────────────────────────────────
 # Tabs
 # ─────────────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效", "🔬 美股半導體", "🧪 訊號驗證"
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "📊 持倉", "🔍 掃描器", "📈 策略", "📝 交易", "⚡ 績效", "🔬 美股半導體", "🧪 訊號驗證", "🔎 回測"
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2094,6 +2096,181 @@ with tab7:
         else:
             st.success("✅ 全部代碼皆可取得資料。")
         st.dataframe(_audit, use_container_width=True, hide_index=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TAB 8 — Backtest & Optimization（回測 / walk-forward 最佳化）
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab8:
+    st.markdown('<div class="qsec">🔎 策略回測（重放實盤 evaluate_strategy）</div>', unsafe_allow_html=True)
+    st.caption("逐日回放你現行的進出場邏輯於歷史資料，對標買進持有 SOXX/SPY。"
+               "資料來自 yfinance（約 2 年），含分割/財報等近似限制，結果為研究參考、非未來保證。")
+
+    _bt_holdings = [p["Ticker"] for p in portfolio]
+    _bt_watch = (watchlist_df[watchlist_df["Enabled"]]["Ticker"].tolist()
+                 if (watchlist_df is not None and not watchlist_df.empty) else [])
+    _bt_default_universe = sorted(set(_bt_holdings + _bt_watch))
+
+    _bc1, _bc2, _bc3 = st.columns([2, 1, 1])
+    _uni_choice = _bc1.radio("回測宇宙", ["持倉＋Watchlist", "半導體宇宙", "自訂代碼"],
+                             horizontal=True, key="bt_uni_choice")
+    _period_lbl = _bc2.selectbox("期間", ["全部（約2年）", "近1年", "近6個月", "近3個月"], key="bt_period")
+    _bt_capital = _bc3.number_input("本金 (USD)", value=float(st.session_state.init_capital),
+                                    min_value=1000.0, step=1000.0, format="%.0f", key="bt_capital")
+
+    if _uni_choice == "自訂代碼":
+        _custom = st.text_input("自訂代碼（逗號分隔）",
+                                value=",".join(_bt_default_universe[:8]) or "NVDA,AMD,AVGO,MRVL,AMAT",
+                                key="bt_custom")
+        _bt_universe = [normalize_ticker(t) for t in _custom.split(",") if t.strip()]
+    elif _uni_choice == "半導體宇宙":
+        _bt_universe = list(US_SEMI_UNIVERSE)
+        st.warning(f"⚠️ 半導體宇宙 {len(_bt_universe)} 檔，App 內即時抓取需數分鐘、可能卡頓；"
+                   f"大宇宙建議改用命令列 `python backtest.py --universe semi`。")
+    else:
+        _bt_universe = _bt_default_universe
+        if not _bt_universe:
+            st.info("目前無持倉且 Watchlist 為空。請改選『自訂代碼』或先於掃描器加入 Watchlist。")
+
+    _period_days = {"全部（約2年）": None, "近1年": 365, "近6個月": 182, "近3個月": 91}[_period_lbl]
+    _bt_start = ((pd.Timestamp.now() - pd.Timedelta(days=_period_days)).strftime("%Y-%m-%d")
+                 if _period_days else None)
+
+    if st.button("🚀 執行回測", use_container_width=True, type="primary",
+                 key="run_bt", disabled=not _bt_universe):
+        with st.spinner(f"回測 {len(_bt_universe)} 檔中（首次抓歷史資料較久）…"):
+            try:
+                st.session_state["bt_result"] = bt.run_backtest(
+                    tickers=_bt_universe, start=_bt_start, initial_capital=float(_bt_capital))
+                st.session_state["bt_universe_n"] = len(_bt_universe)
+            except Exception as _e:
+                st.session_state["bt_result"] = None
+                st.error(f"回測失敗：{_e}")
+
+    _btr = st.session_state.get("bt_result")
+    if _btr:
+        _bt_m = _btr["metrics"]
+        _bt_r = _bt_m.get("realized", {}) or {}
+        _bt_bench = _bt_m.get("benchmarks", {}) or {}
+
+        _k1, _k2, _k3, _k4 = st.columns(4)
+        _k1.metric("總報酬", f"{_bt_m['total_return_pct']:+.2f}%")
+        _k2.metric("CAGR", f"{_bt_m['cagr_pct']:.2f}%" if _bt_m.get("cagr_pct") is not None else "—")
+        _k3.metric("最大回撤", f"{_bt_m['max_drawdown_pct']:.2f}%")
+        _k4.metric("Sharpe", f"{_bt_m['sharpe']:.2f}" if _bt_m.get("sharpe") is not None else "—")
+
+        _k5, _k6, _k7, _k8 = st.columns(4)
+        _k5.metric("真實勝率", f"{_bt_r['win_rate']:.1f}%" if _bt_r.get("win_rate") is not None else "—")
+        _k6.metric("獲利因子", f"{_bt_r['profit_factor']:.2f}" if _bt_r.get("profit_factor") is not None else "—")
+        _k7.metric("每筆期望值", f"${_bt_r['expectancy']:.2f}" if _bt_r.get("expectancy") is not None else "—")
+        _k8.metric("成交/已平倉", f"{_bt_m['n_trades']} / {_bt_r.get('closed_trades', 0)}")
+
+        _cmp_bits = []
+        for _sym in ("SOXX", "SPY"):
+            _b = _bt_bench.get(_sym)
+            if _b:
+                _edge = ""
+                if _bt_m.get("cagr_pct") is not None and _b.get("cagr_pct") is not None:
+                    _edge = f"，策略 CAGR 差 {_bt_m['cagr_pct'] - _b['cagr_pct']:+.1f}pp"
+                _cmp_bits.append(f"{_sym} 買進持有 {_b['total_return_pct']:+.2f}%（MaxDD {_b['max_drawdown_pct']:.1f}%{_edge}）")
+        if _cmp_bits:
+            st.caption("對標　" + "　|　".join(_cmp_bits))
+        st.caption(f"期間 {_bt_m['start']} → {_bt_m['end']}（{_bt_m['days']} 交易日）｜"
+                   f"平均曝險 {_bt_m.get('avg_exposure_pct', '—')}%｜宇宙 {st.session_state.get('bt_universe_n', '—')} 檔")
+
+        _eq = _btr.get("equity_curve")
+        if _eq is not None and not _eq.empty:
+            _fig_bt = go.Figure()
+            _nav = _eq["NAV"]
+            _fig_bt.add_trace(go.Scatter(
+                x=_eq.index, y=_nav / _nav.iloc[0] * 100, name="策略 NAV",
+                line=dict(color="#00D4FF", width=2), fill="tozeroy", fillcolor="rgba(0,212,255,0.06)"))
+            _colmap = {"SOXX": "#FFB800", "SPY": "#9B6DFF"}
+            for _sym, _curve in (_btr.get("benchmark_curves") or {}).items():
+                if _curve is not None and len(_curve) > 0:
+                    _cv = _curve.reindex(_eq.index).ffill()
+                    if _cv.notna().any() and _cv.dropna().iloc[0] > 0:
+                        _fig_bt.add_trace(go.Scatter(
+                            x=_eq.index, y=_cv / _cv.dropna().iloc[0] * 100, name=f"買進持有 {_sym}",
+                            line=dict(color=_colmap.get(_sym, "#636B80"), width=1.5, dash="dot")))
+            _fig_bt.update_layout(
+                template="plotly_dark", height=340, margin=dict(l=0, r=0, t=10, b=0),
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="JetBrains Mono", size=10),
+                legend=dict(orientation="h", yanchor="bottom", y=1.01, font=dict(size=10)),
+                yaxis=dict(title="Index (100=起點)", gridcolor="rgba(255,255,255,0.05)"),
+                xaxis=dict(gridcolor="rgba(255,255,255,0.04)"))
+            st.plotly_chart(_fig_bt, use_container_width=True, config={"displayModeBar": False})
+
+        _tr = _btr.get("trades")
+        if _tr is not None and not _tr.empty:
+            with st.expander(f"交易明細（{len(_tr)} 筆）", expanded=False):
+                _show = _tr[["TradeDateTime", "Ticker", "Type", "Price", "Shares", "GrossTotal"]].copy()
+                _show["TradeDateTime"] = pd.to_datetime(_show["TradeDateTime"], errors="coerce").dt.strftime("%Y-%m-%d")
+                _show = _show.rename(columns={"TradeDateTime": "日期", "Ticker": "代碼", "Type": "方向",
+                                              "Price": "價格", "Shares": "股數", "GrossTotal": "金額"})
+                st.dataframe(_show[::-1], use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── 參數最佳化（walk-forward · 樣本外驗證）──────────────────────────────
+    st.markdown('<div class="qsec">參數最佳化（walk-forward · 樣本外驗證）</div>', unsafe_allow_html=True)
+    st.caption("在訓練段選最佳參數、回報其在測試段（樣本外）的表現以防過擬合。多組回測較重，建議先用少量標的。")
+
+    _sty_label = {"stops": "止損／移動停損倍數", "exits": "分批TP vs 純移動停損",
+                  "grace": "保護期／保本", "entry": "進場門檻／追高上限"}
+    _o1, _o2, _o3 = st.columns(3)
+    _study = _o1.selectbox("研究項目", list(opt.STUDIES.keys()),
+                           format_func=lambda s: _sty_label.get(s, s), key="wf_study")
+    _train_frac = _o2.slider("訓練段比例", 0.40, 0.80, 0.60, 0.05, key="wf_train_frac")
+    _rank_by = _o3.selectbox("排序依據", ["calmar", "sharpe", "cagr_pct", "total_return_pct"], key="wf_rank")
+    _pure_trail = st.checkbox("純移動停損（關閉分批 TP）", value=False, key="wf_pure_trail")
+
+    if st.button("🧪 執行 walk-forward 掃描", use_container_width=True,
+                 key="run_wf", disabled=not _bt_universe):
+        with st.spinner("多組參數回測中（比單次回測更久）…"):
+            try:
+                _data, _regime, _bench2 = opt.prepare_data(_bt_universe)
+                _extra = dict(opt.PURE_TRAIL_OVERRIDE) if _pure_trail else None
+                st.session_state["wf_result"] = opt.walk_forward(
+                    opt.STUDIES[_study], _data, _regime, _bench2,
+                    initial_capital=float(_bt_capital), train_frac=_train_frac,
+                    extra_overrides=_extra, rank_by=_rank_by)
+                st.session_state["wf_keys"] = list(opt.STUDIES[_study].keys())
+                st.session_state["wf_rank_by"] = _rank_by
+            except Exception as _e:
+                st.session_state["wf_result"] = None
+                st.error(f"掃描失敗：{_e}")
+
+    _wf = st.session_state.get("wf_result")
+    if _wf:
+        _rb = st.session_state.get("wf_rank_by", "calmar")
+        _sp = _wf["split"]
+        st.caption(f"訓練段 {_sp['train'][0]}→{_sp['train'][1]}　|　"
+                   f"測試段（樣本外）{_sp['test'][0]}→{_sp['test'][1]}")
+        if _wf.get("best_params"):
+            st.success(f"訓練段冠軍參數：{_wf['best_params']}")
+            _wtr = _wf.get("best_train") or {}
+            _wte = _wf.get("best_test") or {}
+            _cc1, _cc2 = st.columns(2)
+            _cc1.metric(f"訓練段 {_rb}", f"{_wtr.get(_rb, '—')}")
+            _cc2.metric(f"測試段 {_rb}（樣本外）", f"{_wte.get(_rb, '—')}")
+            _tv, _ev = _wtr.get(_rb), _wte.get(_rb)
+            if _tv is not None and _ev is not None:
+                if _ev >= _tv * 0.5 and _ev > 0:
+                    st.success("✅ 樣本外仍穩健（≥ 訓練段一半且為正）→ 參數較可信，可考慮寫入 GitHub Secrets")
+                elif _ev <= 0:
+                    st.error("⚠️ 樣本外轉負 → 疑似過擬合，勿直接採用")
+                else:
+                    st.warning("⚠️ 樣本外明顯衰退 → 邊際證據，建議擴大樣本或保守採用")
+        _keys = st.session_state.get("wf_keys", [])
+        _tt = _wf.get("test_table")
+        if _tt is not None and not _tt.empty:
+            _cols = [c for c in _keys + ["calmar", "sharpe", "cagr_pct", "max_drawdown_pct",
+                                         "total_return_pct", "n_trades", "win_rate", "vs_SOXX_pp"]
+                     if c in _tt.columns]
+            st.caption("測試段（樣本外）完整結果：")
+            st.dataframe(_tt[_cols], use_container_width=True, hide_index=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
