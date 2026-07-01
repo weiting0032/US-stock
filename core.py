@@ -59,20 +59,44 @@ def ttl_cache(ttl_seconds: float, maxsize: int = 1024):
 # ===============================
 # Env helpers
 # ===============================
-def get_env_str(name: str, default: str = "") -> str:
+_secrets_probe_ok = None  # None=未探測；True/False=st.secrets 是否可用（探測一次後記住）
+
+
+def _config_raw(name: str) -> Optional[str]:
+    """讀取設定原始值：優先「環境變數」，其次「Streamlit secrets」，皆無回 None。
+
+    讓策略參數（EXIT_* / ENTRY_* / SCORE_* …）有單一套用管道：
+      • GitHub Actions 跑 scanner.py → 由 workflow env 帶入環境變數
+      • Streamlit App 部署          → 由 App 的 Secrets（st.secrets）帶入
+    st.secrets 只探測一次；在非 Streamlit（如 Actions）環境探測失敗即記住並不再嘗試，
+    避免每個參數重複觸發例外與日誌噪音。
+    """
     val = os.getenv(name)
-    if val is None:
-        return default
-    val = str(val).strip()
-    return val if val != "" else default
+    if val is not None and str(val).strip() != "":
+        return str(val).strip()
+
+    global _secrets_probe_ok
+    if st is not None and _secrets_probe_ok is not False:
+        try:
+            has = name in st.secrets
+            _secrets_probe_ok = True
+            if has:
+                sv = str(st.secrets[name]).strip()
+                if sv != "":
+                    return sv
+        except Exception:
+            _secrets_probe_ok = False
+    return None
+
+
+def get_env_str(name: str, default: str = "") -> str:
+    val = _config_raw(name)
+    return val if val is not None else default
 
 
 def get_env_float(name: str, default: float) -> float:
-    val = os.getenv(name)
+    val = _config_raw(name)
     if val is None:
-        return float(default)
-    val = str(val).strip()
-    if val == "":
         return float(default)
     try:
         return float(val)
@@ -81,11 +105,8 @@ def get_env_float(name: str, default: float) -> float:
 
 
 def get_env_int(name: str, default: int) -> int:
-    val = os.getenv(name)
+    val = _config_raw(name)
     if val is None:
-        return int(default)
-    val = str(val).strip()
-    if val == "":
         return int(default)
     try:
         return int(val)

@@ -26,6 +26,85 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # 策略參數：一律在「job 層級」設定，讓三種掃描步驟（portfolio/semi/broad）
+    # 全部繼承。這樣 backtest.py / optimize.py 找到並驗證過（樣本外）的參數，
+    # 只要在 repo Secrets 設一次，即會流到每日排程 —— 不必再改 workflow。
+    #
+    # 安全：未設定的 Secret 會是空字串，core.get_env_* 遇空字串一律回「程式碼預設值」，
+    # 故「完全沒設任何 Secret」時，行為與過去 100% 相同（全用預設）。
+    # 套用流程仍需人工核可：最佳化 → 看樣本外 → 設 Secret → 下次排程生效。
+    # ══════════════════════════════════════════════════════════════════════════
+    env:
+      # ── 憑證 / 帳務 / 資料表 ──────────────────────────────────────────────
+      TG_TOKEN:              ${{ secrets.TG_TOKEN }}
+      TG_CHAT_ID:            ${{ secrets.TG_CHAT_ID }}
+      GCP_SERVICE_ACCOUNT:   ${{ secrets.GCP_SERVICE_ACCOUNT }}
+      PORTFOLIO_SHEET_TITLE: ${{ secrets.PORTFOLIO_SHEET_TITLE }}
+      INITIAL_CAPITAL:       ${{ secrets.INITIAL_CAPITAL }}
+
+      # ── 流動性 / 通用風控 / sizing ────────────────────────────────────────
+      MIN_AVG_DOLLAR_VOLUME:     ${{ secrets.MIN_AVG_DOLLAR_VOLUME }}
+      MIN_PRICE:                 ${{ secrets.MIN_PRICE }}
+      EARNINGS_BLOCK_DAYS:       ${{ secrets.EARNINGS_BLOCK_DAYS }}
+      DEFAULT_COMMISSION:        ${{ secrets.DEFAULT_COMMISSION }}
+      DEFAULT_SLIPPAGE_PCT:      ${{ secrets.DEFAULT_SLIPPAGE_PCT }}
+      COOLDOWN_DAYS:             ${{ secrets.COOLDOWN_DAYS }}
+      MAX_POSITION_WEIGHT:       ${{ secrets.MAX_POSITION_WEIGHT }}
+      RISK_PER_TRADE_PCT:        ${{ secrets.RISK_PER_TRADE_PCT }}
+      CASH_RESERVE_PCT:          ${{ secrets.CASH_RESERVE_PCT }}
+      LARGE_CAP_MAX_WEIGHT:      ${{ secrets.LARGE_CAP_MAX_WEIGHT }}
+      SMALL_CAP_MAX_WEIGHT:      ${{ secrets.SMALL_CAP_MAX_WEIGHT }}
+      LARGE_CAP_RISK_PER_TRADE_PCT: ${{ secrets.LARGE_CAP_RISK_PER_TRADE_PCT }}
+      SMALL_CAP_RISK_PER_TRADE_PCT: ${{ secrets.SMALL_CAP_RISK_PER_TRADE_PCT }}
+      PORTFOLIO_HEAT_LIMIT_PCT:  ${{ secrets.PORTFOLIO_HEAT_LIMIT_PCT }}
+      CATEGORY_MAX_WEIGHT:       ${{ secrets.CATEGORY_MAX_WEIGHT }}
+      SCALE_IN_MAX_WEIGHT_RATIO: ${{ secrets.SCALE_IN_MAX_WEIGHT_RATIO }}
+
+      # ── Alert 去抖動 ─────────────────────────────────────────────────────
+      PRE_ALERT_PCT:          ${{ secrets.PRE_ALERT_PCT }}
+      ALERT_MIN_MINUTES:      ${{ secrets.ALERT_MIN_MINUTES }}
+      ALERT_MIN_PRICE_CHANGE: ${{ secrets.ALERT_MIN_PRICE_CHANGE }}
+      ALERT_MIN_SCORE_CHANGE: ${{ secrets.ALERT_MIN_SCORE_CHANGE }}
+
+      # ── 進場品質閘（P1）—— portfolio / semi / broad 皆用 ──────────────────
+      SCORE_BUY_NOW_THRESHOLD:   ${{ secrets.SCORE_BUY_NOW_THRESHOLD }}
+      SCORE_BUY_ADD_THRESHOLD:   ${{ secrets.SCORE_BUY_ADD_THRESHOLD }}
+      ENTRY_REQUIRE_TRIGGER:     ${{ secrets.ENTRY_REQUIRE_TRIGGER }}
+      ENTRY_PULLBACK_SMA20_PCT:  ${{ secrets.ENTRY_PULLBACK_SMA20_PCT }}
+      ENTRY_BREAKOUT_VOL_MULT:   ${{ secrets.ENTRY_BREAKOUT_VOL_MULT }}
+      ENTRY_MAX_EXT_ATR:         ${{ secrets.ENTRY_MAX_EXT_ATR }}
+      ENTRY_REQUIRE_RS_POSITIVE: ${{ secrets.ENTRY_REQUIRE_RS_POSITIVE }}
+      BREAKOUT_ADX_MIN:          ${{ secrets.BREAKOUT_ADX_MIN }}
+      NEAR_52W_HIGH_PCT:         ${{ secrets.NEAR_52W_HIGH_PCT }}
+
+      # ── 出場策略（backtest/optimize 的 stops / exits / grace 主要在調這些）──
+      EXIT_INIT_STOP_ATR:   ${{ secrets.EXIT_INIT_STOP_ATR }}
+      EXIT_TRAIL_ATR:       ${{ secrets.EXIT_TRAIL_ATR }}
+      EXIT_TRAIL_ATR_FINAL: ${{ secrets.EXIT_TRAIL_ATR_FINAL }}
+      EXIT_TP1_R:           ${{ secrets.EXIT_TP1_R }}
+      EXIT_TP2_R:           ${{ secrets.EXIT_TP2_R }}
+      EXIT_TP1_PCT:         ${{ secrets.EXIT_TP1_PCT }}
+      EXIT_TP2_PCT:         ${{ secrets.EXIT_TP2_PCT }}
+      EXIT_SCALE_OUT_PCT:   ${{ secrets.EXIT_SCALE_OUT_PCT }}
+      EXIT_BREAKEVEN_AT_R:  ${{ secrets.EXIT_BREAKEVEN_AT_R }}
+      EXIT_TREND_BREAK:     ${{ secrets.EXIT_TREND_BREAK }}
+      EXIT_MIN_HOLD_BARS:   ${{ secrets.EXIT_MIN_HOLD_BARS }}
+
+      # ── 加碼只加贏家（P2）/ 時間止損（P3）─────────────────────────────────
+      ADD_REQUIRE_PROFIT:   ${{ secrets.ADD_REQUIRE_PROFIT }}
+      ADD_MIN_PROFIT_R:     ${{ secrets.ADD_MIN_PROFIT_R }}
+      TIME_STOP_ENABLE:     ${{ secrets.TIME_STOP_ENABLE }}
+      TIME_STOP_BARS:       ${{ secrets.TIME_STOP_BARS }}
+      TIME_STOP_MIN_R:      ${{ secrets.TIME_STOP_MIN_R }}
+
+      # ── 半導體引擎 ───────────────────────────────────────────────────────
+      US_SEMI_SCORE_STRONG: ${{ secrets.US_SEMI_SCORE_STRONG }}
+      US_SEMI_SCORE_BUY:    ${{ secrets.US_SEMI_SCORE_BUY }}
+      US_SEMI_SCORE_WATCH:  ${{ secrets.US_SEMI_SCORE_WATCH }}
+      US_SEMI_SCAN_WORKERS: ${{ secrets.US_SEMI_SCAN_WORKERS }}
+      US_SEMI_TOP_N:        ${{ secrets.US_SEMI_TOP_N }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -62,67 +141,17 @@ jobs:
           fi
           echo "觸發來源 schedule='${SCHED}' manual='${MANUAL_MODE}'"
 
-      # ── 持倉 / Watchlist 掃描 ───────────────────────────────────────────
+      # 三種掃描步驟皆繼承上方 job 層級 env（含全部策略參數），不需各自重列。
       - name: Run portfolio scanner
         if: steps.mode.outputs.mode == 'portfolio'
-        env:
-          TG_TOKEN:             ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID:           ${{ secrets.TG_CHAT_ID }}
-          GCP_SERVICE_ACCOUNT:  ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          PORTFOLIO_SHEET_TITLE: ${{ secrets.PORTFOLIO_SHEET_TITLE }}
-          INITIAL_CAPITAL:      ${{ secrets.INITIAL_CAPITAL }}
-          MAX_POSITION_WEIGHT:  ${{ secrets.MAX_POSITION_WEIGHT }}
-          RISK_PER_TRADE_PCT:   ${{ secrets.RISK_PER_TRADE_PCT }}
-          CASH_RESERVE_PCT:     ${{ secrets.CASH_RESERVE_PCT }}
-          COOLDOWN_DAYS:        ${{ secrets.COOLDOWN_DAYS }}
-          PRE_ALERT_PCT:        ${{ secrets.PRE_ALERT_PCT }}
-          ALERT_MIN_MINUTES:    ${{ secrets.ALERT_MIN_MINUTES }}
-          ALERT_MIN_PRICE_CHANGE: ${{ secrets.ALERT_MIN_PRICE_CHANGE }}
-          ALERT_MIN_SCORE_CHANGE: ${{ secrets.ALERT_MIN_SCORE_CHANGE }}
-          MIN_AVG_DOLLAR_VOLUME: ${{ secrets.MIN_AVG_DOLLAR_VOLUME }}
-          MIN_PRICE:            ${{ secrets.MIN_PRICE }}
-          EARNINGS_BLOCK_DAYS:  ${{ secrets.EARNINGS_BLOCK_DAYS }}
-          DEFAULT_COMMISSION:   ${{ secrets.DEFAULT_COMMISSION }}
-          DEFAULT_SLIPPAGE_PCT: ${{ secrets.DEFAULT_SLIPPAGE_PCT }}
         run: python scanner.py
 
-      # ── 美股半導體宇宙全掃描 ────────────────────────────────────────────
       - name: Run semiconductor universe scanner
         if: steps.mode.outputs.mode == 'semi'
-        env:
-          TG_TOKEN:             ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID:           ${{ secrets.TG_CHAT_ID }}
-          GCP_SERVICE_ACCOUNT:  ${{ secrets.GCP_SERVICE_ACCOUNT }}
-          PORTFOLIO_SHEET_TITLE: ${{ secrets.PORTFOLIO_SHEET_TITLE }}
-          INITIAL_CAPITAL:      ${{ secrets.INITIAL_CAPITAL }}
-          MIN_AVG_DOLLAR_VOLUME: ${{ secrets.MIN_AVG_DOLLAR_VOLUME }}
-          MIN_PRICE:            ${{ secrets.MIN_PRICE }}
-          EARNINGS_BLOCK_DAYS:  ${{ secrets.EARNINGS_BLOCK_DAYS }}
-          # ── 半導體掃描專屬參數（可在 Secrets 或直接設定預設值）──────────
-          US_SEMI_SCORE_STRONG: ${{ secrets.US_SEMI_SCORE_STRONG }}
-          US_SEMI_SCORE_BUY:    ${{ secrets.US_SEMI_SCORE_BUY }}
-          US_SEMI_SCORE_WATCH:  ${{ secrets.US_SEMI_SCORE_WATCH }}
-          US_SEMI_SCAN_WORKERS: ${{ secrets.US_SEMI_SCAN_WORKERS }}
-          US_SEMI_TOP_N:        ${{ secrets.US_SEMI_TOP_N }}
         run: python scanner.py --semi
 
-      # ── 跨產業廣度發現掃描（不限半導體，找全市場趨勢領導股）─────────────
       - name: Run broad discovery scanner
         if: steps.mode.outputs.mode == 'broad'
-        env:
-          TG_TOKEN:             ${{ secrets.TG_TOKEN }}
-          TG_CHAT_ID:           ${{ secrets.TG_CHAT_ID }}
-          MIN_AVG_DOLLAR_VOLUME: ${{ secrets.MIN_AVG_DOLLAR_VOLUME }}
-          MIN_PRICE:            ${{ secrets.MIN_PRICE }}
-          EARNINGS_BLOCK_DAYS:  ${{ secrets.EARNINGS_BLOCK_DAYS }}
-          US_SEMI_SCAN_WORKERS: ${{ secrets.US_SEMI_SCAN_WORKERS }}
-          # ── 進場品質閘參數（可選；未設定則用程式內預設值）──────────────
-          SCORE_BUY_NOW_THRESHOLD:   ${{ secrets.SCORE_BUY_NOW_THRESHOLD }}
-          ENTRY_REQUIRE_TRIGGER:     ${{ secrets.ENTRY_REQUIRE_TRIGGER }}
-          ENTRY_PULLBACK_SMA20_PCT:  ${{ secrets.ENTRY_PULLBACK_SMA20_PCT }}
-          ENTRY_BREAKOUT_VOL_MULT:   ${{ secrets.ENTRY_BREAKOUT_VOL_MULT }}
-          ENTRY_MAX_EXT_ATR:         ${{ secrets.ENTRY_MAX_EXT_ATR }}
-          ENTRY_REQUIRE_RS_POSITIVE: ${{ secrets.ENTRY_REQUIRE_RS_POSITIVE }}
         run: python scanner.py --broad
 
       # ── 執行完畢通知 ────────────────────────────────────────────────────
