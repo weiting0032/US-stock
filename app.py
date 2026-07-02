@@ -2089,7 +2089,9 @@ with tab7:
         st.caption(f"已成熟訊號：{len(_outcomes)} 筆（買進類 {_n_buy} 筆）· 來源：{_src_label}")
         if _edge is not None and not _edge.empty:
             st.dataframe(_edge, use_container_width=True, hide_index=True)
-            st.caption("判讀：理想情況下『勝率%』與『平均報酬%』應隨分數區間遞增；若否，請重新檢視評分權重或 BUY 門檻。")
+            st.caption("判讀：以『超額報酬%（vs SOXX）』為主要判準——多頭市場原始報酬人人為正，"
+                       "只有超額報酬隨分數區間遞增才是評分有 edge 的證據；原始欄位僅供對照。"
+                       "若超額不單調，請重新檢視評分權重或 BUY 門檻。")
         else:
             st.info("買進類成熟訊號不足，無法分箱彙總（需先累積一段時間的訊號記錄）。")
 
@@ -2242,8 +2244,9 @@ with tab8:
                 _cmp_bits.append(f"{_sym} 買進持有 {_b['total_return_pct']:+.2f}%（MaxDD {_b['max_drawdown_pct']:.1f}%{_edge}）")
         if _cmp_bits:
             st.caption("對標　" + "　|　".join(_cmp_bits))
+        _eg_note = "" if _bt_m.get("earnings_gate") else "｜財報閘停用（回測預設，進場面略偏樂觀）"
         st.caption(f"期間 {_bt_m['start']} → {_bt_m['end']}（{_bt_m['days']} 交易日）｜"
-                   f"平均曝險 {_bt_m.get('avg_exposure_pct', '—')}%｜宇宙 {st.session_state.get('bt_universe_n', '—')} 檔")
+                   f"平均曝險 {_bt_m.get('avg_exposure_pct', '—')}%｜宇宙 {st.session_state.get('bt_universe_n', '—')} 檔{_eg_note}")
 
         _eq = _btr.get("equity_curve")
         if _eq is not None and not _eq.empty:

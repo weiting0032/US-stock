@@ -57,6 +57,29 @@ def test_no_network_when_injected(offline_core, synth_market, monkeypatch):
     assert calls == [], f"注入回測不應連網，卻呼叫了 yf.Ticker：{calls}"
 
 
+# ── P1：回測預設停用財報封鎖（以執行日判斷會污染歷史），且結束必還原 ────────
+def test_earnings_gate_disabled_by_default_and_restored(offline_core, synth_market, monkeypatch):
+    always_blocked = lambda *a, **k: True          # 若閘生效，所有進場都會被擋
+    monkeypatch.setattr(core, "is_earnings_blocked", always_blocked)
+
+    data, regime, bench = synth_market
+    res = bt.run_backtest(initial_capital=32000.0, data=data,
+                          regime_frames=regime, benchmarks=bench)
+    assert res["metrics"]["earnings_gate"] is False
+    assert res["metrics"]["n_trades"] > 0, "預設應繞過財報閘 → 上升趨勢中必有成交"
+    assert core.is_earnings_blocked is always_blocked, "回測結束必須還原原函式"
+
+
+def test_earnings_gate_true_honors_block(offline_core, synth_market, monkeypatch):
+    monkeypatch.setattr(core, "is_earnings_blocked", lambda *a, **k: True)
+
+    data, regime, bench = synth_market
+    res = bt.run_backtest(initial_capital=32000.0, data=data,
+                          regime_frames=regime, benchmarks=bench, earnings_gate=True)
+    assert res["metrics"]["earnings_gate"] is True
+    assert res["metrics"]["n_trades"] == 0, "閘啟用且全數封鎖 → 不應有任何進場"
+
+
 def test_sizing_respects_cash_reserve(offline_core, synth_market):
     """任一時點現金不得低於「初始資金 × 現金準備比例」以下太多（買進閘生效）。"""
     data, regime, bench = synth_market

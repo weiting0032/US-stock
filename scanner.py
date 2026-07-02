@@ -55,6 +55,12 @@ def run_portfolio_scan():
     total_unrealized_pl = sum(x["Unrealized"] for x in portfolio_raw)
 
     market_regime = get_market_regime()
+    if market_regime.get("regime") == "UNKNOWN":
+        # P4 fail-closed：SPY/QQQ 取價失敗時 regime 已自動禁新倉/加碼；此處補告警，
+        # 讓你知道「今天沒有買進建議」是資料異常、不是市場沒機會。
+        _msg = "⚠️ 市場 regime 資料異常（SPY/QQQ 取價失敗）— 本次掃描已暫停新倉/加碼建議，僅出場訊號有效"
+        print(_msg)
+        send_telegram_msg(_msg)
     portfolio = enrich_portfolio_with_weight_and_risk(
         portfolio_raw, total_assets, cash, market_regime,
     ) if portfolio_raw else []

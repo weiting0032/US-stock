@@ -69,8 +69,12 @@ def test_regime_risk_on_off_neutral_unknown():
     r = core._regime_from_indicator_rows(bull, bull, vix_high)
     assert r["regime"] != "RISK_ON"
 
+    # P4 fail-closed：資料異常時不得放行新倉/加碼（過去 fail-open 是風控漏洞）
     r = core._regime_from_indicator_rows(None, None, None)
     assert r["regime"] == "UNKNOWN"
+    assert r["allow_new_position"] is False
+    assert r["allow_add_position"] is False
+    assert r["risk_multiplier"] <= 0.25
 
 
 # ── calc_realized_trade_stats：split_adjust 旗標（回測防二次分割調整）────────
@@ -151,3 +155,61 @@ def test_yf_retry_records_and_clears_failures(monkeypatch):
 
     core._clear_fetch_failure("TEST2")
     assert "TEST2" not in core.get_fetch_failures()
+
+
+# ── P3：訊號成效的超額報酬（vs benchmark）────────────────────────────────────
+def _signal_frames():
+    """確定性合成：FAST 日漲 0.3%、HUGGER 與對標同速 0.1%、SOXX 對標 0.1%。"""
+    from tests.conftest import make_stock
+    return {
+        "FAST": make_stock(seed=1, drift=0.003, noise=0.0),
+        "HUGGER": make_stock(seed=2, drift=0.001, noise=0.0),
+        "SOXX": make_stock(seed=3, drift=0.001, noise=0.0),
+    }
+
+
+def _signals_df():
+    dt = pd.Timestamp("2024-06-03 09:00:00")     # 遠早於 now-lookahead → 已成熟
+    rows = []
+    for tk in ("FAST", "HUGGER"):
+        rows.append({"DateTime": dt, "Ticker": tk, "Action": "BUY_NOW",
+                     "StrategyMode": "TEST", "Source": "SEMI", "Score": 5.0,
+                     "Close": 100.0, "StopLoss": 0.0})
+    return pd.DataFrame(rows)
+
+
+def test_signal_outcomes_excess_return_columns(monkeypatch):
+    frames = _signal_frames()
+    monkeypatch.setattr(core, "load_signals", _signals_df)
+    monkeypatch.setattr(core, "get_unified_analysis",
+                        lambda s, *a, **k: frames.get(core.normalize_ticker(s)))
+
+    out = core.evaluate_signal_outcomes(lookahead_days=20, benchmark="SOXX")
+    assert set(["BenchRetPct", "ExcessRetPct"]) <= set(out.columns)
+    assert len(out) == 2
+
+    fast = out[out["Ticker"] == "FAST"].iloc[0]
+    hug = out[out["Ticker"] == "HUGGER"].iloc[0]
+    # FAST 日漲 0.3% vs 對標 0.1%：20 交易日超額約 +4pp
+    assert 2.0 < fast["ExcessRetPct"] < 8.0, f"FAST 超額異常：{fast['ExcessRetPct']}"
+    # HUGGER 與對標同速：超額應近 0
+    assert abs(hug["ExcessRetPct"]) < 0.8, f"HUGGER 超額應近 0：{hug['ExcessRetPct']}"
+
+
+def test_summarize_edge_uses_excess_as_primary(monkeypatch):
+    frames = _signal_frames()
+    monkeypatch.setattr(core, "load_signals", _signals_df)
+    monkeypatch.setattr(core, "get_unified_analysis",
+                        lambda s, *a, **k: frames.get(core.normalize_ticker(s)))
+
+    tbl = core.summarize_signal_edge(lookahead_days=20, benchmark="SOXX")
+    assert not tbl.empty
+    assert any("超額" in c for c in tbl.columns), f"缺超額欄位：{list(tbl.columns)}"
+    assert any("原始" in c for c in tbl.columns), "原始欄位應保留供對照"
+    row = tbl[tbl["分數區間"] == "4.5–5.5"].iloc[0]
+    assert row["樣本數"] == 2
+    assert row["超額20日報酬%"] > 1.0        # (4pp + 0pp)/2 ≈ +2pp
+
+    # benchmark=None → 無超額欄位，僅原始（優雅退化）
+    tbl2 = core.summarize_signal_edge(lookahead_days=20, benchmark=None)
+    assert not any("超額" in c for c in tbl2.columns)

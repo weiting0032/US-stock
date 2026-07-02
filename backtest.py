@@ -51,6 +51,7 @@ from core import (
     normalize_ticker,
     safe_float,
 )
+import core
 
 TRADING_DAYS_PER_YEAR = 252
 
@@ -117,6 +118,46 @@ class _Position:
 # 主回測
 # ────────────────────────────────────────────────────────────────────────────
 def run_backtest(
+    tickers: Optional[List[str]] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    initial_capital: float = DEFAULT_INITIAL_CAPITAL,
+    fee: float = DEFAULT_COMMISSION,
+    slippage_pct: float = DEFAULT_SLIPPAGE_PCT,
+    data: Optional[Dict[str, pd.DataFrame]] = None,
+    regime_frames: Optional[Dict[str, pd.DataFrame]] = None,
+    benchmarks: Optional[Dict[str, pd.DataFrame]] = None,
+    benchmark_symbols: Optional[List[str]] = None,
+    progress: bool = False,
+    earnings_gate: bool = False,
+) -> Dict:
+    """回測入口（P1）：預設停用財報封鎖閘。
+
+    core.is_earnings_blocked 以「執行當下」的下一次財報日判斷，對歷史回放是
+    非平穩污染源——同參數在不同日期執行，結果會漂移；執行日恰逢某檔財報前
+    N 日時，該檔在整段 2 年回測中一筆都不會進場。故回測預設停用此閘，並於
+    metrics["earnings_gate"] 註記（live 仍會迴避財報，回測進場面因此略偏樂觀）。
+    研究財報效應時可顯式傳 earnings_gate=True。
+
+    實作為「暫時替換 core.is_earnings_blocked、結束必還原」——屬進程級副作用，
+    勿與其他執行緒的即時掃描並行執行。
+    """
+    if earnings_gate:
+        result = _run_backtest_impl(tickers, start, end, initial_capital, fee, slippage_pct,
+                                    data, regime_frames, benchmarks, benchmark_symbols, progress)
+    else:
+        _orig_gate = core.is_earnings_blocked
+        core.is_earnings_blocked = lambda *_a, **_k: False
+        try:
+            result = _run_backtest_impl(tickers, start, end, initial_capital, fee, slippage_pct,
+                                        data, regime_frames, benchmarks, benchmark_symbols, progress)
+        finally:
+            core.is_earnings_blocked = _orig_gate
+    result["metrics"]["earnings_gate"] = bool(earnings_gate)
+    return result
+
+
+def _run_backtest_impl(
     tickers: Optional[List[str]] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
@@ -219,8 +260,9 @@ def run_backtest(
                 qqq_al.loc[d] if qqq_al is not None else None,
                 vix_al.loc[d] if vix_al is not None else None,
             )
-    default_regime = {"regime": "UNKNOWN", "score": 0, "allow_new_position": True,
-                      "allow_add_position": True, "risk_multiplier": 0.5, "vix": None}
+    # 與 core 的 fail-closed 一致（P4）：無 regime 資料的日子不得開新倉/加碼
+    default_regime = {"regime": "UNKNOWN", "score": 0, "allow_new_position": False,
+                      "allow_add_position": False, "risk_multiplier": 0.25, "vix": None}
 
     # ── 4) 模擬狀態 ────────────────────────────────────────────────────────
     cash = float(initial_capital)
@@ -483,6 +525,7 @@ def format_report(result: Dict) -> str:
         f"  年化波動    {_fmt(m.get('volatility_pct'))}%",
         f"  平均曝險    {_fmt(m.get('avg_exposure_pct'))}%",
         "  ───────────────────────────────────────────",
+        f"  財報封鎖    {'啟用' if m.get('earnings_gate') else '停用（回測預設：以執行日財報判斷會污染歷史；live 會迴避，故進場面略偏樂觀）'}",
         f"  總成交筆數  {m['n_trades']}",
         f"  已平倉筆數  {r.get('closed_trades', 0)}",
         f"  真實勝率    {_fmt(r.get('win_rate'))}%",
@@ -543,6 +586,8 @@ def main():
     ap.add_argument("--end", default=None, help="YYYY-MM-DD（預設最新）")
     ap.add_argument("--capital", type=float, default=DEFAULT_INITIAL_CAPITAL)
     ap.add_argument("--csv", default=None, help="另存權益曲線 CSV 路徑")
+    ap.add_argument("--earnings-gate", action="store_true",
+                    help="啟用財報封鎖閘（預設停用；以執行日財報日判斷會污染歷史回放）")
     args = ap.parse_args()
 
     if args.tickers:
@@ -554,6 +599,7 @@ def main():
     result = run_backtest(
         tickers=universe, start=args.start, end=args.end,
         initial_capital=args.capital, progress=True,
+        earnings_gate=args.earnings_gate,
     )
     print()
     print(format_report(result))

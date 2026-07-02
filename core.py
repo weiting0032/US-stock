@@ -1318,12 +1318,15 @@ def _regime_from_indicator_rows(spy_last, qqq_last, vix_last) -> Dict:
     spy_last / qqq_last / vix_last 為 pandas 列（Series）或 None。
     """
     if spy_last is None or qqq_last is None:
+        # fail-closed（P4）：行情資料異常（SPY/QQQ 取價失敗，多半是限流/斷線）時，
+        # 市場守門員不得放行——禁新倉/加碼，既有持倉的出場邏輯不受影響。
+        # 過去此處 fail-open（allow=True），等於資料中斷日風控自動下線。
         return {
             "regime": "UNKNOWN",
             "score": 0,
-            "allow_new_position": True,
-            "allow_add_position": True,
-            "risk_multiplier": 0.5,
+            "allow_new_position": False,
+            "allow_add_position": False,
+            "risk_multiplier": 0.25,
             "vix": None,
         }
 
@@ -2913,12 +2916,17 @@ def send_us_semi_tg(messages: List[str]) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
                              dedup_window_days: Optional[int] = None,
-                             source: Optional[str] = None) -> pd.DataFrame:
+                             source: Optional[str] = None,
+                             benchmark: Optional[str] = "SOXX") -> pd.DataFrame:
     """
     回顧 Signals 表中已「成熟」的訊號，計算其前瞻表現（+N 交易日報酬、MFE/MAE）。
     用途：驗證評分是否真有 edge，據此調整分數門檻與權重。
     source：可指定只評估特定來源（"SEMI" / "PORTFOLIO" / "LEGACY"）；None 表示全部。
             由於兩套引擎分數尺度不同，分析時建議指定單一來源（多半用 "SEMI"）。
+    benchmark（P3）：同窗口的對標報酬與超額報酬（BenchRetPct / ExcessRetPct）。
+            多頭市場中「原始前瞻報酬為正」幾乎人人辦得到，無法區分評分有效與板塊 beta；
+            edge 的證據必須看「超額報酬」是否隨分數分箱單調遞增。預設 SOXX（半導體宇宙），
+            跨產業訊號可傳 "SPY"，傳 None 可停用。
     去重：同一檔、同方向（BUY/SELL）在 dedup_window_days 日內只計第一筆，避免持續訊號被每日
           快照重複計數，亦避免前瞻窗口重疊造成樣本相關性灌水（預設等於 lookahead_days）。
     限制：get_unified_analysis 僅含約 2 年歷史，更早的訊號評不到；交易日對齊以日曆日緩衝近似；
@@ -2927,10 +2935,23 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
     if dedup_window_days is None:
         dedup_window_days = lookahead_days
     cols = ["Ticker", "DateTime", "Action", "StrategyMode", "Source", "Score",
-            "EntryPx", "FwdRetPct", "StopRetPct", "MFEPct", "MAEPct", "Win"]
+            "EntryPx", "FwdRetPct", "StopRetPct", "BenchRetPct", "ExcessRetPct",
+            "MFEPct", "MAEPct", "Win"]
     sig = load_signals()
     if sig is None or sig.empty:
         return pd.DataFrame(columns=cols)
+
+    # 對標序列（一次抓取；之後逐訊號以日期對齊同窗口）
+    bench_dates = None
+    bench_close = None
+    if benchmark:
+        bh = get_unified_analysis(benchmark)
+        if bh is not None and not bh.empty:
+            try:
+                bench_dates = pd.DatetimeIndex(bh.index.tz_localize(None)).normalize()
+            except (TypeError, AttributeError):
+                bench_dates = pd.DatetimeIndex(bh.index).normalize()
+            bench_close = bh["Close"].to_numpy(dtype="float64")
 
     sig = sig.dropna(subset=["DateTime", "Ticker", "Close"]).copy()
     if source is not None and "Source" in sig.columns:
@@ -2984,6 +3005,15 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
             if bucket == "BUY" and stop_px > 0 and float(low_window.min()) <= stop_px:
                 stop_ret = (stop_px / entry_px - 1) * 100
 
+            # 對標同窗口報酬（P3）：以日期對齊 benchmark 自身的交易日序列
+            bench_ret = None
+            if bench_close is not None:
+                b_ent = int(bench_dates.searchsorted(entry_dt))
+                if b_ent < len(bench_close) and bench_close[b_ent] > 0:
+                    b_ext = min(int(bench_dates.searchsorted(idx_dates[fwd_pos])),
+                                len(bench_close) - 1)
+                    bench_ret = (bench_close[b_ext] / bench_close[b_ent] - 1) * 100
+
             rows.append({
                 "Ticker": tk,
                 "DateTime": s["DateTime"],
@@ -2994,6 +3024,8 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
                 "EntryPx": round(entry_px, 2),
                 "FwdRetPct": round(ret, 2),
                 "StopRetPct": round(stop_ret, 2),  # 觸及停損即視為停損出場後的報酬
+                "BenchRetPct": round(bench_ret, 2) if bench_ret is not None else None,
+                "ExcessRetPct": round(ret - bench_ret, 2) if bench_ret is not None else None,
                 "MFEPct": round((float(window.max()) / entry_px - 1) * 100, 2),  # 最大有利偏移
                 "MAEPct": round((float(window.min()) / entry_px - 1) * 100, 2),  # 最大不利偏移→驗證停損
                 "Win": ret > 0,
@@ -3003,14 +3035,17 @@ def evaluate_signal_outcomes(lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
 
 def summarize_signal_edge(outcomes: Optional[pd.DataFrame] = None,
                           lookahead_days: int = SIGNAL_LOG_LOOKAHEAD_DAYS,
-                          source: Optional[str] = None) -> pd.DataFrame:
+                          source: Optional[str] = None,
+                          benchmark: Optional[str] = "SOXX") -> pd.DataFrame:
     """
     將買進類訊號依分數分箱，彙總命中率/平均報酬/MAE。
-    若高分箱未單調優於低分箱，代表評分缺乏 edge，應重做權重或門檻。
+    主要判準（P3）＝「超額報酬 vs benchmark」：多頭市場中原始報酬近乎人人為正，
+    無法區分「評分有效」與「板塊 beta」；只有超額報酬隨分數分箱單調遞增，
+    才是評分有 edge 的證據。原始報酬欄保留供對照。
     source：限定來源（建議單一來源，因兩套引擎分數尺度不同）。
     """
     if outcomes is None:
-        outcomes = evaluate_signal_outcomes(lookahead_days, source=source)
+        outcomes = evaluate_signal_outcomes(lookahead_days, source=source, benchmark=benchmark)
     if outcomes is None or outcomes.empty:
         return pd.DataFrame()
 
@@ -3024,12 +3059,14 @@ def summarize_signal_edge(outcomes: Optional[pd.DataFrame] = None,
         labels=["<3.5", "3.5–4.5", "4.5–5.5", "≥5.5"],
     )
     g = buys.groupby("分數區間", observed=True)
-    cols = {
-        "樣本數": g["FwdRetPct"].count(),
-        "勝率%": (g["Win"].mean() * 100).round(1),
-        f"平均{lookahead_days}日報酬%": g["FwdRetPct"].mean().round(2),
-        "中位數%": g["FwdRetPct"].median().round(2),
-    }
+    cols = {"樣本數": g["FwdRetPct"].count()}
+    if "ExcessRetPct" in buys.columns and buys["ExcessRetPct"].notna().any():
+        cols[f"超額{lookahead_days}日報酬%"] = g["ExcessRetPct"].mean().round(2)
+        cols["超額勝率%"] = g["ExcessRetPct"].apply(
+            lambda s: round(float((s.dropna() > 0).mean()) * 100, 1) if s.notna().any() else None)
+    cols["勝率%(原始)"] = (g["Win"].mean() * 100).round(1)
+    cols[f"平均{lookahead_days}日報酬%(原始)"] = g["FwdRetPct"].mean().round(2)
+    cols["中位數%(原始)"] = g["FwdRetPct"].median().round(2)
     if "StopRetPct" in buys.columns:
         cols["停損後平均%"] = g["StopRetPct"].mean().round(2)  # 貼近實盤（觸停損即出場）的報酬
     cols["平均MAE%"] = g["MAEPct"].mean().round(2)
