@@ -998,6 +998,7 @@ nav_pl = total_assets - initial_capital
 market_regime = get_market_regime()
 portfolio = enrich_portfolio_with_weight_and_risk(portfolio_raw, total_assets, cash, market_regime) if portfolio_raw else []
 heat_info = calc_portfolio_heat(portfolio, total_assets)
+portfolio_avg_corr = calc_portfolio_correlation(portfolio).get("avg_corr") if portfolio else None  # P5：供 sizing 縮量
 perf = calculate_performance_metrics(history_df)
 
 session = get_market_session()
@@ -1362,6 +1363,7 @@ with tab3:
                 market_regime,
                 heat_info["heat_pct"],
                 portfolio,
+                avg_corr=portfolio_avg_corr,
             )
 
             score_colour = "#00E5A0" if score >= 5 else "#00D4FF" if score >= 3 else "#FFB800" if score >= 1.5 else "#FF3366"
@@ -1852,7 +1854,8 @@ with tab6:
             _heat_pct = heat_info.get("heat_pct", 0.0)
             for _r in _results:
                 _annotate_semi_candidate(_r, _exposure, _held_set, trades_df, _cap_pct)
-                apply_entry_risk_gates(_r, portfolio, total_assets, cash, _heat_pct, market_regime)
+                apply_entry_risk_gates(_r, portfolio, total_assets, cash, _heat_pct, market_regime,
+                                       avg_corr=portfolio_avg_corr)
         except Exception:
             pass
 

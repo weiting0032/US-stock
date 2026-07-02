@@ -165,6 +165,7 @@ EXIT_TP1_PCT = get_env_float("EXIT_TP1_PCT", 0.20)             # 第一獲利目
 EXIT_TP2_PCT = get_env_float("EXIT_TP2_PCT", 0.40)             # 第二獲利目標的百分比上限
 EXIT_SCALE_OUT_PCT = get_env_float("EXIT_SCALE_OUT_PCT", 0.34)  # 觸及 TP1 時分批賣出比例（約 1/3）
 EXIT_BREAKEVEN_AT_R = get_env_float("EXIT_BREAKEVEN_AT_R", 1.0) # 浮盈達 +1R 後，止損上移至保本（進場價）
+EXIT_BREAKEVEN_BUFFER_R = get_env_float("EXIT_BREAKEVEN_BUFFER_R", 0.0)  # P6：保本線緩衝（以 R 計）。0=貼在成本價（現況）；0.25=容忍 0.25R 回踩，避開 +1R~+2R 間「碰成本就死」的洗盤走廊。預設 0 不改變行為，先經 optimize --study grace 樣本外驗證再採用
 EXIT_TREND_BREAK = get_env_int("EXIT_TREND_BREAK", 1)          # 趨勢轉弱出場：虧損中且跌破 SMA200 即出場（1=啟用）
 EXIT_MIN_HOLD_BARS = get_env_int("EXIT_MIN_HOLD_BARS", 1)      # 新倉保護期（含進場日的日線根數）；期內僅初始硬止損生效，保本/移動/趨勢出場一律不啟用
 
@@ -188,6 +189,10 @@ TIME_STOP_MIN_R = get_env_float("TIME_STOP_MIN_R", 1.0)              # 此期間
 CATEGORY_MAX_WEIGHT = get_env_float("CATEGORY_MAX_WEIGHT", 0.40)  # 單一半導體次產業總權重上限（進場/加碼閘）
 CORR_WARN_THRESHOLD = get_env_float("CORR_WARN_THRESHOLD", 0.70) # 持倉平均兩兩相關性警示門檻
 CORR_LOOKBACK_DAYS = get_env_int("CORR_LOOKBACK_DAYS", 60)       # 相關性計算回看天數
+# P5：高相關持倉的逐檔風險縮量——「N 檔各 1% 風險」在相關性 0.8+ 時實為一注大部位，
+# 相關性從警示升級為行動：scale = clip(1.3 − avg_corr, FLOOR, 1.0)，corr≤0.3 不縮、0.7→0.6、0.9→0.4
+CORR_RISK_SCALE_ENABLE = get_env_int("CORR_RISK_SCALE_ENABLE", 1)
+CORR_RISK_SCALE_FLOOR = get_env_float("CORR_RISK_SCALE_FLOOR", 0.4)
 RS_STRONG_THRESHOLD = get_env_float("RS_STRONG_THRESHOLD", 2.0)
 RS_WEAK_THRESHOLD = get_env_float("RS_WEAK_THRESHOLD", -2.0)
 OBV_LOOKBACK = get_env_int("OBV_LOOKBACK", 20)
@@ -1682,6 +1687,19 @@ def calc_portfolio_correlation(portfolio: List[Dict], lookback: int = None) -> D
     }
 
 
+def corr_risk_scale(avg_corr: Optional[float]) -> float:
+    """P5：依持倉平均兩兩相關性連續縮減逐檔風險預算的係數。
+
+    半導體同板塊持倉相關性常 >0.7，「N 檔各 RISK_PER_TRADE」的名目分散實為一注；
+    與其只警示，不如直接把新倉/加碼的風險預算按相關性打折。
+    scale = clip(1.3 − avg_corr, CORR_RISK_SCALE_FLOOR, 1.0)。
+    avg_corr=None（持倉<2 檔或資料不足）或功能停用時回 1.0（不縮）。
+    """
+    if not CORR_RISK_SCALE_ENABLE or avg_corr is None:
+        return 1.0
+    return float(min(1.0, max(CORR_RISK_SCALE_FLOOR, 1.3 - float(avg_corr))))
+
+
 # ===============================
 # Strategy evaluator
 # ===============================
@@ -1697,6 +1715,7 @@ def evaluate_strategy(
     portfolio,
     recent_buy: bool = False,
     recent_sell: bool = False,
+    avg_corr: Optional[float] = None,   # P5：持倉平均兩兩相關性（由呼叫端計算傳入，None=不縮量）
 ) -> Tuple[float, str, Dict, str]:
     last = hist.iloc[-1]
     close = safe_float(last["Close"])
@@ -1720,6 +1739,8 @@ def evaluate_strategy(
     peak_close = close
     bars_since_entry = EXIT_MIN_HOLD_BARS + 1     # entry_date 缺失時視為成熟部位（不進保護期）
     atr_entry = atr                               # entry-time ATR；預設＝當前 ATR（新倉/抓不到時）
+    win_high = None                               # P2：進場後窗口的 High/ATR 序列，供 Chandelier ratchet
+    win_atr = None
     if held_shares > 0 and entry_date is not None:
         try:
             ed = pd.Timestamp(entry_date)
@@ -1730,7 +1751,8 @@ def evaluate_strategy(
             idx_norm = pd.DatetimeIndex(idx_naive).normalize()
             mask = (idx_norm >= ed)
             if mask.any():
-                peak = max(float(hist["High"].to_numpy()[mask].max()), close)
+                win_high = hist["High"].to_numpy()[mask]                    # P2：Chandelier ratchet 用
+                peak = max(float(win_high.max()), close)
                 peak_close = max(float(hist["Close"].to_numpy()[mask].max()), close)
                 bars_since_entry = int(mask.sum())
             else:
@@ -1738,6 +1760,8 @@ def evaluate_strategy(
             # entry-time ATR：取「進場當根（或最近一根 ≤ 進場日）」的 ATR，使 R 不隨之後波動漂移。
             # Wilder ATR 為因果指標，該根 ATR 不論何時計算皆相同，等同於進場當下寫入的值。
             atr_col = hist["ATR"].to_numpy()
+            if mask.any():
+                win_atr = atr_col[mask]                                     # P2：Chandelier ratchet 用
             at_or_before = (idx_norm <= ed)
             if at_or_before.any():
                 cand_atr = safe_float(atr_col[at_or_before][-1])
@@ -1762,10 +1786,22 @@ def evaluate_strategy(
 
     R = (EXIT_INIT_STOP_ATR * atr_entry) if atr_entry > 0 else entry * 0.07  # 初始風險距離（以 entry-time ATR 計，不漂移）
     initial_stop = max(0.01, entry - R)                                     # 初始硬止損（錨定進場成本，保護期內仍生效）
-    chandelier = (peak - trail_atr_mult * atr) if atr > 0 else entry * 0.90  # Chandelier 用當前 ATR：本就應隨波動調整
+    # Chandelier（P2 修正）：舊式「peak − mult×當前ATR」在急跌時 ATR 暴增會整條下移——
+    # 昨天守 $112 今天變守 $108，恰在最需要停損紀律的時刻放鬆。改取進場後逐日
+    # (累計最高High − mult×當日ATR) 的「歷史最大值」：完全因果、跨日只升不降。
+    # 最後一份 tranche 收緊 mult 時以現行 mult 全窗重算，只會更緊不會更鬆，與鎖利意圖一致。
+    if atr > 0:
+        chandelier = peak - trail_atr_mult * atr
+        if held_shares > 0 and win_high is not None and len(win_high) > 0:
+            _chand_series = np.maximum.accumulate(win_high) - trail_atr_mult * win_atr
+            chandelier = max(chandelier, float(np.nanmax(_chand_series)))
+    else:
+        chandelier = entry * 0.90
     # 保本上移：需「進場後曾收在 +1R 之上」(用收盤，不用盤中 High)，且已過保護期
     reached_1R = (peak_close >= entry + EXIT_BREAKEVEN_AT_R * R) and not in_grace
-    floor_be = entry if reached_1R else 0.0                                 # 達 +1R 後止損上移保本
+    # P6：保本線可設緩衝（entry − buffer×R），預設 buffer=0 行為不變；
+    # 用於避開 +1R~+2R 之間「回踩成本即被掃出」的洗盤走廊，採用前請先跑 --study grace 樣本外驗證
+    floor_be = (entry - EXIT_BREAKEVEN_BUFFER_R * R) if reached_1R else 0.0
     trail_stop = chandelier if not in_grace else 0.0                        # 移動停損保護期內不啟用
     effective_stop = max(initial_stop, trail_stop, floor_be)                # 實際止損：只升不降
     tp1 = min(entry + EXIT_TP1_R * R, entry * (1 + EXIT_TP1_PCT))   # +2R 與 +20% 取較早者
@@ -1783,9 +1819,17 @@ def evaluate_strategy(
 
     limits = get_bucket_limits(meta.get("bucket", "LARGE_CAP"))
 
-    risk_dollars = total_assets * limits["risk_per_trade_pct"] * safe_float(market_regime.get("risk_multiplier", 1.0))
+    _corr_scale = corr_risk_scale(avg_corr)   # P5：高相關持倉 → 逐檔風險預算連續打折
+    risk_dollars = (total_assets * limits["risk_per_trade_pct"]
+                    * safe_float(market_regime.get("risk_multiplier", 1.0)) * _corr_scale)
     risk_per_share = max(0.01, R)                                           # 新倉風險/股 = R
     qty = math.floor(risk_dollars / risk_per_share) if risk_per_share > 0 else 0
+
+    # 投組熱度閘（P5 修正）：計入「本筆新增風險 qty×R」再比上限。舊式只看既有熱度
+    # （heat<5% 即放行），訊號叢發日會系統性超標（4.9% 再進 1% → 事後 5.9%）。新倉/加碼皆適用。
+    heat_after_ok = (total_assets > 0 and
+                     portfolio_heat_pct / 100.0 + (qty * risk_per_share) / total_assets
+                     <= PORTFOLIO_HEAT_LIMIT_PCT)
 
     action, mode, tp = "WATCH", "NONE", None
 
@@ -1837,9 +1881,10 @@ def evaluate_strategy(
         avail_cash = cash - (total_assets * CASH_RESERVE_PCT)                                  # 與新進場一致
         after_weight = (current_mkt_value + close * qty) / total_assets if total_assets > 0 else 1.0
         if (score >= SCORE_BUY_ADD_THRESHOLD and can_add and pullback_ok and qty > 0
-                and add_profit_ok                                                              # P2：只對獲利中部位加碼，杜絕往下攤平
+                and add_profit_ok                                                              # 只對獲利中部位加碼，杜絕往下攤平
                 and avail_cash > close * qty                                                   # 補：現金檢查
                 and after_weight <= limits["max_weight"]                                       # 補：加碼後權重上限
+                and heat_after_ok                                                              # P5：加碼後熱度（含本筆增量）不超限
                 and not recent_buy and not recent_sell                                         # 補：冷卻期（買/賣皆計）
                 and market_regime.get("allow_add_position")):
             if category_ok:
@@ -1849,9 +1894,9 @@ def evaluate_strategy(
 
     elif held_shares <= 0 and meta["trend_ok"] and meta["liquid_ok"] and not meta["earnings_blocked"]:
         avail_cash = cash - (total_assets * CASH_RESERVE_PCT)
-        heat_ok = portfolio_heat_pct < PORTFOLIO_HEAT_LIMIT_PCT * 100
         if (score >= SCORE_BUY_NOW_THRESHOLD and qty > 0 and avail_cash > close * qty
-                and heat_ok and not recent_buy and not recent_sell                             # 補：冷卻期（買/賣皆計）
+                and heat_after_ok                                                              # P5：進場後熱度（含本筆增量）不超限
+                and not recent_buy and not recent_sell                                         # 補：冷卻期（買/賣皆計）
                 and entry_quality_ok                                                           # P1：突破/回檔觸發 + 不追高 + 強於大盤
                 and market_regime.get("allow_new_position")):
             if category_ok:
@@ -1867,6 +1912,7 @@ def evaluate_strategy(
         "atr": atr,
         "entry_atr": round(atr_entry, 4),
         "trail_atr_mult": trail_atr_mult,
+        "corr_risk_scale": round(_corr_scale, 2),   # P5：本次 sizing 套用的相關性縮量係數
         "entry_ref": round(entry, 2),
         "stop_loss": round(effective_stop, 2),
         "trend_stop": round(chandelier, 2),
@@ -1902,6 +1948,7 @@ def evaluate_strategy(
 def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: float, cash: float, market_regime: Dict) -> List[Dict]:
     res = []
     heat = calc_portfolio_heat(portfolio, total_assets).get("heat_pct", 0)
+    avg_corr = calc_portfolio_correlation(portfolio).get("avg_corr")   # P5：整組算一次，逐檔傳入
     for p in portfolio:
         hist = get_unified_analysis(p["Ticker"])
         prof = get_symbol_profile(p["Ticker"])
@@ -1912,7 +1959,8 @@ def enrich_portfolio_with_weight_and_risk(portfolio: List[Dict], total_assets: f
 
         if hist is not None and not hist.empty:
             sc, act, det, _ = evaluate_strategy(
-                p["Ticker"], hist, p["Shares"], p["MarketValue"], total_assets, cash, market_regime, heat, portfolio
+                p["Ticker"], hist, p["Shares"], p["MarketValue"], total_assets, cash, market_regime, heat, portfolio,
+                avg_corr=avg_corr,
             )
             row.update({
                 "Signal": act,
@@ -1948,6 +1996,7 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
     # portfolio 已由 enrich_portfolio_with_weight_and_risk 補上 StopLoss → heat 可正確計算
     # （過去此處寫死 0，使 PORTFOLIO_HEAT_LIMIT 在此進場路徑形同虛設）
     heat_pct = calc_portfolio_heat(portfolio, total_assets).get("heat_pct", 0.0)
+    avg_corr = calc_portfolio_correlation(portfolio).get("avg_corr")   # P5：整組算一次
 
     universe = sorted(list(set(
         [p["Ticker"] for p in portfolio] +
@@ -1965,7 +2014,7 @@ def run_auto_scanner(portfolio, trades_df, cash, total_assets, market_regime, wa
         recent_buy, recent_sell = get_recent_trade_status(tk, trades_df)
         sc, act, det, note = evaluate_strategy(
             tk, h, held, mkt_val, total_assets, cash, market_regime, heat_pct, portfolio,
-            recent_buy=recent_buy, recent_sell=recent_sell
+            recent_buy=recent_buy, recent_sell=recent_sell, avg_corr=avg_corr,
         )
         candidates.append({"ticker": tk, "score": sc, "action": act, "details": det, "note": note})
 
@@ -2648,7 +2697,8 @@ def _annotate_semi_candidate(r: Dict, exposure: Dict, held_set: set,
 
 
 def apply_entry_risk_gates(cand: Dict, portfolio: List[Dict], total_assets: float,
-                           cash: float, heat_pct: float, market_regime: Dict) -> None:
+                           cash: float, heat_pct: float, market_regime: Dict,
+                           avg_corr: Optional[float] = None) -> None:
     """
     半導體進場引擎的統一風控閘（就地更新 cand）。
     過去 _us_semi_score_one 算出的 suggested_qty 只看 ATR 風險、且用固定 32000 計本金，
@@ -2679,8 +2729,11 @@ def apply_entry_risk_gates(cand: Dict, portfolio: List[Dict], total_assets: floa
     risk_per_share = max(0.01, close - stop)
     risk_mult = safe_float(market_regime.get("risk_multiplier", 1.0), 1.0)
 
-    # ③ 即時權益 sizing（取代固定 DEFAULT_INITIAL_CAPITAL）＋ regime 風險係數
-    qty = math.floor(total_assets * limits["risk_per_trade_pct"] * risk_mult / risk_per_share)
+    # ③ 即時權益 sizing（取代固定 DEFAULT_INITIAL_CAPITAL）＋ regime 風險係數 ＋ 相關性縮量（P5）
+    _cs = corr_risk_scale(avg_corr)
+    qty = math.floor(total_assets * limits["risk_per_trade_pct"] * risk_mult * _cs / risk_per_share)
+    if _cs < 1.0:
+        cand["corr_risk_scale"] = round(_cs, 2)
     notes = []
 
     def _cut(cap_qty: int, hard_msg: str, soft_msg: str):
@@ -2791,10 +2844,12 @@ def run_us_semi_scanner(extra_tickers: Optional[List[str]] = None,
             portfolio = []
     exposure = {c["category"]: c for c in calc_category_exposure(portfolio, total_assets)}
     held_set = _held_tickers_from_trades(trades_df)            # 直接由交易算持倉，不依賴抓價
+    avg_corr = calc_portfolio_correlation(portfolio).get("avg_corr") if portfolio else None   # P5
     cap_pct = CATEGORY_MAX_WEIGHT * 100
     for r in results:
         _annotate_semi_candidate(r, exposure, held_set, trades_df, cap_pct)
-        apply_entry_risk_gates(r, portfolio, total_assets, cash, heat_pct, market_regime)
+        apply_entry_risk_gates(r, portfolio, total_assets, cash, heat_pct, market_regime,
+                               avg_corr=avg_corr)
 
     strong_buy = [r for r in results if r["signal"] == "STRONG_BUY"]
     buy = [r for r in results if r["signal"] == "BUY"]

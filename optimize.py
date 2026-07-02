@@ -59,10 +59,11 @@ STUDIES: Dict[str, Dict[str, List]] = {
         "EXIT_TP1_PCT": [0.20, 0.35],
         "EXIT_SCALE_OUT_PCT": [0.34, 0.50],
     },
-    # §5 保護期與保本
+    # §5 保護期與保本（P6：含保本緩衝——避開 +1R~+2R「碰成本就死」的洗盤走廊）
     "grace": {
         "EXIT_MIN_HOLD_BARS": [1, 3, 5],
         "EXIT_BREAKEVEN_AT_R": [1.0, 1.5],
+        "EXIT_BREAKEVEN_BUFFER_R": [0.0, 0.25],
     },
     # §2/§5 進場門檻與追高上限
     "entry": {

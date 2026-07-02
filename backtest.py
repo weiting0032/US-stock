@@ -66,6 +66,28 @@ def _norm_index(idx: pd.Index) -> pd.DatetimeIndex:
     return di.normalize()
 
 
+def _avg_corr_asof(frames: Dict[str, Dict], held: List[str], today,
+                   lookback: Optional[int] = None) -> Optional[float]:
+    """P5：以「截至今日」的收盤序列估持倉平均兩兩相關性（完全因果，供逐日縮量）。
+    不走 calc_portfolio_correlation（它抓即時 2 年資料，在回測中屬前視且會連網）。"""
+    if lookback is None:
+        lookback = core.CORR_LOOKBACK_DAYS
+    rets = []
+    for tk in held:
+        fr = frames.get(tk)
+        pos = fr["pos"].get(today) if fr else None
+        if pos is None or pos <= lookback:
+            continue
+        c = fr["close"][pos - lookback: pos + 1]
+        rets.append(np.diff(c) / c[:-1])
+    if len(rets) < 2:
+        return None
+    m = np.corrcoef(np.vstack(rets))
+    iu = np.triu_indices_from(m, k=1)
+    v = m[iu]
+    return float(np.nanmean(v)) if v.size else None
+
+
 class _Position:
     """單一標的的持倉狀態（FIFO lots），鏡射 core.build_portfolio 的計算方式。"""
 
@@ -324,6 +346,9 @@ def _run_backtest_impl(
                 heat += (h["px"] - stop) * h["pos"].shares
         heat_pct = heat / total_assets * 100 if total_assets > 0 else 0.0
 
+        # (b2) 持倉相關性（as-of，P5）：供 evaluate_strategy 的逐檔風險縮量
+        day_avg_corr = _avg_corr_asof(frames, list(held_today.keys()), today)
+
         # (c) 對宇宙每檔評估（持有與未持有都要，才會有進場訊號）
         decisions = []
         for tk, fr in frames.items():
@@ -340,6 +365,7 @@ def _run_backtest_impl(
                 sc, act, det, note = evaluate_strategy(
                     tk, hist_view, held_shares, cur_mv, total_assets, cash,
                     regime, heat_pct, port_list, recent_buy=rb, recent_sell=rs,
+                    avg_corr=day_avg_corr,
                 )
             except Exception:
                 continue

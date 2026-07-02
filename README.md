@@ -63,7 +63,9 @@ optimize.py / App 回測分頁   ──▶  找到候選參數（看「訓練段
 | 出場 | `EXIT_TP1_R` / `EXIT_TP1_PCT` | 2.0 / 0.20 | 第一獲利目標（+NR 與 +N% 取較早） |
 | 出場 | `EXIT_SCALE_OUT_PCT` | 0.34 | 觸及 TP1 分批賣出比例 |
 | 出場 | `EXIT_BREAKEVEN_AT_R` | 1.0 | 浮盈達 +NR 後止損上移保本 |
+| 出場 | `EXIT_BREAKEVEN_BUFFER_R` | 0.0 | 保本線緩衝（entry−N×R）；0.25 可避開回踩成本被掃的洗盤走廊，採用前先跑 `--study grace` |
 | 出場 | `EXIT_MIN_HOLD_BARS` | 1 | 新倉保護期（日線根數） |
+| 風控 | `CORR_RISK_SCALE_ENABLE` / `_FLOOR` | 1 / 0.4 | 持倉平均相關性高 → 逐檔風險連續縮量 scale=clip(1.3−corr, floor, 1)；假分散的實質對策 |
 | 進場 | `SCORE_BUY_NOW_THRESHOLD` | 3.5 | 新倉評分門檻 |
 | 進場 | `ENTRY_MAX_EXT_ATR` | 4.0 | 追高保護：收盤 ≤ SMA20 + N×ATR |
 | 加碼 | `ADD_MIN_PROFIT_R` | 0.5 | 加碼前需站上 進場 + N×R |
