@@ -12,6 +12,7 @@
 | `scanner.py` | GitHub Actions 排程入口（盤前／盤後／半導體／廣度） | `python scanner.py [--semi\|--broad]` |
 | `backtest.py` | 事件驅動回測，重放 `evaluate_strategy`，對標 SOXX/SPY | `python backtest.py --universe semi` |
 | `optimize.py` | 參數掃描 + walk-forward（樣本外驗證，防過擬合） | `python optimize.py --study stops` |
+| `tests/` | 離線測試套件（合成資料，不連網；CI 於 push 自動跑） | `pytest tests/ -q` |
 
 ## 研究 → 上線工作流程
 
@@ -22,11 +23,15 @@ optimize.py / App 回測分頁   ──▶  找到候選參數（看「訓練段
    檢查「測試段（樣本外）」是否仍穩健   ──✗──▶  疑似過擬合，捨棄
         │ ✅ 樣本外仍佳
         ▼
-   人工把該參數設到對應執行環境（見下）   ──▶   下次掃描/App 重啟即生效
+   App「⚡ 套用冠軍參數」試穿（僅本工作階段，可一鍵還原，重啟即失效）
+        │ 確認訊號/持倉評估符合預期
+        ▼
+   複製 App 產生的 Secrets 片段 → 人工設到對應執行環境（見下）→ 永久生效
 ```
 
-> ⚠️ **不會自動套用**：回測/最佳化只「唯讀重放」歷史，算出的最佳參數僅供參考顯示，
-> 不會寫回程式或設定。這是刻意的安全設計——2 年歷史極易過擬合，必須人工核可。
+> ⚠️ **不會自動套用到正式策略**：回測/最佳化只「唯讀重放」歷史。App 的「套用」
+> 僅作用於當前工作階段（試穿用）；排程掃描永遠只讀你人工設定的 Secrets。
+> 這是刻意的安全設計——2 年歷史極易過擬合，正式採用必須經過樣本外驗證＋人工核可。
 
 ## 策略參數套用指南（重點）
 
@@ -56,6 +61,7 @@ optimize.py / App 回測分頁   ──▶  找到候選參數（看「訓練段
 | 加碼 | `ADD_MIN_PROFIT_R` | 0.5 | 加碼前需站上 進場 + N×R |
 | 時間止損 | `TIME_STOP_BARS` / `TIME_STOP_MIN_R` | 20 / 1.0 | N 根內未達 +NR 且弱於大盤 → 釋出 |
 | 半導體 | `US_SEMI_SCORE_STRONG` / `_BUY` | 5.5 / 3.5 | 強力／積極買進門檻 |
+| 資料層 | `YF_MAX_RETRIES` / `YF_RETRY_BASE_SLEEP` | 3 / 1.0 | yfinance 退避重試；耗盡仍失敗會登記並由掃描器回報（不再靜默漏掉） |
 
 `optimize.py` 的四個研究（`stops` / `exits` / `grace` / `entry`）即對應上表主要欄位。
 

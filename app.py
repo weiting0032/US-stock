@@ -71,6 +71,7 @@ from core import (
     send_us_semi_tg,
     set_watchlist_enabled,
 )
+import core as core_mod
 import backtest as bt
 import optimize as opt
 
@@ -966,6 +967,16 @@ if "init_capital" not in st.session_state:
 
 initial_capital = st.session_state.init_capital
 
+# ── 工作階段層級的最佳化參數套用 ─────────────────────────────────────────────
+# 使用者在「🔎 回測」分頁按「套用冠軍參數」後存於 session_state；每輪重跑於此
+# 重新 setattr 到 core 模組，讓所有分頁（持倉訊號/掃描器/策略/回測）即時反映。
+# 僅影響本 App 進程、重啟即失效；排程掃描不受影響（永久採用須設 Secrets）。
+_applied_params = st.session_state.get("applied_params")
+if _applied_params:
+    for _apk, _apv in _applied_params.items():
+        if hasattr(core_mod, _apk):
+            setattr(core_mod, _apk, _apv)
+
 try:
     trades_df = load_trades()
     watchlist_df = load_watchlist()
@@ -1011,6 +1022,11 @@ st.markdown(f"""
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+if st.session_state.get("applied_params"):
+    _ap_desc = "、".join(f"{k}={v}" for k, v in st.session_state["applied_params"].items())
+    st.info(f"⚡ 本工作階段已套用最佳化參數：{_ap_desc}　"
+            f"（僅影響此 App，排程掃描不受影響；至「🔎 回測」分頁可還原或複製為 Secrets 永久採用）")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # NAV summary
@@ -2125,6 +2141,18 @@ with tab8:
     if _pause_on and session != "CLOSED":
         st.caption("🔕 已暫停自動刷新：盤中報價/NAV 暫不更新，長任務不會被中斷。")
 
+    # ── 工作階段參數套用狀態 / 一鍵還原 ───────────────────────────────────
+    if st.session_state.get("applied_params"):
+        _rst_c1, _rst_c2 = st.columns([3, 1])
+        _rst_c1.caption("⚡ 已套用工作階段參數：" +
+                        "、".join(f"{k}={v}" for k, v in st.session_state["applied_params"].items()))
+        if _rst_c2.button("↩ 還原預設", use_container_width=True, key="reset_applied"):
+            for _k, _v in (st.session_state.get("applied_params_orig") or {}).items():
+                setattr(core_mod, _k, _v)
+            st.session_state.pop("applied_params", None)
+            st.session_state.pop("applied_params_orig", None)
+            st.rerun()
+
     def _get_prepared(_universe):
         """抓齊回測所需資料並存於 session_state；同宇宙重複執行（含接著跑最佳化）直接重用，
         不重新下載。大宇宙（~90 檔）下載一次數分鐘，重用是最佳化能跑完的關鍵之一。"""
@@ -2310,6 +2338,36 @@ with tab8:
                     st.error("⚠️ 樣本外轉負 → 疑似過擬合，勿直接採用")
                 else:
                     st.warning("⚠️ 樣本外明顯衰退 → 邊際證據，建議擴大樣本或保守採用")
+
+            # ── 冠軍參數落地（人工核可，不自動套用）───────────────────────
+            # 依 core 現值的型別轉換（int 參數不會被 np.float64 污染成小數）
+            _bp_clean = {}
+            for _k, _v in (_wf["best_params"] or {}).items():
+                _cur = getattr(core_mod, _k, None)
+                if _cur is None:
+                    continue
+                try:
+                    _bp_clean[_k] = type(_cur)(_v)
+                except Exception:
+                    _bp_clean[_k] = _v
+
+            if _bp_clean:
+                if st.button("⚡ 套用冠軍參數（僅本 App 工作階段，可隨時還原）",
+                             use_container_width=True, key="apply_wf"):
+                    # 首次套用前記下原值（供還原）；再次套用只為新增的鍵補記
+                    _orig = st.session_state.get("applied_params_orig") or {}
+                    for _k in _bp_clean:
+                        _orig.setdefault(_k, getattr(core_mod, _k))
+                    st.session_state["applied_params_orig"] = _orig
+                    _merged = dict(st.session_state.get("applied_params") or {})
+                    _merged.update(_bp_clean)
+                    st.session_state["applied_params"] = _merged
+                    st.rerun()
+
+                with st.expander("📋 永久採用：複製到 GitHub Secrets / Streamlit secrets", expanded=False):
+                    st.caption("排程與重啟後仍生效的正式路徑（人工核可）。GitHub：repo Settings → "
+                               "Secrets and variables → Actions 逐項新增；App：.streamlit/secrets.toml。")
+                    st.code("\n".join(f'{_k} = "{_v}"' for _k, _v in _bp_clean.items()), language="toml")
         _keys = st.session_state.get("wf_keys", [])
         _tt = _wf.get("test_table")
         if _tt is not None and not _tt.empty:

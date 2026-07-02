@@ -14,6 +14,7 @@ from core import (
     build_portfolio,
     enrich_portfolio_with_weight_and_risk,
     format_us_semi_tg_messages,
+    get_fetch_failures,
     get_market_regime,
     load_trades,
     load_watchlist,
@@ -25,6 +26,15 @@ from core import (
     send_telegram_msg,
     send_us_semi_tg,
 )
+
+
+def report_fetch_failures():
+    """掃描收尾：列出重試耗盡仍抓不到的標的（§8：不再靜默漏掉）。"""
+    failures = get_fetch_failures()
+    if failures:
+        print(f"⚠️ 資料抓取失敗 {len(failures)} 檔（已重試）：")
+        for tk, why in sorted(failures.items()):
+            print(f"   {tk}: {why}")
 
 
 # ── 執行模式由 CLI 引數控制 ───────────────────────────────────────────────────
@@ -144,3 +154,4 @@ if __name__ == "__main__":
         run_broad_scan()
     else:
         run_portfolio_scan()
+    report_fetch_failures()

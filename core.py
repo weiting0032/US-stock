@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
 
 import gspread
+import numpy as np
 import pandas as pd
 import pytz
 import requests
@@ -218,6 +219,51 @@ def gsheet_retry(func, max_retries: int = 6, base_sleep: float = 1.5):
     raise last_error
 
 
+# ── yfinance 抓取強化（§8 資料層）：退避重試 + 失敗登記 ─────────────────────────
+# 過去 yfinance 失敗一律靜默回 None：被限流/瞬斷的標的會無聲消失在掃描結果中，
+# 且完全無從得知。現在統一走 yf_retry：指數退避重試，最終失敗登記於 fetch_failures
+# 供掃描器/健檢回報；成功後自動移除登記。
+YF_MAX_RETRIES = get_env_int("YF_MAX_RETRIES", 3)
+YF_RETRY_BASE_SLEEP = get_env_float("YF_RETRY_BASE_SLEEP", 1.0)
+
+_fetch_failures: Dict[str, str] = {}
+_fetch_failures_lock = threading.Lock()
+
+
+def _record_fetch_failure(symbol: str, reason) -> None:
+    with _fetch_failures_lock:
+        _fetch_failures[normalize_ticker(symbol)] = str(reason)[:200]
+
+
+def _clear_fetch_failure(symbol: str) -> None:
+    with _fetch_failures_lock:
+        _fetch_failures.pop(normalize_ticker(symbol), None)
+
+
+def get_fetch_failures() -> Dict[str, str]:
+    """最近抓取失敗的標的與原因（重試耗盡才登記；之後成功會自動移除）。"""
+    with _fetch_failures_lock:
+        return dict(_fetch_failures)
+
+
+def yf_retry(fn, symbol: str, retries: Optional[int] = None, base_sleep: Optional[float] = None):
+    """對 yfinance 呼叫做指數退避重試；全數失敗回 None 並登記 fetch_failures。"""
+    retries = YF_MAX_RETRIES if retries is None else retries
+    base_sleep = YF_RETRY_BASE_SLEEP if base_sleep is None else base_sleep
+    last = None
+    for i in range(max(1, retries)):
+        try:
+            out = fn()
+            _clear_fetch_failure(symbol)
+            return out
+        except Exception as e:
+            last = e
+            if i < retries - 1:
+                time.sleep(base_sleep * (2 ** i))
+    _record_fetch_failure(symbol, f"{type(last).__name__}: {last}")
+    return None
+
+
 # ===============================
 # Utility
 # ===============================
@@ -373,20 +419,17 @@ def get_sp500_tickers() -> List[str]:
 
 @ttl_cache(MARKET_CACHE_TTL, maxsize=1024)
 def get_last_price(symbol: str) -> Optional[float]:
-    try:
-        hist = yf.Ticker(normalize_ticker(symbol)).history(period="5d", auto_adjust=True)
-        if not hist.empty:
-            return float(hist["Close"].iloc[-1])
-    except Exception:
-        pass
+    symbol = normalize_ticker(symbol)
+    hist = yf_retry(lambda: yf.Ticker(symbol).history(period="5d", auto_adjust=True), symbol)
+    if hist is not None and not hist.empty:
+        return float(hist["Close"].iloc[-1])
     return None
 
 
 @lru_cache(maxsize=512)
 def get_next_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
     try:
-        tk = yf.Ticker(normalize_ticker(symbol))
-        cal = tk.calendar
+        cal = yf_retry(lambda: yf.Ticker(normalize_ticker(symbol)).calendar, symbol, retries=2)
         if cal is None:
             return None
         if isinstance(cal, pd.DataFrame):
@@ -413,25 +456,44 @@ def get_next_earnings_date(symbol: str) -> Optional[pd.Timestamp]:
     return None
 
 
+@lru_cache(maxsize=1024)
+def get_symbol_market_cap(symbol: str) -> float:
+    """僅取市值（fast_info，快）。§8：tk.info 極慢且易觸發限流，掃描熱路徑
+    （classify_symbol_bucket ← rank_symbol_strength ← 每檔每次掃描）一律走本函式。"""
+    symbol = normalize_ticker(symbol)
+
+    def _fetch():
+        fi = yf.Ticker(symbol).fast_info
+        try:
+            mc = fi["marketCap"]           # 舊版 fast_info：dict-like
+        except Exception:
+            mc = getattr(fi, "market_cap", None)   # 新版：屬性
+        return safe_float(mc or 0.0)
+
+    out = yf_retry(_fetch, symbol, retries=2)
+    return out if out is not None else 0.0
+
+
 @lru_cache(maxsize=512)
 def get_symbol_profile(symbol: str) -> Dict:
+    """完整檔案（sector/industry 需走慢速 tk.info）。僅供持倉顯示與產業分類
+    fallback 用；掃描熱路徑取市值請用 get_symbol_market_cap。"""
     symbol = normalize_ticker(symbol)
-    try:
-        tk = yf.Ticker(symbol)
-        info = tk.fast_info if hasattr(tk, "fast_info") else {}
-        long_info = tk.info or {}
+
+    def _fetch():
+        long_info = yf.Ticker(symbol).info or {}
         return {
-            "market_cap": safe_float(long_info.get("marketCap") or info.get("marketCap") or 0.0),
+            "market_cap": safe_float(long_info.get("marketCap") or 0.0) or get_symbol_market_cap(symbol),
             "sector": str(long_info.get("sector") or "").strip(),
             "industry": str(long_info.get("industry") or "").strip(),
         }
-    except Exception:
-        return {"market_cap": 0.0, "sector": "", "industry": ""}
+
+    out = yf_retry(_fetch, symbol, retries=2)
+    return out if out is not None else {"market_cap": get_symbol_market_cap(symbol), "sector": "", "industry": ""}
 
 
 def classify_symbol_bucket(symbol: str, hist: Optional[pd.DataFrame] = None) -> str:
-    prof = get_symbol_profile(symbol)
-    market_cap = safe_float(prof.get("market_cap"))
+    market_cap = get_symbol_market_cap(symbol)   # §8：fast_info，不走慢速 tk.info
     last_price = None
     dv20 = 0.0
 
@@ -474,21 +536,23 @@ def _wilder(s: pd.Series, period: int) -> pd.Series:
 @ttl_cache(MARKET_CACHE_TTL, maxsize=8)
 def _get_benchmark_close(symbol: str = "SPY", period: str = "2y") -> Optional[pd.Series]:
     """取得對標收盤序列並快取，避免在每檔 get_unified_analysis 內重複下載 SPY。"""
-    try:
-        h = yf.Ticker(normalize_ticker(symbol)).history(period=period, auto_adjust=True)
-        return h["Close"] if not h.empty else None
-    except Exception:
-        return None
+    sym = normalize_ticker(symbol)
+    h = yf_retry(lambda: yf.Ticker(sym).history(period=period, auto_adjust=True), sym)
+    if h is not None and not h.empty:
+        return h["Close"]
+    return None
 
 
 @ttl_cache(MARKET_CACHE_TTL, maxsize=1024)
 def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
+    symbol = normalize_ticker(symbol)
+    df = yf_retry(lambda: yf.Ticker(symbol).history(period="2y", auto_adjust=True), symbol)
+    if df is None:
+        return None                          # 重試耗盡，原因已登記 fetch_failures
+    if df.empty:
+        _record_fetch_failure(symbol, "empty history（下市/更名/錯誤代碼？）")
+        return None
     try:
-        symbol = normalize_ticker(symbol)
-        df = yf.Ticker(symbol).history(period="2y", auto_adjust=True)
-        if df.empty:
-            return None
-
         df = df.copy()
         df["SMA20"] = df["Close"].rolling(20).mean()
         df["SMA50"] = df["Close"].rolling(50).mean()
@@ -541,21 +605,11 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
         df["DollarVolume"] = df["Close"] * df["Volume"]
         df["DollarVolume20"] = df["DollarVolume"].rolling(20).mean()
 
-        obv = [0]
-        closes = df["Close"].tolist()
-        vols = df["Volume"].tolist()
-        for i in range(1, len(df)):
-            if closes[i] > closes[i - 1]:
-                obv.append(obv[-1] + vols[i])
-            elif closes[i] < closes[i - 1]:
-                obv.append(obv[-1] - vols[i])
-            else:
-                obv.append(obv[-1])
-        df["OBV"] = obv
-
-        obv_s = pd.Series(obv, index=df.index)
-        df["OBV_SMA20"] = obv_s.rolling(20).mean()
-        df["OBV_Slope20"] = obv_s.diff(20)
+        # OBV 向量化（§8）：與逐日迴圈等價 — 首日 0；漲加量、跌減量、平不變
+        _obv_dir = np.sign(df["Close"].diff()).fillna(0.0)
+        df["OBV"] = (_obv_dir * df["Volume"]).cumsum()
+        df["OBV_SMA20"] = df["OBV"].rolling(20).mean()
+        df["OBV_Slope20"] = df["OBV"].diff(20)
 
         spy_close_raw = _get_benchmark_close("SPY", "2y")
         if spy_close_raw is not None and not spy_close_raw.empty:
@@ -573,7 +627,8 @@ def get_unified_analysis(symbol: str) -> Optional[pd.DataFrame]:
             df["RS_Line_Slope20"] = pd.NA
 
         return df.dropna().copy()
-    except Exception:
+    except Exception as e:
+        _record_fetch_failure(symbol, f"指標計算失敗 {type(e).__name__}: {e}")
         return None
 
 
@@ -583,6 +638,7 @@ def clear_market_cache():
     _get_benchmark_close.cache_clear()
     get_next_earnings_date.cache_clear()
     get_symbol_profile.cache_clear()
+    get_symbol_market_cap.cache_clear()
     _get_splits.cache_clear()
 
 
@@ -1408,8 +1464,9 @@ def rank_symbol_strength(ticker: str, hist: pd.DataFrame, market_regime: Optiona
 @ttl_cache(86400, maxsize=512)
 def _get_splits(ticker: str) -> tuple:
     """回傳 ((split_date_naive_normalized, ratio), ...)；ratio 為分割倍數（10:1→10.0、1:10→0.1）。"""
+    sym = normalize_ticker(ticker)
+    s = yf_retry(lambda: yf.Ticker(sym).splits, sym, retries=2)
     try:
-        s = yf.Ticker(normalize_ticker(ticker)).splits
         if s is None or len(s) == 0:
             return ()
         out = []
@@ -1606,7 +1663,6 @@ def calc_portfolio_correlation(portfolio: List[Dict], lookback: int = None) -> D
         return empty
 
     corr = rdf.corr()
-    import numpy as np
     iu = np.triu_indices_from(corr.values, k=1)
     vals = corr.values[iu]
     if vals.size == 0:
