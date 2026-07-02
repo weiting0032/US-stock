@@ -88,6 +88,30 @@ def _avg_corr_asof(frames: Dict[str, Dict], held: List[str], today,
     return float(np.nanmean(v)) if v.size else None
 
 
+def _sox_trend_map(benchmarks: Optional[Dict], spy_df: Optional[pd.DataFrame],
+                   master: pd.DatetimeIndex) -> Dict:
+    """P11：由對標 SOXX 的 as-of 指標逐日判定板塊趨勢（BULL/NEUTRAL/BEAR），
+    規則與 core._get_sox_regime 一致、完全因果。SOXX 框缺 SMA 欄（如僅 Close）
+    或無 SPY 時回空 dict＝軟閘不啟用。"""
+    try:
+        sox = (benchmarks or {}).get("SOXX")
+        if sox is None or spy_df is None or not {"Close", "SMA50", "SMA200"} <= set(sox.columns):
+            return {}
+        s = sox.copy()
+        s.index = _norm_index(sox.index)
+        s = s.reindex(master).ffill()
+        p = spy_df["Close"].copy()
+        p.index = _norm_index(spy_df.index)
+        p = p.reindex(master).ffill()
+        rs = (s["Close"].pct_change(20) - p.pct_change(20)) * 100
+        score = ((s["Close"] > s["SMA50"]).astype(int) + (s["Close"] > s["SMA200"]).astype(int)
+                 + (s["SMA50"] > s["SMA200"]).astype(int) + (rs > 0).astype(int))
+        trend = np.where(score >= 3, "BULL", np.where(score <= 1, "BEAR", "NEUTRAL"))
+        return dict(zip(master, trend))
+    except Exception:
+        return {}
+
+
 class _Position:
     """單一標的的持倉狀態（FIFO lots），鏡射 core.build_portfolio 的計算方式。"""
 
@@ -152,8 +176,14 @@ def run_backtest(
     benchmark_symbols: Optional[List[str]] = None,
     progress: bool = False,
     earnings_gate: bool = False,
+    fill_mode: str = "close",
 ) -> Dict:
     """回測入口（P1）：預設停用財報封鎖閘。
+
+    fill_mode（P9）：
+      "close"（預設）＝訊號日收盤成交——與訊號同價，隱含樂觀（實務是收盤後才看到訊號）。
+      "next_open"    ＝訊號日收盤決策、次日開盤±滑點成交——含隔夜跳空的實作損耗，
+                       兩種模式的差值即「同收盤成交」高估的執行成本上界。
 
     core.is_earnings_blocked 以「執行當下」的下一次財報日判斷，對歷史回放是
     非平穩污染源——同參數在不同日期執行，結果會漂移；執行日恰逢某檔財報前
@@ -166,13 +196,15 @@ def run_backtest(
     """
     if earnings_gate:
         result = _run_backtest_impl(tickers, start, end, initial_capital, fee, slippage_pct,
-                                    data, regime_frames, benchmarks, benchmark_symbols, progress)
+                                    data, regime_frames, benchmarks, benchmark_symbols, progress,
+                                    fill_mode=fill_mode)
     else:
         _orig_gate = core.is_earnings_blocked
         core.is_earnings_blocked = lambda *_a, **_k: False
         try:
             result = _run_backtest_impl(tickers, start, end, initial_capital, fee, slippage_pct,
-                                        data, regime_frames, benchmarks, benchmark_symbols, progress)
+                                        data, regime_frames, benchmarks, benchmark_symbols, progress,
+                                        fill_mode=fill_mode)
         finally:
             core.is_earnings_blocked = _orig_gate
     result["metrics"]["earnings_gate"] = bool(earnings_gate)
@@ -191,6 +223,7 @@ def _run_backtest_impl(
     benchmarks: Optional[Dict[str, pd.DataFrame]] = None,
     benchmark_symbols: Optional[List[str]] = None,
     progress: bool = False,
+    fill_mode: str = "close",
 ) -> Dict:
     """
     回傳 dict：metrics / equity_curve(DataFrame) / trades(DataFrame) / benchmarks。
@@ -256,6 +289,7 @@ def _run_backtest_impl(
         frames[tk] = {
             "df": df,
             "close": df["Close"].to_numpy(dtype="float64"),
+            "open": (df["Open"] if "Open" in df.columns else df["Close"]).to_numpy(dtype="float64"),
             "pos": {d: i for i, d in enumerate(nidx)},
         }
 
@@ -292,6 +326,39 @@ def _run_backtest_impl(
     trade_log: List[Dict] = []
     nav_rows: List[Dict] = []
     cash_reserve = initial_capital * CASH_RESERVE_PCT  # 與實盤一致：保留現金準備
+    pending: List[Dict] = []                           # P9 next_open：T 收盤訊號 → T+1 開盤成交
+    sox_map = _sox_trend_map(benchmarks, regime_frames.get("SPY"), master)   # P11：as-of 板塊趨勢
+
+    def _exec_sell(tk, sell_all, qty_hint, px, on_date):
+        nonlocal cash
+        pos = positions.get(tk)
+        if pos is None or pos.shares <= 1e-9 or px <= 0:
+            return
+        qty = pos.shares if sell_all else min(pos.shares, float(qty_hint or 0))
+        if qty <= 1e-9:
+            return
+        pos.sell_fifo(qty, px * (1 - slippage_pct))
+        cash += px * qty * (1 - slippage_pct) - fee
+        trade_log.append({"Date": on_date, "Ticker": tk, "Type": "SELL", "Price": px,
+                          "Shares": qty, "Fee": fee, "Slippage": px * qty * slippage_pct})
+
+    def _exec_buy(tk, qty, px, on_date):
+        nonlocal cash
+        qty = float(qty or 0)
+        if qty <= 0 or px <= 0:
+            return
+        cost = px * qty * (1 + slippage_pct) + fee
+        if cost > cash - cash_reserve + 1e-6:            # 現金閘（保留現金準備）— 與實盤一致
+            avail = cash - cash_reserve - fee
+            qty = math.floor(avail / (px * (1 + slippage_pct))) if px > 0 else 0
+            if qty <= 0:
+                return
+            cost = px * qty * (1 + slippage_pct) + fee
+        pos = positions.setdefault(tk, _Position())
+        pos.buy(qty, cost / qty, on_date)
+        cash -= cost
+        trade_log.append({"Date": on_date, "Ticker": tk, "Type": "BUY", "Price": px,
+                          "Shares": qty, "Fee": fee, "Slippage": px * qty * slippage_pct})
 
     def _recent_status(tk: str, today: pd.Timestamp):
         cutoff = today - pd.Timedelta(days=COOLDOWN_DAYS)
@@ -313,6 +380,25 @@ def _run_backtest_impl(
             print(f"  回放 {di}/{len(master)}  {today.date()}  NAV≈{cash + sum(positions[t].shares * frames[t]['close'][frames[t]['pos'][today]] for t in positions if today in frames[t]['pos']):,.0f}")
 
         regime = regime_by_date.get(today, default_regime)
+
+        # (0) P9 next_open：先在「今日開盤」執行昨日訊號的掛單（先賣後買），再做今日評估。
+        #     該檔今日無報價則順延（最多 5 個交易日，避免殭屍單）。
+        if pending:
+            _still = []
+            for _o in sorted(pending, key=lambda o: 0 if o["side"] == "SELL" else 1):
+                _fr = frames.get(_o["tk"])
+                _p = _fr["pos"].get(today) if _fr else None
+                if _p is None:
+                    _o["tries"] = _o.get("tries", 0) + 1
+                    if _o["tries"] < 5:
+                        _still.append(_o)
+                    continue
+                _open_px = float(_fr["open"][_p])
+                if _o["side"] == "SELL":
+                    _exec_sell(_o["tk"], _o["sell_all"], _o["qty"], _open_px, today)
+                else:
+                    _exec_buy(_o["tk"], _o["qty"], _open_px, today)
+            pending = _still
 
         # (a) 目前持倉的今日市值 / 建構給 evaluate_strategy 的 portfolio 列表
         held_today = {}
@@ -365,7 +451,7 @@ def _run_backtest_impl(
                 sc, act, det, note = evaluate_strategy(
                     tk, hist_view, held_shares, cur_mv, total_assets, cash,
                     regime, heat_pct, port_list, recent_buy=rb, recent_sell=rs,
-                    avg_corr=day_avg_corr,
+                    avg_corr=day_avg_corr, sox_trend=sox_map.get(today),
                 )
             except Exception:
                 continue
@@ -381,43 +467,22 @@ def _run_backtest_impl(
         buys.sort(key=lambda x: -x[1])
 
         for tk, sc, act, det in sells:
-            pos = positions.get(tk)
-            if pos is None or pos.shares <= 1e-9:
+            if fill_mode == "next_open":
+                pending.append({"tk": tk, "side": "SELL", "sell_all": act == "SELL_EXIT",
+                                "qty": float(det.get("suggested_sell_qty", 0) or 0)})
                 continue
             px = frames[tk]["close"][frames[tk]["pos"][today]]
-            if act == "SELL_EXIT":
-                qty = pos.shares
-            else:  # SELL_PARTIAL
-                qty = min(pos.shares, float(det.get("suggested_sell_qty", 0) or 0))
-            if qty <= 1e-9:
-                continue
-            proceeds_ps = px * (1 - slippage_pct)
-            pos.sell_fifo(qty, proceeds_ps)
-            cash += px * qty * (1 - slippage_pct) - fee
-            trade_log.append({"Date": today, "Ticker": tk, "Type": "SELL",
-                              "Price": px, "Shares": qty, "Fee": fee,
-                              "Slippage": px * qty * slippage_pct})
+            _exec_sell(tk, act == "SELL_EXIT", det.get("suggested_sell_qty", 0), px, today)
 
         for tk, sc, act, det in buys:
             qty = float(det.get("suggested_buy_qty", 0) or 0)
             if qty <= 0:
                 continue
+            if fill_mode == "next_open":
+                pending.append({"tk": tk, "side": "BUY", "qty": qty})
+                continue
             px = frames[tk]["close"][frames[tk]["pos"][today]]
-            cost = px * qty * (1 + slippage_pct) + fee
-            # 現金閘（保留現金準備）— 與實盤 avail_cash 一致
-            if cost > cash - cash_reserve + 1e-6:
-                # 依可用現金縮量
-                avail = cash - cash_reserve - fee
-                qty = math.floor(avail / (px * (1 + slippage_pct))) if px > 0 else 0
-                if qty <= 0:
-                    continue
-                cost = px * qty * (1 + slippage_pct) + fee
-            pos = positions.setdefault(tk, _Position())
-            pos.buy(qty, cost / qty, today)
-            cash -= cost
-            trade_log.append({"Date": today, "Ticker": tk, "Type": "BUY",
-                              "Price": px, "Shares": qty, "Fee": fee,
-                              "Slippage": px * qty * slippage_pct})
+            _exec_buy(tk, qty, px, today)
 
         # (e) 收盤後記錄 NAV
         mv_close = 0.0
@@ -435,6 +500,7 @@ def _run_backtest_impl(
     equity = pd.DataFrame(nav_rows).set_index("Date")
     trades_df = _trades_to_df(trade_log)
     metrics = _compute_metrics(equity, trades_df, initial_capital)
+    metrics["fill_mode"] = fill_mode
     bench = _benchmark_metrics(benchmarks, master, initial_capital)
     metrics["benchmarks"] = bench
 
@@ -552,6 +618,7 @@ def format_report(result: Dict) -> str:
         f"  平均曝險    {_fmt(m.get('avg_exposure_pct'))}%",
         "  ───────────────────────────────────────────",
         f"  財報封鎖    {'啟用' if m.get('earnings_gate') else '停用（回測預設：以執行日財報判斷會污染歷史；live 會迴避，故進場面略偏樂觀）'}",
+        f"  成交模式    {'次日開盤（含隔夜跳空實作損耗，較貼近人工執行）' if m.get('fill_mode') == 'next_open' else '訊號日收盤（與訊號同價，略偏樂觀；可用 --fill-mode next_open 量化差距）'}",
         f"  總成交筆數  {m['n_trades']}",
         f"  已平倉筆數  {r.get('closed_trades', 0)}",
         f"  真實勝率    {_fmt(r.get('win_rate'))}%",
@@ -614,6 +681,8 @@ def main():
     ap.add_argument("--csv", default=None, help="另存權益曲線 CSV 路徑")
     ap.add_argument("--earnings-gate", action="store_true",
                     help="啟用財報封鎖閘（預設停用；以執行日財報日判斷會污染歷史回放）")
+    ap.add_argument("--fill-mode", choices=["close", "next_open"], default="close",
+                    help="成交模式：close=訊號日收盤（預設）；next_open=次日開盤（量化實作損耗）")
     args = ap.parse_args()
 
     if args.tickers:
@@ -625,7 +694,7 @@ def main():
     result = run_backtest(
         tickers=universe, start=args.start, end=args.end,
         initial_capital=args.capital, progress=True,
-        earnings_gate=args.earnings_gate,
+        earnings_gate=args.earnings_gate, fill_mode=args.fill_mode,
     )
     print()
     print(format_report(result))

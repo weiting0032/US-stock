@@ -80,6 +80,57 @@ def test_earnings_gate_true_honors_block(offline_core, synth_market, monkeypatch
     assert res["metrics"]["n_trades"] == 0, "閘啟用且全數封鎖 → 不應有任何進場"
 
 
+# ── P9：次日開盤成交模式——量化「同收盤成交」的樂觀偏誤 ─────────────────────
+def _gap_data(synth_market):
+    """讓 Open 與 Close 可區分（Open = Close×0.98），以驗證成交價確實用開盤。"""
+    data, regime, bench = synth_market
+    data2 = {}
+    for tk, df in data.items():
+        d = df.copy()
+        d["Open"] = d["Close"] * 0.98
+        data2[tk] = d
+    return data2, regime, bench
+
+
+def test_next_open_fills_at_open_and_shifts_later(offline_core, synth_market):
+    data2, regime, bench = _gap_data(synth_market)
+    res_c = bt.run_backtest(initial_capital=32000.0, data=data2,
+                            regime_frames=regime, benchmarks=bench)
+    res_o = bt.run_backtest(initial_capital=32000.0, data=data2,
+                            regime_frames=regime, benchmarks=bench, fill_mode="next_open")
+    assert res_o["metrics"]["fill_mode"] == "next_open"
+    assert res_c["metrics"]["fill_mode"] == "close"
+    tr_o, tr_c = res_o["trades"], res_c["trades"]
+    assert len(tr_o) > 0 and len(tr_c) > 0
+
+    # 訊號日相同 → next_open 首筆買進至少晚一個交易日
+    first_c = tr_c[tr_c["Type"] == "BUY"]["TradeDateTime"].min()
+    first_o = tr_o[tr_o["Type"] == "BUY"]["TradeDateTime"].min()
+    assert first_o > first_c, f"next_open 首筆應晚於 close 模式（{first_o} vs {first_c}）"
+
+    # 每筆成交價必須等於該檔「成交日」的開盤價
+    for _, t in tr_o.iterrows():
+        px_open = float(data2[t["Ticker"]].loc[t["TradeDateTime"], "Open"])
+        assert abs(float(t["Price"]) - px_open) < 1e-6, \
+            f"{t['Ticker']} {t['TradeDateTime']} 應以開盤 {px_open} 成交，得 {t['Price']}"
+
+
+def test_next_open_causality(offline_core, synth_market):
+    """next_open 模式的因果性：截斷回測與全期在共同日 NAV 完全一致
+    （掛單只由過去訊號產生、於未來成交，不得反向洩漏）。"""
+    data2, regime, bench = _gap_data(synth_market)
+    full = bt.run_backtest(initial_capital=32000.0, data=data2,
+                           regime_frames=regime, benchmarks=bench, fill_mode="next_open")
+    eq_full = full["equity_curve"]["NAV"]
+    mid = eq_full.index[len(eq_full) // 2]
+    trunc = bt.run_backtest(initial_capital=32000.0, end=str(mid.date()), data=data2,
+                            regime_frames=regime, benchmarks=bench, fill_mode="next_open")
+    eq_trunc = trunc["equity_curve"]["NAV"]
+    common = eq_trunc.index.intersection(eq_full.index)
+    assert len(common) > 50
+    assert (eq_full.loc[common] - eq_trunc.loc[common]).abs().max() < 1e-6
+
+
 def test_sizing_respects_cash_reserve(offline_core, synth_market):
     """任一時點現金不得低於「初始資金 × 現金準備比例」以下太多（買進閘生效）。"""
     data, regime, bench = synth_market

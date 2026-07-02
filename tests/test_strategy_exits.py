@@ -149,3 +149,48 @@ def test_breakeven_buffer_tolerates_retrace(offline_core, monkeypatch):
     sc, act, det, _ = core.evaluate_strategy(
         "TESTX", hist, 10.0, mv, 32000.0, 20000.0, REGIME_ON, 0.0, portfolio)
     assert act != "SELL_EXIT", f"收盤 99.5 > 緩衝保本線 98.5 → 不應出場（act={act}, mode={det['strategy_mode']}）"
+
+
+# ── P8：回檔閘＝帶狀區＋反轉確認（不再是接刀閘）─────────────────────────────
+def test_pullback_gate_floor_and_confirm(monkeypatch):
+    # 帶內＋收漲 → 放行
+    assert core.pullback_entry_ok(101.0, 100.0, 100.0, 102.0) is True
+    # 接刀：單日深跌破地板（88 < 100×0.96）→ 擋（舊式 88 ≤ 104 會放行！）
+    assert core.pullback_entry_ok(88.0, 100.0, 95.0, 96.0) is False
+    # 帶內但收跌且未收復昨高 → 無反轉跡象 → 擋
+    assert core.pullback_entry_ok(99.0, 100.0, 100.0, 101.0) is False
+    # 收復昨高（≥prev_high）即使收跌 → 放行
+    assert core.pullback_entry_ok(99.5, 100.0, 100.0, 99.5) is True
+    # 天花板恆在：乖離過高不算回檔
+    assert core.pullback_entry_ok(105.0, 100.0, 100.0, 106.0) is False
+    # 開關：關地板後深跌＋收漲可放行；再關確認後收跌也放行（回到舊行為）
+    monkeypatch.setattr(core, "ENTRY_PULLBACK_FLOOR_ENABLE", 0)
+    assert core.pullback_entry_ok(88.0, 100.0, 87.0, 96.0) is True
+    monkeypatch.setattr(core, "ENTRY_PULLBACK_CONFIRM", 0)
+    assert core.pullback_entry_ok(99.0, 100.0, 100.0, 101.0) is True
+
+
+# ── P11：SOX 板塊軟閘——只縮半導體、只在 BEAR、非半導體不受影響 ────────────────
+def test_sox_bear_gate_scales_semi_only(offline_core):
+    hist = make_stock(seed=1, noise=0.0)
+
+    def _qty(ticker, sox):
+        _, act, det, _ = core.evaluate_strategy(
+            ticker, hist, 0.0, 0.0, 32000.0, 32000.0, REGIME_ON, 0.0, [], sox_trend=sox)
+        return act, det
+
+    act0, det0 = _qty("NVDA", None)          # 基準（無 SOX 資訊）
+    q0 = det0["suggested_buy_qty"]
+    assert act0 == "BUY_NOW" and q0 > 0
+
+    act_bear, det_bear = _qty("NVDA", "BEAR")    # NVDA 在 US_SEMI_CATEGORY_MAP → 縮至 50%
+    assert det_bear["sox_gate_scale"] == 0.5
+    assert abs(det_bear["suggested_buy_qty"] - q0 * 0.5) <= 1
+
+    act_bull, det_bull = _qty("NVDA", "BULL")    # BULL 不縮
+    assert det_bull["sox_gate_scale"] == 1.0
+    assert det_bull["suggested_buy_qty"] == q0
+
+    act_ns, det_ns = _qty("TESTX", "BEAR")       # 非半導體（不在 map）→ 不受影響
+    assert det_ns["sox_gate_scale"] == 1.0
+    assert det_ns["suggested_buy_qty"] == q0

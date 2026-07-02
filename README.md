@@ -40,6 +40,10 @@ optimize.py / App 回測分頁   ──▶  找到候選參數（看「訓練段
   只有超額報酬隨分數分箱單調遞增才是評分有 edge 的證據。
 - 市場 regime 資料異常（SPY/QQQ 取價失敗）時 **fail-closed**：自動禁新倉/加碼、
   排程發 TG 告警；既有持倉的出場邏輯不受影響。
+- 回測可選 `--fill-mode next_open`（訊號日收盤決策、**次日開盤成交**）：與預設
+  close 模式的差值＝「同收盤成交」高估的執行成本上界（人工看訊號下單尤其適用）。
+- 參數掃描可選 `--rolling`（多折 rolling walk-forward）：判準改「跨折排名穩定度」，
+  比單折選冠軍更不易被運氣誤導；各折排名不穩＝樣本不足以分辨，勿硬選。
 
 ## 策略參數套用指南（重點）
 
@@ -68,6 +72,8 @@ optimize.py / App 回測分頁   ──▶  找到候選參數（看「訓練段
 | 風控 | `CORR_RISK_SCALE_ENABLE` / `_FLOOR` | 1 / 0.4 | 持倉平均相關性高 → 逐檔風險連續縮量 scale=clip(1.3−corr, floor, 1)；假分散的實質對策 |
 | 進場 | `SCORE_BUY_NOW_THRESHOLD` | 3.5 | 新倉評分門檻 |
 | 進場 | `ENTRY_MAX_EXT_ATR` | 4.0 | 追高保護：收盤 ≤ SMA20 + N×ATR |
+| 進場 | `ENTRY_PULLBACK_FLOOR_ENABLE` / `_CONFIRM` | 1 / 1 | 回檔閘地板（跌破 SMA20×(1−pct) 不算回檔）與反轉確認（收漲或收復昨高）；接刀防護，可用 `--study pullback` A/B |
+| 風控 | `SOX_GATE_ENABLE` / `_BEAR_RISK_SCALE` | 1 / 0.5 | SOX 空頭時半導體新倉/加碼風險縮量（0=禁入）；補 SPY/QQQ regime 對類股背離的盲區 |
 | 加碼 | `ADD_MIN_PROFIT_R` | 0.5 | 加碼前需站上 進場 + N×R |
 | 時間止損 | `TIME_STOP_BARS` / `TIME_STOP_MIN_R` | 20 / 1.0 | N 根內未達 +NR 且弱於大盤 → 釋出 |
 | 半導體 | `US_SEMI_SCORE_STRONG` / `_BUY` | 5.5 / 3.5 | 強力／積極買進門檻 |

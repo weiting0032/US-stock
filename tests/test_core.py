@@ -157,6 +157,26 @@ def test_yf_retry_records_and_clears_failures(monkeypatch):
     assert "TEST2" not in core.get_fetch_failures()
 
 
+# ── P12：SELL_EXIT 警報繞過節流（執行安全）──────────────────────────────────
+def test_sell_exit_alert_bypasses_throttle():
+    now = pd.Timestamp.now()
+
+    def _alerts(action, fp):
+        return pd.DataFrame([{"DateTime": now, "Ticker": "NVDA", "Action": action,
+                              "BaseKey": "x", "Price": 100.0, "Score": 5.0,
+                              "Session": "REGULAR", "TargetPrice": 100.0,
+                              "Message": "", "Fingerprint": fp}])
+
+    # 相同指紋＋剛發過：SELL_EXIT 仍須發送（崩盤日寧可重複不可漏發）
+    fp_s = core.build_alert_fingerprint("NVDA", "SELL_EXIT", "REGULAR", 100.0, 5.0, 100.0)
+    assert core.should_send_alert(_alerts("SELL_EXIT", fp_s), "NVDA", "SELL_EXIT",
+                                  100.0, 5.0, "REGULAR", 100.0) is True
+    # 買進類維持正常去抖動：相同指紋 → 抑制
+    fp_b = core.build_alert_fingerprint("NVDA", "BUY_NOW", "REGULAR", 100.0, 5.0, 100.0)
+    assert core.should_send_alert(_alerts("BUY_NOW", fp_b), "NVDA", "BUY_NOW",
+                                  100.0, 5.0, "REGULAR", 100.0) is False
+
+
 # ── P3：訊號成效的超額報酬（vs benchmark）────────────────────────────────────
 def _signal_frames():
     """確定性合成：FAST 日漲 0.3%、HUGGER 與對標同速 0.1%、SOXX 對標 0.1%。"""

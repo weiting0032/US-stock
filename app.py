@@ -51,6 +51,7 @@ from core import (
     enrich_portfolio_with_weight_and_risk,
     evaluate_strategy,
     format_us_semi_tg_messages,
+    get_current_sox_trend,
     get_market_regime,
     get_market_session,
     get_unified_analysis,
@@ -1364,6 +1365,7 @@ with tab3:
                 heat_info["heat_pct"],
                 portfolio,
                 avg_corr=portfolio_avg_corr,
+                sox_trend=get_current_sox_trend(),
             )
 
             score_colour = "#00E5A0" if score >= 5 else "#00D4FF" if score >= 3 else "#FFB800" if score >= 1.5 else "#FF3366"
@@ -1855,7 +1857,7 @@ with tab6:
             for _r in _results:
                 _annotate_semi_candidate(_r, _exposure, _held_set, trades_df, _cap_pct)
                 apply_entry_risk_gates(_r, portfolio, total_assets, cash, _heat_pct, market_regime,
-                                       avg_corr=portfolio_avg_corr)
+                                       avg_corr=portfolio_avg_corr, sox_trend=_sox.get("trend"))
         except Exception:
             pass
 

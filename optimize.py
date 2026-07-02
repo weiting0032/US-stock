@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import math
 import sys
 from contextlib import contextmanager
 from typing import Dict, List, Optional
@@ -69,6 +70,12 @@ STUDIES: Dict[str, Dict[str, List]] = {
     "entry": {
         "SCORE_BUY_NOW_THRESHOLD": [3.0, 3.5, 4.0],
         "ENTRY_MAX_EXT_ATR": [3.0, 4.0, 6.0],
+    },
+    # P8：回檔閘地板/反轉確認的 A/B（驗證「接刀防護」是否真提升樣本外品質）
+    "pullback": {
+        "ENTRY_PULLBACK_FLOOR_ENABLE": [0, 1],
+        "ENTRY_PULLBACK_CONFIRM": [0, 1],
+        "ENTRY_PULLBACK_SMA20_PCT": [0.04, 0.06],
     },
 }
 
@@ -250,6 +257,105 @@ def walk_forward(
     }
 
 
+def rolling_walk_forward(
+    param_grid: Dict[str, List],
+    data: Dict, regime_frames: Dict, benchmarks: Dict,
+    initial_capital: float = DEFAULT_INITIAL_CAPITAL,
+    n_folds: int = 3,
+    min_train_frac: float = 0.4,
+    extra_overrides: Optional[Dict] = None,
+    rank_by: str = "calmar",
+    progress: bool = False,
+) -> Dict:
+    """
+    P10：多折 rolling walk-forward——單折 60/40 在十幾組參數上「選冠軍」，
+    多重檢定下缺乏統計力（總有一組運氣好）。本函式把樣本後段切成 n_folds 個
+    互不重疊的樣本外窗（前 min_train_frac 僅作指標暖機/歷史），對「每一組參數」
+    在「每一折」都跑回測並排名，判準改為 selection-free 的**跨折排名穩定度**：
+    只有各折排名中位數穩居前段（≤ 組數的 1/3）的參數才值得採用。
+    """
+    master = _master_dates(regime_frames)
+    n = len(master)
+    train0 = max(2, int(n * min_train_frac))
+    test_span = max(2, (n - train0) // n_folds)
+    folds = []
+    for i in range(n_folds):
+        t_start = train0 + i * test_span
+        t_end = n - 1 if i == n_folds - 1 else min(n - 1, t_start + test_span - 1)
+        if t_start >= n - 1:
+            break
+        folds.append({"test": (master[t_start], master[t_end])})
+
+    keys = list(param_grid.keys())
+    fold_tables: List[pd.DataFrame] = []
+    rank_acc: Dict[tuple, List[int]] = {}
+    metric_acc: Dict[tuple, List[float]] = {}
+
+    for fi, f in enumerate(folds):
+        if progress:
+            print(f"  fold {fi + 1}/{len(folds)}: 樣本外 {f['test'][0].date()} → {f['test'][1].date()}")
+        tbl = grid_search(param_grid, data, regime_frames, benchmarks, initial_capital,
+                          str(f["test"][0].date()), str(f["test"][1].date()),
+                          extra_overrides, rank_by, progress).reset_index(drop=True)
+        tbl.insert(0, "fold", fi + 1)
+        for r_i, row in tbl.iterrows():
+            key = tuple(row[k] for k in keys)
+            rank_acc.setdefault(key, []).append(int(r_i) + 1)     # 表已依 rank_by 排序 → 列序即排名
+            v = row.get(rank_by)
+            metric_acc.setdefault(key, []).append(float(v) if pd.notna(v) else float("nan"))
+        fold_tables.append(tbl)
+
+    summary_rows = []
+    for key, ranks in rank_acc.items():
+        vals = pd.Series(metric_acc[key], dtype="float64")
+        row = dict(zip(keys, key))
+        row["折數"] = len(ranks)
+        row["排名中位數"] = float(pd.Series(ranks).median())
+        row["排名最差"] = int(max(ranks))
+        row[f"{rank_by}平均"] = round(float(vals.mean()), 3) if vals.notna().any() else None
+        row[f"{rank_by}最小"] = round(float(vals.min()), 3) if vals.notna().any() else None
+        summary_rows.append(row)
+    summary = (pd.DataFrame(summary_rows)
+               .sort_values(["排名中位數", "排名最差"]).reset_index(drop=True))
+
+    return {
+        "folds": [{"test": (str(f["test"][0].date()), str(f["test"][1].date()))} for f in folds],
+        "fold_tables": fold_tables,
+        "summary": summary,
+        "best_params": summary.iloc[0][keys].to_dict() if not summary.empty else None,
+        "rank_by": rank_by,
+        "n_folds": len(folds),
+        "n_combos": len(rank_acc),
+    }
+
+
+def format_rolling(res: Dict, param_keys: List[str]) -> str:
+    rb = res["rank_by"]
+    n_combos = res.get("n_combos", 0)
+    stable_cut = max(1, math.ceil(n_combos / 3)) if n_combos else 1
+    lines = [
+        "═══════════════════════════════════════════════════════════",
+        f"  ROLLING WALK-FORWARD（{res['n_folds']} 折 · 依 {rb} 排名）",
+        "═══════════════════════════════════════════════════════════",
+    ]
+    for i, f in enumerate(res["folds"], 1):
+        lines.append(f"  fold {i}  樣本外 {f['test'][0]} → {f['test'][1]}")
+    lines += [
+        "  ───────────────────────────────────────────────────────",
+        "  跨折排名穩定度（排名中位數越小越穩；判準：中位數 ≤ "
+        f"{stable_cut}（組數 {n_combos} 的 1/3）才算穩定）：",
+        res["summary"].head(10).to_string(index=False),
+    ]
+    if res.get("best_params") is not None and not res["summary"].empty:
+        med = float(res["summary"].iloc[0]["排名中位數"])
+        lines.append("")
+        lines.append(f"  最穩參數：{res['best_params']}（排名中位數 {med:g}）")
+        lines.append("  ✅ 跨折穩定 → 可考慮採用" if med <= stable_cut
+                     else "  ⚠️ 各折排名不穩 → 樣本不足以分辨參數優劣，勿硬選冠軍")
+    lines.append("═══════════════════════════════════════════════════════════")
+    return "\n".join(lines)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 報表
 # ────────────────────────────────────────────────────────────────────────────
@@ -321,13 +427,16 @@ def main():
         pass
 
     ap = argparse.ArgumentParser(description="策略參數掃描 / walk-forward 最佳化")
-    ap.add_argument("--study", default="stops", help="stops | exits | grace | entry | all")
+    ap.add_argument("--study", default="stops", help="stops | exits | grace | entry | pullback | all")
     ap.add_argument("--universe", default="semi", help="semi | broad")
     ap.add_argument("--tickers", default=None, help="逗號分隔，覆蓋 --universe")
     ap.add_argument("--capital", type=float, default=DEFAULT_INITIAL_CAPITAL)
     ap.add_argument("--train-frac", type=float, default=0.6, help="訓練段比例（其餘為樣本外測試段）")
     ap.add_argument("--rank-by", default="calmar", help="calmar | sharpe | cagr_pct | total_return_pct")
     ap.add_argument("--pure-trail", action="store_true", help="關閉分批 TP，測純移動停損")
+    ap.add_argument("--rolling", action="store_true",
+                    help="P10：改用多折 rolling walk-forward（跨折排名穩定度判準，較不易被單折運氣誤導）")
+    ap.add_argument("--folds", type=int, default=3, help="rolling 模式的折數（預設 3）")
     ap.add_argument("--csv", default=None, help="另存完整掃描表 CSV")
     args = ap.parse_args()
 
@@ -352,14 +461,24 @@ def main():
         grid = STUDIES[s]
         print(f"\n### STUDY = {s}  參數格 {grid}"
               f"{'（純移動停損）' if args.pure_trail else ''}")
-        res = walk_forward(grid, data, regime, benchmarks, args.capital,
-                           train_frac=args.train_frac, extra_overrides=extra,
-                           rank_by=args.rank_by, progress=True)
-        print()
-        print(format_walk_forward(res, list(grid.keys())))
-        t = res["test_table"].copy()
-        t.insert(0, "study", s)
-        t.insert(1, "segment", "test")
+        if args.rolling:
+            res = rolling_walk_forward(grid, data, regime, benchmarks, args.capital,
+                                       n_folds=args.folds, extra_overrides=extra,
+                                       rank_by=args.rank_by, progress=True)
+            print()
+            print(format_rolling(res, list(grid.keys())))
+            t = res["summary"].copy()
+            t.insert(0, "study", s)
+            t.insert(1, "segment", "rolling")
+        else:
+            res = walk_forward(grid, data, regime, benchmarks, args.capital,
+                               train_frac=args.train_frac, extra_overrides=extra,
+                               rank_by=args.rank_by, progress=True)
+            print()
+            print(format_walk_forward(res, list(grid.keys())))
+            t = res["test_table"].copy()
+            t.insert(0, "study", s)
+            t.insert(1, "segment", "test")
         all_tables.append(t)
 
     if args.csv and all_tables:

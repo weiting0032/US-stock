@@ -21,7 +21,7 @@ IDX = pd.bdate_range("2023-01-02", periods=N_BARS)
 # 保護的策略參數前綴：測試（如 App 套用流程）可能 setattr core 全域，跑完必須還原
 _PARAM_PREFIXES = ("EXIT_", "ENTRY_", "SCORE_", "TIME_STOP", "ADD_", "US_SEMI_SCORE",
                    "CASH_RESERVE", "COOLDOWN", "YF_MAX_RETRIES", "YF_RETRY_BASE_SLEEP",
-                   "CORR_", "PORTFOLIO_HEAT")
+                   "CORR_", "PORTFOLIO_HEAT", "SOX_GATE")
 
 
 @pytest.fixture(autouse=True)

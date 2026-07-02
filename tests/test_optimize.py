@@ -53,6 +53,24 @@ def test_walk_forward_split_and_champion(offline_core, synth_market):
     assert "WALK-FORWARD" in report and "樣本外" in report
 
 
+# ── P10：rolling walk-forward——跨折排名穩定度判準 ────────────────────────────
+def test_rolling_walk_forward_folds_and_stability(offline_core, synth_market):
+    data, regime, bench = synth_market
+    grid = {"EXIT_INIT_STOP_ATR": [1.5, 3.0]}
+    res = opt.rolling_walk_forward(grid, data, regime, bench, initial_capital=32000.0,
+                                   n_folds=2, rank_by="calmar")
+    assert res["n_folds"] == 2 and len(res["folds"]) == 2
+    f1, f2 = res["folds"]
+    assert f1["test"][1] < f2["test"][0], "各折樣本外窗不得重疊"
+    s = res["summary"]
+    assert len(s) == 2, "每組參數應有一列彙總"
+    assert set(s["折數"]) == {2}, "每組參數在每折都應被評估"
+    assert {"排名中位數", "排名最差"} <= set(s.columns)
+    assert set(res["best_params"]) == {"EXIT_INIT_STOP_ATR"}
+    txt = opt.format_rolling(res, list(grid))
+    assert "ROLLING WALK-FORWARD" in txt and "排名穩定度" in txt
+
+
 def test_prepare_data_benchmarks_none_regression(offline_core, synth_market, monkeypatch):
     """回歸：prepare_data 的 `regime.get(s) or ...` DataFrame 布林值問題。"""
     from tests.conftest import make_regime, make_stock, make_vix
