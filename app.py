@@ -993,7 +993,10 @@ session = get_market_session()
 
 # 盤中（PREMARKET/REGULAR/AFTERMARKET）自動刷新：每 MARKET_CACHE_TTL 秒重跑，
 # 配合行情 TTL 快取自然到期重抓，讓 NAV／報價／訊號不再凍結在進程啟動當下。
-if st_autorefresh is not None and session != "CLOSED":
+# pause_refresh（回測分頁控制）為 True 時跳過：自動重跑會中斷執行中的
+# 回測／walk-forward 長任務（大宇宙一跑數分鐘，被 rerun 打斷就永遠跑不完）。
+if (st_autorefresh is not None and session != "CLOSED"
+        and not st.session_state.get("pause_refresh")):
     st_autorefresh(interval=MARKET_CACHE_TTL * 1000, key="market_refresh")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2106,6 +2109,33 @@ with tab8:
     st.caption("逐日回放你現行的進出場邏輯於歷史資料，對標買進持有 SOXX/SPY。"
                "資料來自 yfinance（約 2 年），含分割/財報等近似限制，結果為研究參考、非未來保證。")
 
+    # ── 長任務 vs 盤中自動刷新 ────────────────────────────────────────────
+    # 盤中 App 每 MARKET_CACHE_TTL 秒自動重跑更新報價；超過該時間的長任務
+    # （大宇宙回測、walk-forward 多組掃描）會被 rerun 中斷而永遠跑不完。
+    # 按下執行按鈕會自動開啟暫停；任務完成後可取消勾選恢復即時報價。
+    def _pause_auto_refresh():
+        st.session_state["pause_refresh"] = True
+
+    _pause_on = st.checkbox(
+        "⏸ 暫停盤中自動刷新（跑回測／最佳化長任務時必開；按執行鈕會自動開啟）",
+        key="pause_refresh",
+        help=f"盤中 App 每 {MARKET_CACHE_TTL} 秒自動重跑以更新報價，會中斷執行中的長任務。"
+             "暫停期間報價/NAV 不會自動更新；任務跑完後取消勾選即可恢復。",
+    )
+    if _pause_on and session != "CLOSED":
+        st.caption("🔕 已暫停自動刷新：盤中報價/NAV 暫不更新，長任務不會被中斷。")
+
+    def _get_prepared(_universe):
+        """抓齊回測所需資料並存於 session_state；同宇宙重複執行（含接著跑最佳化）直接重用，
+        不重新下載。大宇宙（~90 檔）下載一次數分鐘，重用是最佳化能跑完的關鍵之一。"""
+        _key = tuple(sorted(_universe))
+        _prep = st.session_state.get("bt_prepared")
+        if _prep and _prep.get("key") == _key:
+            return _prep["data"], _prep["regime"], _prep["bench"]
+        _d, _r, _b = opt.prepare_data(_universe)
+        st.session_state["bt_prepared"] = {"key": _key, "data": _d, "regime": _r, "bench": _b}
+        return _d, _r, _b
+
     _bt_holdings = [p["Ticker"] for p in portfolio]
     _bt_watch = (watchlist_df[watchlist_df["Enabled"]]["Ticker"].tolist()
                  if (watchlist_df is not None and not watchlist_df.empty) else [])
@@ -2125,8 +2155,9 @@ with tab8:
         _bt_universe = [normalize_ticker(t) for t in _custom.split(",") if t.strip()]
     elif _uni_choice == "半導體宇宙":
         _bt_universe = list(US_SEMI_UNIVERSE)
-        st.warning(f"⚠️ 半導體宇宙 {len(_bt_universe)} 檔，App 內即時抓取需數分鐘、可能卡頓；"
-                   f"大宇宙建議改用命令列 `python backtest.py --universe semi`。")
+        st.warning(f"⚠️ 半導體宇宙 {len(_bt_universe)} 檔，首次抓取需數分鐘（之後同宇宙的回測／"
+                   f"最佳化會重用已下載資料）。執行期間會自動暫停盤中刷新以免長任務被中斷；"
+                   f"更大規模掃描仍建議命令列 `python backtest.py --universe semi`。")
     else:
         _bt_universe = _bt_default_universe
         if not _bt_universe:
@@ -2136,12 +2167,20 @@ with tab8:
     _bt_start = ((pd.Timestamp.now() - pd.Timedelta(days=_period_days)).strftime("%Y-%m-%d")
                  if _period_days else None)
 
+    # 兩段式執行：按鈕先自動開啟暫停並快速結束本輪（讓前端移除既有的自動刷新計時器，
+    # 否則上一輪殘留的計時器仍可能在長任務中途觸發 rerun），下一輪才真正跑長任務。
     if st.button("🚀 執行回測", use_container_width=True, type="primary",
-                 key="run_bt", disabled=not _bt_universe):
+                 key="run_bt", disabled=not _bt_universe, on_click=_pause_auto_refresh):
+        st.session_state["bt_pending"] = True
+        st.rerun()
+
+    if st.session_state.pop("bt_pending", False) and _bt_universe:
         with st.spinner(f"回測 {len(_bt_universe)} 檔中（首次抓歷史資料較久）…"):
             try:
+                _data, _regime, _bench2 = _get_prepared(_bt_universe)
                 st.session_state["bt_result"] = bt.run_backtest(
-                    tickers=_bt_universe, start=_bt_start, initial_capital=float(_bt_capital))
+                    start=_bt_start, initial_capital=float(_bt_capital),
+                    data=_data, regime_frames=_regime, benchmarks=_bench2)
                 st.session_state["bt_universe_n"] = len(_bt_universe)
             except Exception as _e:
                 st.session_state["bt_result"] = None
@@ -2227,10 +2266,18 @@ with tab8:
     _pure_trail = st.checkbox("純移動停損（關閉分批 TP）", value=False, key="wf_pure_trail")
 
     if st.button("🧪 執行 walk-forward 掃描", use_container_width=True,
-                 key="run_wf", disabled=not _bt_universe):
-        with st.spinner("多組參數回測中（比單次回測更久）…"):
+                 key="run_wf", disabled=not _bt_universe, on_click=_pause_auto_refresh):
+        st.session_state["wf_pending"] = True
+        st.rerun()
+
+    if st.session_state.pop("wf_pending", False) and _bt_universe:
+        _n_combos = 1
+        for _vs in opt.STUDIES[_study].values():
+            _n_combos *= len(_vs)
+        with st.spinner(f"walk-forward：{_n_combos} 組 × 2 段回測（{len(_bt_universe)} 檔）"
+                        f"，宇宙越大越久，請勿切換分頁…"):
             try:
-                _data, _regime, _bench2 = opt.prepare_data(_bt_universe)
+                _data, _regime, _bench2 = _get_prepared(_bt_universe)   # 重用已抓資料，不重新下載
                 _extra = dict(opt.PURE_TRAIL_OVERRIDE) if _pure_trail else None
                 st.session_state["wf_result"] = opt.walk_forward(
                     opt.STUDIES[_study], _data, _regime, _bench2,
