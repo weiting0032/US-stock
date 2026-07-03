@@ -90,6 +90,21 @@ optimize.py / App 回測分頁   ──▶  找到候選參數（看「訓練段
 | `TG_TOKEN` / `TG_CHAT_ID` | Telegram 推播 |
 | `INITIAL_CAPITAL` | 初始本金（預設 32000） |
 
+## 本機疑難排解
+
+**`curl: (60) SSL certificate problem: unable to get local issuer certificate`**
+（公司網路常見；症狀時好時壞——辦公室/VPN 失敗、家用正常）：公司 TLS 檢查代理
+用企業 CA 重簽 HTTPS，yfinance（curl_cffi）的 certifi 不認得。執行一次：
+
+```powershell
+python fix_ssl.py --persist
+```
+
+會把 Windows 憑證庫（含企業 CA）與 certifi 合併成 `~\.us-stock\ca-bundle.pem`，
+並設定使用者環境變數（新終端機生效）。合併檔為超集，公司/乾淨網路皆可用；
+certifi 升級後重跑一次即可。還原：把 `CURL_CA_BUNDLE`、`REQUESTS_CA_BUNDLE`、
+`SSL_CERT_FILE` 三個使用者環境變數刪除。
+
 ## 免責
 
 本系統僅供研究與輔助參考，不構成投資建議。回測結果基於有限歷史（yfinance 約 2 年）且含近似假設，不代表未來績效。

@@ -7,3 +7,7 @@ venv/
 
 # OS
 .DS_Store
+real_validation_log.txt
+close.csv
+nextopen.csv
+grace_rolling.csv
